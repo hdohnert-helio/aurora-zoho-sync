@@ -187,5 +187,6 @@ async def aurora_webhook(request: Request):
     snapshot_create_response = create_snapshot(snapshot_data, access_token)
 
     print("Snapshot create status:", snapshot_create_response.status_code)
+    print("Snapshot create response:", snapshot_create_response.text)
 
     return {"status": "processed"}
