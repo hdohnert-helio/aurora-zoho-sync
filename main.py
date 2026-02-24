@@ -99,7 +99,7 @@ def get_designs(project_id: str):
         "Content-Type": "application/json"
     }
 
-    url = f"https://api.aurorasolar.com/tenants/{tenant_id}/designs?project_id={project_id}"
+    url = f"https://api.aurorasolar.com/tenants/{tenant_id}/projects/{project_id}/designs"
 
     response = requests.get(url, headers=headers)
 
