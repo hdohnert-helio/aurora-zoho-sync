@@ -168,9 +168,8 @@ def process_milestone_event(params):
 # ============================================================
 # AURORA WEBHOOK ENDPOINT
 # ============================================================
-
 @app.api_route("/webhook/aurora", methods=["GET", "POST"])
-async def aurora_webhook(request: Request, background_tasks: BackgroundTasks):
+async def aurora_webhook(request: Request):
 
     expected_secret = os.getenv("AURORA_WEBHOOK_SECRET")
     received_secret = request.headers.get("X-Aurora-Webhook-Secret")
@@ -183,6 +182,30 @@ async def aurora_webhook(request: Request, background_tasks: BackgroundTasks):
     print("Webhook received:")
     print(params)
 
-    background_tasks.add_task(process_milestone_event, params)
+    try:
+        print("Processing milestone event...")
+
+        project_id = params.get("project_id")
+        design_id = params.get("design_id")
+
+        print(f"Project ID: {project_id}")
+        print(f"Design ID: {design_id}")
+
+        tenant_id = os.getenv("AURORA_TENANT_ID")
+
+        # Pull design
+        design_url = f"https://api.aurorasolar.com/tenants/{tenant_id}/designs/{design_id}"
+        design_response = requests.get(design_url, headers=aurora_headers())
+
+        print("Design pull status:", design_response.status_code)
+
+        # Pull pricing
+        pricing_url = f"https://api.aurorasolar.com/tenants/{tenant_id}/designs/{design_id}/pricing"
+        pricing_response = requests.get(pricing_url, headers=aurora_headers())
+
+        print("Pricing pull status:", pricing_response.status_code)
+
+    except Exception as e:
+        print("ERROR processing webhook:", str(e))
 
     return {"status": "accepted"}
