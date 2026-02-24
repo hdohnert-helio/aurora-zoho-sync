@@ -125,3 +125,21 @@ def get_design(design_id: str):
         "status_code": response.status_code,
         "response": response.json()
     }
+
+@app.get("/aurora/design/{design_id}/pricing")
+def get_design_pricing(design_id: str):
+    tenant_id = os.getenv("AURORA_TENANT_ID")
+
+    headers = {
+        "Authorization": f"Bearer {os.getenv('AURORA_API_KEY')}",
+        "Content-Type": "application/json"
+    }
+
+    url = f"https://api.aurorasolar.com/tenants/{tenant_id}/designs/{design_id}/pricing"
+
+    response = requests.get(url, headers=headers)
+
+    return {
+        "status_code": response.status_code,
+        "response": response.json()
+    }
