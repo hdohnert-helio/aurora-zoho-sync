@@ -112,7 +112,7 @@ async def aurora_webhook(request: Request):
     print("Project ID:", project_id)
     print("Design ID:", design_id)
 
-    # Pull design + pricing
+    # Pull Aurora data
     design_response = pull_design(design_id)
     pricing_response = pull_pricing(design_id)
 
@@ -123,13 +123,14 @@ async def aurora_webhook(request: Request):
         return {"status": "failed - aurora pull error"}
 
     design_json = design_response.json().get("design", {})
-    pricing_json = pricing_response.json().get("pricing", {})
+    pricing_json = pricing_response.json()
 
-    # Extract normalized financial fields
+    # ------------------------
+    # Extract Milestone Data
+    # ------------------------
     milestone = design_json.get("milestone", {})
     milestone_name = milestone.get("milestone")
 
-    # ---- FIX 1: Normalize Aurora milestone datetime ----
     milestone_time_raw = milestone.get("recorded_at")
 
     if milestone_time_raw:
@@ -139,23 +140,40 @@ async def aurora_webhook(request: Request):
     else:
         milestone_time = None
 
+    # ------------------------
+    # Extract Pricing Data
+    # ------------------------
     system_size = design_json.get("system_size_stc")
     price_per_watt = pricing_json.get("price_per_watt")
-
-    base_price = next(
-        (item["item_price"] for item in pricing_json.get("system_price_breakdown", [])
-         if item["item_type"] == "base_price"),
-        None
-    )
-
     final_price = pricing_json.get("system_price")
 
-    # Get Zoho access token
+    breakdown = pricing_json.get("system_price_breakdown", [])
+
+    base_price = 0
+    total_adders = 0
+    total_discounts = 0
+
+    for item in breakdown:
+        item_type = item.get("item_type")
+        item_price = item.get("item_price", 0)
+
+        if item_type == "base_price":
+            base_price = item_price
+        elif item_type == "adders":
+            total_adders = item_price
+        elif item_type == "discounts":
+            total_discounts = item_price
+
+    # ------------------------
+    # Zoho Token
+    # ------------------------
     access_token = get_zoho_access_token()
     if not access_token:
         return {"status": "failed - no zoho token"}
 
+    # ------------------------
     # Find Install
+    # ------------------------
     install_response = find_install(project_id, access_token)
 
     if install_response.status_code != 200:
@@ -171,7 +189,9 @@ async def aurora_webhook(request: Request):
     opportunity = install_record.get("Opportunity")
     deal_id = opportunity.get("id") if opportunity else None
 
-    # ---- FIX 2: Proper ISO datetime with timezone ----
+    # ------------------------
+    # Snapshot Creation
+    # ------------------------
     timestamp_now = datetime.datetime.now().astimezone().replace(microsecond=0).isoformat()
 
     snapshot_name = f"{project_id[:8]} | {design_id[:8]} | {milestone_name} | {timestamp_now}"
@@ -186,6 +206,8 @@ async def aurora_webhook(request: Request):
         "System_Size_STC_Watts": system_size,
         "Price_Per_Watt": price_per_watt,
         "Base_Price": base_price,
+        "Total_Adders": total_adders,
+        "Total_Discounts": total_discounts,
         "Final_System_Price": final_price,
         "Install": install_id,
         "Deal": deal_id,
