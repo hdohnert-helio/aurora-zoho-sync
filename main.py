@@ -1,22 +1,22 @@
-from fastapi import FastAPI, Request, BackgroundTasks, HTTPException
+from fastapi import FastAPI, Request, HTTPException
 import os
 import requests
+import datetime
+import json
 
 app = FastAPI()
 
-# ============================================================
-# HEALTH CHECK
-# ============================================================
-
+# ------------------------
+# Health Check
+# ------------------------
 @app.get("/")
 def health_check():
     return {"status": "Aurora-Zoho Sync Service Running"}
 
 
-# ============================================================
-# ZOHO AUTH + TEST
-# ============================================================
-
+# ------------------------
+# Get Zoho Access Token
+# ------------------------
 def get_zoho_access_token():
     url = "https://accounts.zoho.com/oauth/v2/token"
     payload = {
@@ -27,37 +27,12 @@ def get_zoho_access_token():
     }
 
     response = requests.post(url, data=payload)
-    response_json = response.json()
-
-    return response_json.get("access_token")
+    return response.json().get("access_token")
 
 
-@app.get("/zoho/test")
-def test_zoho():
-    access_token = get_zoho_access_token()
-
-    if not access_token:
-        return {"error": "Failed to get access token"}
-
-    headers = {
-        "Authorization": f"Zoho-oauthtoken {access_token}"
-    }
-
-    api_domain = os.getenv("ZOHO_API_DOMAIN")
-    url = f"{api_domain}/crm/v2/Leads?per_page=1"
-
-    response = requests.get(url, headers=headers)
-
-    return {
-        "status_code": response.status_code,
-        "response": response.json()
-    }
-
-
-# ============================================================
-# AURORA HELPERS
-# ============================================================
-
+# ------------------------
+# Aurora API Helpers
+# ------------------------
 def aurora_headers():
     return {
         "Authorization": f"Bearer {os.getenv('AURORA_API_KEY')}",
@@ -65,112 +40,59 @@ def aurora_headers():
     }
 
 
-# ============================================================
-# AURORA TEST ENDPOINTS
-# ============================================================
-
-@app.get("/aurora/test")
-def test_aurora():
-    tenant_id = os.getenv("AURORA_TENANT_ID")
-    url = f"https://api.aurorasolar.com/tenants/{tenant_id}/projects"
-
-    response = requests.get(url, headers=aurora_headers())
-
-    return {
-        "status_code": response.status_code,
-        "response": response.json()
-    }
-
-
-@app.get("/aurora/project/{project_id}")
-def get_project(project_id: str):
-    tenant_id = os.getenv("AURORA_TENANT_ID")
-    url = f"https://api.aurorasolar.com/tenants/{tenant_id}/projects/{project_id}"
-
-    response = requests.get(url, headers=aurora_headers())
-
-    return {
-        "status_code": response.status_code,
-        "response": response.json()
-    }
-
-
-@app.get("/aurora/design/{design_id}")
-def get_design(design_id: str):
+def pull_design(design_id):
     tenant_id = os.getenv("AURORA_TENANT_ID")
     url = f"https://api.aurorasolar.com/tenants/{tenant_id}/designs/{design_id}"
-
-    response = requests.get(url, headers=aurora_headers())
-
-    return {
-        "status_code": response.status_code,
-        "response": response.json()
-    }
+    return requests.get(url, headers=aurora_headers())
 
 
-@app.get("/aurora/design/{design_id}/pricing")
-def get_design_pricing(design_id: str):
+def pull_pricing(design_id):
     tenant_id = os.getenv("AURORA_TENANT_ID")
     url = f"https://api.aurorasolar.com/tenants/{tenant_id}/designs/{design_id}/pricing"
+    return requests.get(url, headers=aurora_headers())
 
-    response = requests.get(url, headers=aurora_headers())
 
-    return {
-        "status_code": response.status_code,
-        "response": response.json()
+# ------------------------
+# Find Install by Aurora Project ID
+# ------------------------
+def find_install(project_id, access_token):
+    headers = {
+        "Authorization": f"Zoho-oauthtoken {access_token}"
     }
 
+    api_domain = os.getenv("ZOHO_API_DOMAIN")
 
-# ============================================================
-# BACKGROUND PROCESSOR
-# ============================================================
+    url = f"{api_domain}/crm/v2/Installs/search?criteria=(Aurora_Project_ID:equals:{project_id})"
 
-def process_milestone_event(params):
-    try:
-        print("Processing milestone event...")
-
-        project_id = params.get("project_id")
-        design_id = params.get("design_id")
-
-        print(f"Project ID: {project_id}")
-        print(f"Design ID: {design_id}")
-
-        tenant_id = os.getenv("AURORA_TENANT_ID")
-
-        if not tenant_id:
-            print("ERROR: Missing AURORA_TENANT_ID")
-            return
-
-        if not design_id:
-            print("ERROR: Missing design_id")
-            return
-
-        # Pull Design
-        design_url = f"https://api.aurorasolar.com/tenants/{tenant_id}/designs/{design_id}"
-        design_response = requests.get(design_url, headers=aurora_headers())
-
-        print("Design pull status:", design_response.status_code)
-
-        # Pull Pricing
-        pricing_url = f"https://api.aurorasolar.com/tenants/{tenant_id}/designs/{design_id}/pricing"
-        pricing_response = requests.get(pricing_url, headers=aurora_headers())
-
-        print("Pricing pull status:", pricing_response.status_code)
-
-        if pricing_response.status_code == 200:
-            print("Pricing data received successfully.")
-
-    except Exception as e:
-        print("ERROR in process_milestone_event:")
-        print(str(e))
+    response = requests.get(url, headers=headers)
+    return response
 
 
-# ============================================================
-# AURORA WEBHOOK ENDPOINT
-# ============================================================
+# ------------------------
+# Create Snapshot Record
+# ------------------------
+def create_snapshot(snapshot_data, access_token):
+    headers = {
+        "Authorization": f"Zoho-oauthtoken {access_token}"
+    }
+
+    api_domain = os.getenv("ZOHO_API_DOMAIN")
+    url = f"{api_domain}/crm/v2/Aurora_Design_Snapshots"
+
+    payload = {
+        "data": [snapshot_data]
+    }
+
+    return requests.post(url, headers=headers, json=payload)
+
+
+# ------------------------
+# Webhook Endpoint
+# ------------------------
 @app.api_route("/webhook/aurora", methods=["GET", "POST"])
 async def aurora_webhook(request: Request):
 
+    # Validate secret
     expected_secret = os.getenv("AURORA_WEBHOOK_SECRET")
     received_secret = request.headers.get("X-Aurora-Webhook-Secret")
 
@@ -179,33 +101,91 @@ async def aurora_webhook(request: Request):
 
     params = dict(request.query_params)
 
+    project_id = params.get("project_id")
+    design_id = params.get("design_id")
+
     print("Webhook received:")
     print(params)
 
-    try:
-        print("Processing milestone event...")
+    if not project_id or not design_id:
+        return {"status": "ignored - missing ids"}
 
-        project_id = params.get("project_id")
-        design_id = params.get("design_id")
+    print("Processing milestone event...")
+    print("Project ID:", project_id)
+    print("Design ID:", design_id)
 
-        print(f"Project ID: {project_id}")
-        print(f"Design ID: {design_id}")
+    # Pull design
+    design_response = pull_design(design_id)
+    pricing_response = pull_pricing(design_id)
 
-        tenant_id = os.getenv("AURORA_TENANT_ID")
+    print("Design pull status:", design_response.status_code)
+    print("Pricing pull status:", pricing_response.status_code)
 
-        # Pull design
-        design_url = f"https://api.aurorasolar.com/tenants/{tenant_id}/designs/{design_id}"
-        design_response = requests.get(design_url, headers=aurora_headers())
+    if design_response.status_code != 200 or pricing_response.status_code != 200:
+        return {"status": "failed - aurora pull error"}
 
-        print("Design pull status:", design_response.status_code)
+    design_json = design_response.json().get("design", {})
+    pricing_json = pricing_response.json().get("pricing", {})
 
-        # Pull pricing
-        pricing_url = f"https://api.aurorasolar.com/tenants/{tenant_id}/designs/{design_id}/pricing"
-        pricing_response = requests.get(pricing_url, headers=aurora_headers())
+    # Extract normalized financial fields
+    milestone = design_json.get("milestone", {})
+    milestone_name = milestone.get("milestone")
+    milestone_time = milestone.get("recorded_at")
 
-        print("Pricing pull status:", pricing_response.status_code)
+    system_size = design_json.get("system_size_stc")
+    price_per_watt = pricing_json.get("price_per_watt")
+    base_price = next(
+        (item["item_price"] for item in pricing_json.get("system_price_breakdown", [])
+         if item["item_type"] == "base_price"),
+        None
+    )
+    final_price = pricing_json.get("system_price")
 
-    except Exception as e:
-        print("ERROR processing webhook:", str(e))
+    # Get Zoho access token
+    access_token = get_zoho_access_token()
+    if not access_token:
+        return {"status": "failed - no zoho token"}
 
-    return {"status": "accepted"}
+    # Find Install
+    install_response = find_install(project_id, access_token)
+
+    if install_response.status_code != 200:
+        return {"status": "failed - install search error"}
+
+    install_data = install_response.json().get("data")
+    if not install_data:
+        return {"status": "failed - install not found"}
+
+    install_record = install_data[0]
+    install_id = install_record.get("id")
+
+    opportunity = install_record.get("Opportunity")
+    deal_id = opportunity.get("id") if opportunity else None
+
+    # Create Snapshot Name
+    timestamp_now = datetime.datetime.utcnow().isoformat()
+    snapshot_name = f"{project_id[:8]} | {design_id[:8]} | {milestone_name} | {timestamp_now}"
+
+    snapshot_data = {
+        "Snapshot_Name": snapshot_name,
+        "Aurora_Project_ID": project_id,
+        "Aurora_Design_ID": design_id,
+        "Aurora_Milestone": milestone_name,
+        "Milestone_Recorded_At": milestone_time,
+        "Webhook_Received_At": timestamp_now,
+        "System_Size_STC_Watts": system_size,
+        "Price_Per_Watt": price_per_watt,
+        "Base_Price": base_price,
+        "Final_System_Price": final_price,
+        "Install": install_id,
+        "Deal": deal_id,
+        "Raw_Design_JSON": json.dumps(design_json),
+        "Raw_Pricing_JSON": json.dumps(pricing_json),
+        "Processing_Status": "Processed"
+    }
+
+    snapshot_create_response = create_snapshot(snapshot_data, access_token)
+
+    print("Snapshot create status:", snapshot_create_response.status_code)
+
+    return {"status": "processed"}
