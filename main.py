@@ -155,7 +155,7 @@ app = FastAPI()
 # ------------------------
 # Aurora Webhook Endpoint (TEST ONLY)
 # ------------------------
-@app.post("/webhook/aurora")
+@app.api_route("/webhook/aurora", methods=["GET", "POST"])
 async def aurora_webhook(request: Request):
     # Validate header authentication
     expected_secret = os.getenv("AURORA_WEBHOOK_SECRET")
