@@ -1,21 +1,56 @@
 from fastapi import FastAPI
 import os
+import requests
 
 app = FastAPI()
 
+# ------------------------
+# Health Check
+# ------------------------
 @app.get("/")
 def health_check():
     return {"status": "Aurora-Zoho Sync Service Running"}
 
-@app.get("/debug-env")
-def debug_env():
-    return {
-        "all_env_keys": list(os.environ.keys())
+
+# ------------------------
+# Get Zoho Access Token
+# ------------------------
+def get_zoho_access_token():
+    url = "https://accounts.zoho.com/oauth/v2/token"
+    payload = {
+        "grant_type": "refresh_token",
+        "client_id": os.getenv("ZOHO_CLIENT_ID"),
+        "client_secret": os.getenv("ZOHO_CLIENT_SECRET"),
+        "refresh_token": os.getenv("ZOHO_REFRESH_TOKEN")
     }
 
-@app.get("/test-env")
-def test_env():
+    response = requests.post(url, data=payload)
+    response_json = response.json()
+
+    return response_json.get("access_token")
+
+
+# ------------------------
+# Test Zoho Connection
+# ------------------------
+@app.get("/zoho/test")
+def test_zoho():
+    access_token = get_zoho_access_token()
+
+    if not access_token:
+        return {"error": "Failed to get access token"}
+
+    headers = {
+        "Authorization": f"Zoho-oauthtoken {access_token}"
+    }
+
+    # Simple test call: Get current user info
+    api_domain = os.getenv("ZOHO_API_DOMAIN")
+    url = f"{api_domain}/crm/v2/users?type=CurrentUser"
+
+    response = requests.get(url, headers=headers)
+
     return {
-        "zoho_client_id_exists": os.getenv("ZOHO_CLIENT_ID"),
-        "aurora_api_key_exists": os.getenv("AURORA_API_KEY")
+        "status_code": response.status_code,
+        "response": response.json()
     }
