@@ -125,6 +125,17 @@ async def aurora_webhook(request: Request):
 
     design_root = design_response.json()
     design_json = design_root.get("design", design_root)
+    print("----- DESIGN JSON DEBUG -----")
+    print("Top Level Keys:", list(design_json.keys()))
+
+    print("system_size_stc:", design_json.get("system_size_stc"))
+    print("system_size:", design_json.get("system_size"))
+    print("system_size_kw:", design_json.get("system_size_kw"))
+    print("system_size_stc_kw:", design_json.get("system_size_stc_kw"))
+
+    print("Full Design JSON:")
+    print(json.dumps(design_json, indent=2))
+    print("----- END DESIGN DEBUG -----")
 
     pricing_root = pricing_response.json()
     pricing_json = pricing_root.get("pricing", pricing_root)
