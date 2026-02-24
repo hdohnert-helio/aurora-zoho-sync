@@ -123,7 +123,6 @@ async def aurora_webhook(request: Request):
     if design_response.status_code != 200 or pricing_response.status_code != 200:
         return {"status": "failed - aurora pull error"}
 
-    # Handle wrapped responses safely
     design_root = design_response.json()
     design_json = design_root.get("design", design_root)
 
@@ -146,9 +145,13 @@ async def aurora_webhook(request: Request):
         milestone_time = None
 
     # ------------------------
+    # Extract System Size (NO MATH)
+    # ------------------------
+    system_size_watts = float(design_json.get("system_size_stc") or 0)
+
+    # ------------------------
     # Extract Pricing Data
     # ------------------------
-    system_size = design_json.get("system_size_stc")
     price_per_watt = pricing_json.get("price_per_watt")
     final_price = pricing_json.get("system_price")
 
@@ -208,7 +211,7 @@ async def aurora_webhook(request: Request):
         "Aurora_Milestone": milestone_name,
         "Milestone_Recorded_At": milestone_time,
         "Webhook_Received_At": timestamp_now,
-        "System_Size_STC_Watts": system_size,
+        "System_Size_STC_Watts": system_size_watts,
         "Price_Per_Watt": price_per_watt,
         "Base_Price": base_price,
         "Adders_Total": total_adders,
