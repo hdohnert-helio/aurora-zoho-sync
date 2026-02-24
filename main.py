@@ -53,3 +53,22 @@ def test_zoho():
         "status_code": response.status_code,
         "response": response.json()
     }
+# ------------------------
+# Test Aurora Connection
+# ------------------------
+@app.get("/aurora/test")
+def test_aurora():
+    headers = {
+        "Authorization": f"Bearer {os.getenv('AURORA_API_KEY')}",
+        "X-Aurora-Tenant-Id": os.getenv("AURORA_TENANT_ID"),
+        "Content-Type": "application/json"
+    }
+
+    url = "https://api.aurorasolar.com/projects?limit=1"
+
+    response = requests.get(url, headers=headers)
+
+    return {
+        "status_code": response.status_code,
+        "response": response.json()
+    }
