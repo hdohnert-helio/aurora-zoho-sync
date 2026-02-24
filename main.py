@@ -4,17 +4,19 @@ import requests
 
 app = FastAPI()
 
-# ------------------------
-# Health Check
-# ------------------------
+# ============================================================
+# HEALTH CHECK
+# ============================================================
+
 @app.get("/")
 def health_check():
     return {"status": "Aurora-Zoho Sync Service Running"}
 
 
-# ------------------------
-# Get Zoho Access Token
-# ------------------------
+# ============================================================
+# ZOHO AUTH + TEST
+# ============================================================
+
 def get_zoho_access_token():
     url = "https://accounts.zoho.com/oauth/v2/token"
     payload = {
@@ -30,9 +32,6 @@ def get_zoho_access_token():
     return response_json.get("access_token")
 
 
-# ------------------------
-# Test Zoho Connection
-# ------------------------
 @app.get("/zoho/test")
 def test_zoho():
     access_token = get_zoho_access_token()
@@ -55,15 +54,20 @@ def test_zoho():
     }
 
 
-# ------------------------
-# Aurora Test Endpoints
-# ------------------------
+# ============================================================
+# AURORA HELPERS
+# ============================================================
+
 def aurora_headers():
     return {
         "Authorization": f"Bearer {os.getenv('AURORA_API_KEY')}",
         "Content-Type": "application/json"
     }
 
+
+# ============================================================
+# AURORA TEST ENDPOINTS
+# ============================================================
 
 @app.get("/aurora/test")
 def test_aurora():
@@ -117,39 +121,54 @@ def get_design_pricing(design_id: str):
     }
 
 
-# ------------------------
-# Background Processor
-# ------------------------
+# ============================================================
+# BACKGROUND PROCESSOR
+# ============================================================
+
 def process_milestone_event(params):
+    try:
+        print("Processing milestone event...")
 
-    project_id = params.get("project_id")
-    design_id = params.get("design_id")
+        project_id = params.get("project_id")
+        design_id = params.get("design_id")
 
-    print("Processing milestone event...")
-    print(f"Project ID: {project_id}")
-    print(f"Design ID: {design_id}")
+        print(f"Project ID: {project_id}")
+        print(f"Design ID: {design_id}")
 
-    tenant_id = os.getenv("AURORA_TENANT_ID")
+        tenant_id = os.getenv("AURORA_TENANT_ID")
 
-    # Pull design
-    design_url = f"https://api.aurorasolar.com/tenants/{tenant_id}/designs/{design_id}"
-    design_response = requests.get(design_url, headers=aurora_headers())
+        if not tenant_id:
+            print("ERROR: Missing AURORA_TENANT_ID")
+            return
 
-    print("Design pull status:", design_response.status_code)
+        if not design_id:
+            print("ERROR: Missing design_id")
+            return
 
-    # Pull pricing
-    pricing_url = f"https://api.aurorasolar.com/tenants/{tenant_id}/designs/{design_id}/pricing"
-    pricing_response = requests.get(pricing_url, headers=aurora_headers())
+        # Pull Design
+        design_url = f"https://api.aurorasolar.com/tenants/{tenant_id}/designs/{design_id}"
+        design_response = requests.get(design_url, headers=aurora_headers())
 
-    print("Pricing pull status:", pricing_response.status_code)
+        print("Design pull status:", design_response.status_code)
 
-    if pricing_response.status_code == 200:
-        print("Pricing data received.")
+        # Pull Pricing
+        pricing_url = f"https://api.aurorasolar.com/tenants/{tenant_id}/designs/{design_id}/pricing"
+        pricing_response = requests.get(pricing_url, headers=aurora_headers())
+
+        print("Pricing pull status:", pricing_response.status_code)
+
+        if pricing_response.status_code == 200:
+            print("Pricing data received successfully.")
+
+    except Exception as e:
+        print("ERROR in process_milestone_event:")
+        print(str(e))
 
 
-# ------------------------
-# Aurora Webhook Endpoint
-# ------------------------
+# ============================================================
+# AURORA WEBHOOK ENDPOINT
+# ============================================================
+
 @app.api_route("/webhook/aurora", methods=["GET", "POST"])
 async def aurora_webhook(request: Request, background_tasks: BackgroundTasks):
 
