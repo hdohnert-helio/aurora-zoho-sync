@@ -130,7 +130,14 @@ async def aurora_webhook(request: Request):
     # Extract normalized financial fields
     milestone = design_json.get("milestone", {})
     milestone_name = milestone.get("milestone")
-    milestone_time = milestone.get("recorded_at")
+    milestone_time_raw = milestone.get("recorded_at")
+
+    if milestone_time_raw:
+        milestone_time = datetime.datetime.fromisoformat(
+            milestone_time_raw.replace("Z", "+00:00")
+        ).astimezone().replace(microsecond=0).isoformat()
+    else:
+        milestone_time = None
 
     system_size = design_json.get("system_size_stc")
     price_per_watt = pricing_json.get("price_per_watt")
@@ -163,7 +170,7 @@ async def aurora_webhook(request: Request):
     deal_id = opportunity.get("id") if opportunity else None
 
     # Create Snapshot Name
-    timestamp_now = datetime.datetime.utcnow().isoformat()
+    timestamp_now = datetime.datetime.now().astimezone().replace(microsecond=0).isoformat()
     snapshot_name = f"{project_id[:8]} | {design_id[:8]} | {milestone_name} | {timestamp_now}"
 
     snapshot_data = {
