@@ -64,7 +64,7 @@ def test_aurora():
         "Content-Type": "application/json"
     }
 
-    url = "https://api.aurorasolar.com/v2024/projects?limit=1"
+    url = "https://api.aurorasolar.com/v2024.05/designs?limit=1"
 
     response = requests.get(url, headers=headers)
 
