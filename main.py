@@ -143,3 +143,31 @@ def get_design_pricing(design_id: str):
         "status_code": response.status_code,
         "response": response.json()
     }
+
+
+from fastapi import FastAPI, Request, BackgroundTasks, HTTPException
+import os
+import requests
+
+app = FastAPI()
+
+
+# ------------------------
+# Aurora Webhook Endpoint (TEST ONLY)
+# ------------------------
+@app.post("/webhook/aurora")
+async def aurora_webhook(request: Request):
+    # Validate header authentication
+    expected_secret = os.getenv("AURORA_WEBHOOK_SECRET")
+    received_secret = request.headers.get("X-Aurora-Webhook-Secret")
+
+    if received_secret != expected_secret:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    # Capture query parameters
+    params = dict(request.query_params)
+
+    print("Webhook received:")
+    print(params)
+
+    return {"status": "accepted"}
