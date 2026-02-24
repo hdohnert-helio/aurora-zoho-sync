@@ -177,7 +177,7 @@ async def aurora_webhook(request: Request):
     snapshot_name = f"{project_id[:8]} | {design_id[:8]} | {milestone_name} | {timestamp_now}"
 
     snapshot_data = {
-        "Snapshot_Name": snapshot_name,
+        "Name": snapshot_name,
         "Aurora_Project_ID": project_id,
         "Aurora_Design_ID": design_id,
         "Aurora_Milestone": milestone_name,
