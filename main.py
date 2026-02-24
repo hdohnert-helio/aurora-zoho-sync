@@ -123,7 +123,7 @@ async def aurora_webhook(request: Request):
     if design_response.status_code != 200 or pricing_response.status_code != 200:
         return {"status": "failed - aurora pull error"}
 
-    # Handle possible wrapped JSON
+    # Handle wrapped responses safely
     design_root = design_response.json()
     design_json = design_root.get("design", design_root)
 
@@ -154,20 +154,20 @@ async def aurora_webhook(request: Request):
 
     breakdown = pricing_json.get("system_price_breakdown", [])
 
-    base_price = 0
-    total_adders = 0
-    total_discounts = 0
+    base_price = 0.00
+    total_adders = 0.00
+    total_discounts = 0.00
 
     for item in breakdown:
         item_type = item.get("item_type")
-        item_price = item.get("item_price", 0)
+        item_price = float(item.get("item_price", 0) or 0)
 
         if item_type == "base_price":
-            base_price = item_price
+            base_price = round(item_price, 2)
         elif item_type == "adders":
-            total_adders = item_price
+            total_adders = round(item_price, 2)
         elif item_type == "discounts":
-            total_discounts = item_price
+            total_discounts = round(item_price, 2)
 
     # ------------------------
     # Zoho Token
@@ -213,7 +213,7 @@ async def aurora_webhook(request: Request):
         "Base_Price": base_price,
         "Adders_Total": total_adders,
         "Discounts_Total": total_discounts,
-        "Final_System_Price": final_price,
+        "Final_System_Price": round(float(final_price or 0), 2),
         "Install": install_id,
         "Deal": deal_id,
         "Raw_Design_JSON": json.dumps(design_json),
