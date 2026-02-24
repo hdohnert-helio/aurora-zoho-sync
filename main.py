@@ -102,8 +102,7 @@ async def aurora_webhook(request: Request):
     project_id = params.get("project_id")
     design_id = params.get("design_id")
 
-    print("Webhook received:")
-    print(params)
+    print("Webhook received:", params)
 
     if not project_id or not design_id:
         return {"status": "ignored - missing ids"}
@@ -112,7 +111,9 @@ async def aurora_webhook(request: Request):
     print("Project ID:", project_id)
     print("Design ID:", design_id)
 
-    # Pull Aurora data
+    # ------------------------
+    # Pull Aurora Data
+    # ------------------------
     design_response = pull_design(design_id)
     pricing_response = pull_pricing(design_id)
 
@@ -122,8 +123,12 @@ async def aurora_webhook(request: Request):
     if design_response.status_code != 200 or pricing_response.status_code != 200:
         return {"status": "failed - aurora pull error"}
 
-    design_json = design_response.json().get("design", {})
-    pricing_json = pricing_response.json()
+    # Handle possible wrapped JSON
+    design_root = design_response.json()
+    design_json = design_root.get("design", design_root)
+
+    pricing_root = pricing_response.json()
+    pricing_json = pricing_root.get("pricing", pricing_root)
 
     # ------------------------
     # Extract Milestone Data
@@ -206,8 +211,8 @@ async def aurora_webhook(request: Request):
         "System_Size_STC_Watts": system_size,
         "Price_Per_Watt": price_per_watt,
         "Base_Price": base_price,
-        "Total_Adders": total_adders,
-        "Total_Discounts": total_discounts,
+        "Adders_Total": total_adders,
+        "Discounts_Total": total_discounts,
         "Final_System_Price": final_price,
         "Install": install_id,
         "Deal": deal_id,
