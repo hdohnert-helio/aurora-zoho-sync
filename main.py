@@ -58,13 +58,14 @@ def test_zoho():
 # ------------------------
 @app.get("/aurora/test")
 def test_aurora():
+    tenant_id = os.getenv("AURORA_TENANT_ID")
+
     headers = {
         "Authorization": f"Bearer {os.getenv('AURORA_API_KEY')}",
-        "X-Aurora-Tenant-Id": os.getenv("AURORA_TENANT_ID"),
         "Content-Type": "application/json"
     }
 
-    url = "https://api.aurorasolar.com/v2024.05/designs?limit=1"
+    url = f"https://api.aurorasolar.com/tenants/{tenant_id}/projects"
 
     response = requests.get(url, headers=headers)
 
