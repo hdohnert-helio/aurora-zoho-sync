@@ -1,4 +1,3 @@
-# auto deploy test
 from fastapi import FastAPI
 import os
 import requests
@@ -45,9 +44,8 @@ def test_zoho():
         "Authorization": f"Zoho-oauthtoken {access_token}"
     }
 
-    # Simple test call: Get current user info
     api_domain = os.getenv("ZOHO_API_DOMAIN")
-    url = f"{api_domain}/crm/v2/users?type=CurrentUser"
+    url = f"{api_domain}/crm/v2/Leads?per_page=1"
 
     response = requests.get(url, headers=headers)
 
