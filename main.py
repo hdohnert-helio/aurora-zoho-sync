@@ -131,19 +131,21 @@ async def aurora_webhook(request: Request):
     pricing_json = pricing_root.get("pricing", pricing_root)
 
     # ------------------------
-    # Extract System Size
+    # Extract System Size (From Pricing Breakdown)
     # ------------------------
     system_size_watts = 0
 
-    # Try direct field first
-    if "system_size_stc" in design_json:
-        system_size_watts = int(float(design_json.get("system_size_stc") or 0))
+    breakdown = pricing_json.get("system_price_breakdown", [])
 
-    # Try layout field if present
-    elif "layout" in design_json and isinstance(design_json["layout"], dict):
-        layout = design_json["layout"]
-        if "system_size_stc" in layout:
-            system_size_watts = int(float(layout.get("system_size_stc") or 0))
+    for item in breakdown:
+        if item.get("item_type") in ["adders", "discounts"]:
+            for sub in item.get("subcomponents", []):
+                quantity = sub.get("quantity")
+                if quantity:
+                    system_size_watts = int(float(quantity))
+                    break
+        if system_size_watts > 0:
+            break
 
     print("Resolved System Size (Watts):", system_size_watts)
 
