@@ -147,7 +147,7 @@ async def aurora_webhook(request: Request):
     # ------------------------
     # Extract System Size (NO MATH)
     # ------------------------
-    system_size_watts = float(design_json.get("system_size_stc") or 0)
+    system_size_watts = int(float(design_json.get("system_size_stc") or 0))
 
     # ------------------------
     # Extract Pricing Data
