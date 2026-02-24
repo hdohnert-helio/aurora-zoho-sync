@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, BackgroundTasks, HTTPException
 import os
 import requests
 
@@ -53,91 +53,63 @@ def test_zoho():
         "status_code": response.status_code,
         "response": response.json()
     }
+
+
 # ------------------------
-# Test Aurora Connection
+# Aurora Test Endpoints
 # ------------------------
+def aurora_headers():
+    return {
+        "Authorization": f"Bearer {os.getenv('AURORA_API_KEY')}",
+        "Content-Type": "application/json"
+    }
+
+
 @app.get("/aurora/test")
 def test_aurora():
     tenant_id = os.getenv("AURORA_TENANT_ID")
-
-    headers = {
-        "Authorization": f"Bearer {os.getenv('AURORA_API_KEY')}",
-        "Content-Type": "application/json"
-    }
-
     url = f"https://api.aurorasolar.com/tenants/{tenant_id}/projects"
 
-    response = requests.get(url, headers=headers)
+    response = requests.get(url, headers=aurora_headers())
 
     return {
         "status_code": response.status_code,
         "response": response.json()
     }
+
+
 @app.get("/aurora/project/{project_id}")
 def get_project(project_id: str):
     tenant_id = os.getenv("AURORA_TENANT_ID")
-
-    headers = {
-        "Authorization": f"Bearer {os.getenv('AURORA_API_KEY')}",
-        "Content-Type": "application/json"
-    }
-
     url = f"https://api.aurorasolar.com/tenants/{tenant_id}/projects/{project_id}"
 
-    response = requests.get(url, headers=headers)
+    response = requests.get(url, headers=aurora_headers())
 
     return {
         "status_code": response.status_code,
         "response": response.json()
     }
-@app.get("/aurora/designs/{project_id}")
-def get_designs(project_id: str):
-    tenant_id = os.getenv("AURORA_TENANT_ID")
 
-    headers = {
-        "Authorization": f"Bearer {os.getenv('AURORA_API_KEY')}",
-        "Content-Type": "application/json"
-    }
-
-    url = f"https://api.aurorasolar.com/tenants/{tenant_id}/projects/{project_id}/designs"
-
-    response = requests.get(url, headers=headers)
-
-    return {
-        "status_code": response.status_code,
-        "response": response.json()
-    }
 
 @app.get("/aurora/design/{design_id}")
 def get_design(design_id: str):
     tenant_id = os.getenv("AURORA_TENANT_ID")
-
-    headers = {
-        "Authorization": f"Bearer {os.getenv('AURORA_API_KEY')}",
-        "Content-Type": "application/json"
-    }
-
     url = f"https://api.aurorasolar.com/tenants/{tenant_id}/designs/{design_id}"
 
-    response = requests.get(url, headers=headers)
+    response = requests.get(url, headers=aurora_headers())
 
     return {
         "status_code": response.status_code,
         "response": response.json()
     }
+
 
 @app.get("/aurora/design/{design_id}/pricing")
 def get_design_pricing(design_id: str):
     tenant_id = os.getenv("AURORA_TENANT_ID")
-
-    headers = {
-        "Authorization": f"Bearer {os.getenv('AURORA_API_KEY')}",
-        "Content-Type": "application/json"
-    }
-
     url = f"https://api.aurorasolar.com/tenants/{tenant_id}/designs/{design_id}/pricing"
 
-    response = requests.get(url, headers=headers)
+    response = requests.get(url, headers=aurora_headers())
 
     return {
         "status_code": response.status_code,
@@ -145,29 +117,53 @@ def get_design_pricing(design_id: str):
     }
 
 
-from fastapi import FastAPI, Request, BackgroundTasks, HTTPException
-import os
-import requests
+# ------------------------
+# Background Processor
+# ------------------------
+def process_milestone_event(params):
 
-app = FastAPI()
+    project_id = params.get("project_id")
+    design_id = params.get("design_id")
+
+    print("Processing milestone event...")
+    print(f"Project ID: {project_id}")
+    print(f"Design ID: {design_id}")
+
+    tenant_id = os.getenv("AURORA_TENANT_ID")
+
+    # Pull design
+    design_url = f"https://api.aurorasolar.com/tenants/{tenant_id}/designs/{design_id}"
+    design_response = requests.get(design_url, headers=aurora_headers())
+
+    print("Design pull status:", design_response.status_code)
+
+    # Pull pricing
+    pricing_url = f"https://api.aurorasolar.com/tenants/{tenant_id}/designs/{design_id}/pricing"
+    pricing_response = requests.get(pricing_url, headers=aurora_headers())
+
+    print("Pricing pull status:", pricing_response.status_code)
+
+    if pricing_response.status_code == 200:
+        print("Pricing data received.")
 
 
 # ------------------------
-# Aurora Webhook Endpoint (TEST ONLY)
+# Aurora Webhook Endpoint
 # ------------------------
 @app.api_route("/webhook/aurora", methods=["GET", "POST"])
-async def aurora_webhook(request: Request):
-    # Validate header authentication
+async def aurora_webhook(request: Request, background_tasks: BackgroundTasks):
+
     expected_secret = os.getenv("AURORA_WEBHOOK_SECRET")
     received_secret = request.headers.get("X-Aurora-Webhook-Secret")
 
     if received_secret != expected_secret:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
-    # Capture query parameters
     params = dict(request.query_params)
 
     print("Webhook received:")
     print(params)
+
+    background_tasks.add_task(process_milestone_event, params)
 
     return {"status": "accepted"}
