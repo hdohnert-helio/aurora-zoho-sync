@@ -42,7 +42,8 @@ def aurora_headers():
 
 def pull_design(design_id):
     tenant_id = os.getenv("AURORA_TENANT_ID")
-    url = f"https://api.aurorasolar.com/tenants/{tenant_id}/designs/{design_id}"
+    # IMPORTANT: include_layout=true to get full design details
+    url = f"https://api.aurorasolar.com/tenants/{tenant_id}/designs/{design_id}?include_layout=true"
     return requests.get(url, headers=aurora_headers())
 
 
@@ -125,20 +126,26 @@ async def aurora_webhook(request: Request):
 
     design_root = design_response.json()
     design_json = design_root.get("design", design_root)
-    print("----- DESIGN JSON DEBUG -----")
-    print("Top Level Keys:", list(design_json.keys()))
-
-    print("system_size_stc:", design_json.get("system_size_stc"))
-    print("system_size:", design_json.get("system_size"))
-    print("system_size_kw:", design_json.get("system_size_kw"))
-    print("system_size_stc_kw:", design_json.get("system_size_stc_kw"))
-
-    print("Full Design JSON:")
-    print(json.dumps(design_json, indent=2))
-    print("----- END DESIGN DEBUG -----")
 
     pricing_root = pricing_response.json()
     pricing_json = pricing_root.get("pricing", pricing_root)
+
+    # ------------------------
+    # Extract System Size
+    # ------------------------
+    system_size_watts = 0
+
+    # Try direct field first
+    if "system_size_stc" in design_json:
+        system_size_watts = int(float(design_json.get("system_size_stc") or 0))
+
+    # Try layout field if present
+    elif "layout" in design_json and isinstance(design_json["layout"], dict):
+        layout = design_json["layout"]
+        if "system_size_stc" in layout:
+            system_size_watts = int(float(layout.get("system_size_stc") or 0))
+
+    print("Resolved System Size (Watts):", system_size_watts)
 
     # ------------------------
     # Extract Milestone Data
@@ -154,11 +161,6 @@ async def aurora_webhook(request: Request):
         ).astimezone().replace(microsecond=0).isoformat()
     else:
         milestone_time = None
-
-    # ------------------------
-    # Extract System Size (NO MATH)
-    # ------------------------
-    system_size_watts = int(float(design_json.get("system_size_stc") or 0))
 
     # ------------------------
     # Extract Pricing Data
@@ -215,6 +217,8 @@ async def aurora_webhook(request: Request):
 
     snapshot_name = f"{project_id[:8]} | {design_id[:8]} | {milestone_name} | {timestamp_now}"
 
+    aurora_design_url = f"https://app.aurorasolar.com/projects/{project_id}/designs/{design_id}"
+
     snapshot_data = {
         "Name": snapshot_name,
         "Aurora_Project_ID": project_id,
@@ -230,6 +234,7 @@ async def aurora_webhook(request: Request):
         "Final_System_Price": round(float(final_price or 0), 2),
         "Install": install_id,
         "Deal": deal_id,
+        "Aurora_Design_URL": aurora_design_url,
         "Raw_Design_JSON": json.dumps(design_json),
         "Raw_Pricing_JSON": json.dumps(pricing_json),
         "Processing_Status": "Processed"
