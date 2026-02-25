@@ -286,3 +286,21 @@ def list_financings(design_id: str):
         "status_code": response.status_code,
         "response": response.json()
     }
+
+@app.get("/aurora/design/{design_id}/financing/{financing_id}")
+def get_financing(design_id: str, financing_id: str):
+    tenant_id = os.getenv("AURORA_TENANT_ID")
+
+    headers = {
+        "Authorization": f"Bearer {os.getenv('AURORA_API_KEY')}",
+        "Content-Type": "application/json"
+    }
+
+    url = f"https://api.aurorasolar.com/tenants/{tenant_id}/designs/{design_id}/financings/{financing_id}"
+
+    response = requests.get(url, headers=headers)
+
+    return {
+        "status_code": response.status_code,
+        "response": response.json()
+    }
