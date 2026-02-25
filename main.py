@@ -304,3 +304,74 @@ def get_financing(design_id: str, financing_id: str):
         "status_code": response.status_code,
         "response": response.json()
     }
+
+# ------------------------
+# One-Time Backfill Aurora Project IDs
+# ------------------------
+@app.get("/backfill/aurora-project-ids")
+def backfill_aurora_project_ids():
+    access_token = get_zoho_access_token()
+
+    if not access_token:
+        return {"error": "Failed to get Zoho access token"}
+
+    headers = {
+        "Authorization": f"Zoho-oauthtoken {access_token}"
+    }
+
+    api_domain = os.getenv("ZOHO_API_DOMAIN")
+
+    page = 1
+    updated_records = []
+
+    while True:
+        url = f"{api_domain}/crm/v2/Installs?per_page=200&page={page}"
+        response = requests.get(url, headers=headers)
+        data = response.json()
+
+        records = data.get("data", [])
+
+        if not records:
+            break
+
+        for record in records:
+            record_id = record.get("id")
+            aurora_link = record.get("Aurora_Project_Link")
+            existing_project_id = record.get("Aurora_Project_ID")
+
+            # Only update if blank and link exists
+            if aurora_link and not existing_project_id:
+                try:
+                    # Extract project ID from URL
+                    project_id = aurora_link.split("/projects/")[1].split("/")[0]
+
+                    update_payload = {
+                        "data": [
+                            {
+                                "id": record_id,
+                                "Aurora_Project_ID": project_id
+                            }
+                        ]
+                    }
+
+                    update_url = f"{api_domain}/crm/v2/Installs"
+                    update_response = requests.put(update_url, headers=headers, json=update_payload)
+
+                    updated_records.append({
+                        "record_id": record_id,
+                        "project_id": project_id,
+                        "status": update_response.status_code
+                    })
+
+                except Exception as e:
+                    print(f"Error processing record {record_id}: {e}")
+
+        if not data.get("info", {}).get("more_records"):
+            break
+
+        page += 1
+
+    return {
+        "updated_count": len(updated_records),
+        "details": updated_records
+    }
