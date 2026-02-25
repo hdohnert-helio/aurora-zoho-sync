@@ -268,3 +268,21 @@ async def aurora_webhook(request: Request):
     print("Snapshot create response:", snapshot_create_response.text)
 
     return {"status": "processed"}
+
+@app.get("/aurora/design/{design_id}/financings")
+def list_financings(design_id: str):
+    tenant_id = os.getenv("AURORA_TENANT_ID")
+
+    headers = {
+        "Authorization": f"Bearer {os.getenv('AURORA_API_KEY')}",
+        "Content-Type": "application/json"
+    }
+
+    url = f"https://api.aurorasolar.com/tenants/{tenant_id}/designs/{design_id}/financings"
+
+    response = requests.get(url, headers=headers)
+
+    return {
+        "status_code": response.status_code,
+        "response": response.json()
+    }
