@@ -207,6 +207,60 @@ async def aurora_webhook(request: Request):
             total_discounts = round(item_price, 2)
 
     # ------------------------
+    # Extract Commission-Related Adders
+    # ------------------------
+    consultant_comp_ppw = 0.0
+    helio_lead_fee_ppw = 0.0
+    referral_payout = 0.0
+    es_upline_discount_ppw = 0.0
+    evp_upline_discount_ppw = 0.0
+
+    for adder in pricing_json.get("adders", []):
+        name = (adder.get("adder_name") or "").strip()
+        value = float(adder.get("adder_value") or 0)
+
+        if name == "A - Consultant Comp":
+            consultant_comp_ppw = value
+        elif name == "A - Helio Provided Lead":
+            helio_lead_fee_ppw = value
+        elif name == "A - Referral Payout":
+            referral_payout = value
+        elif name == "A - COMP: ES Upline Discount":
+            es_upline_discount_ppw = value
+        elif name == "A - COMP: EVP Upline Discount":
+            evp_upline_discount_ppw = value
+
+
+    # ------------------------
+    # Extract Equipment Details
+    # ------------------------
+    module_model = None
+    module_count = 0
+    inverter_model = None
+    inverter_count = 0
+    optimizer_count = 0
+
+    for component in pricing_json.get("pricing_by_component", []):
+        component_type = component.get("component_type")
+        name = component.get("name")
+        quantity = component.get("quantity")
+
+        try:
+            qty = int(float(quantity)) if quantity is not None else 0
+        except (TypeError, ValueError):
+            qty = 0
+
+        if component_type == "modules":
+            module_model = name
+            module_count = qty
+        elif component_type == "inverters":
+            inverter_model = name
+            inverter_count = qty
+        elif component_type == "dc_optimizers":
+            optimizer_count = qty
+
+
+    # ------------------------
     # Zoho Token
     # ------------------------
     access_token = get_zoho_access_token()
@@ -252,6 +306,16 @@ async def aurora_webhook(request: Request):
         "Base_Price": base_price,
         "Adders_Total": total_adders,
         "Discounts_Total": total_discounts,
+        "Consultant_Comp_PPW": consultant_comp_ppw,
+        "Helio_Lead_Fee_PPW": helio_lead_fee_ppw,
+        "Referral_Payout": referral_payout,
+        "ES_Upline_Discount_PPW": es_upline_discount_ppw,
+        "EVP_Upline_Discount_PPW": evp_upline_discount_ppw,
+        "Module_Model": module_model,
+        "Module_Count": module_count,
+        "Inverter_Model": inverter_model,
+        "Inverter_Count": inverter_count,
+        "Optimizer_Count": optimizer_count,
         "Final_System_Price": round(float(final_price or 0), 2),
         "Install": install_id,
         "Deal": deal_id,
