@@ -204,6 +204,12 @@ async def aurora_webhook(request: Request):
     price_per_watt = pricing_json.get("price_per_watt")
     final_price = pricing_json.get("system_price")
 
+    gross_price_per_watt = (
+        round(float(final_price) / system_size_watts, 4)
+        if system_size_watts and float(final_price or 0) > 0
+        else 0
+    )
+
     breakdown = pricing_json.get("system_price_breakdown", [])
 
     base_price = 0.00
@@ -356,6 +362,7 @@ async def aurora_webhook(request: Request):
         "Webhook_Received_At": timestamp_now,
         "System_Size_STC_Watts": system_size_watts,
         "Price_Per_Watt": price_per_watt,
+        "Gross_Price_Per_Watt": gross_price_per_watt,
         "Base_Price": base_price,
         "Adders_Total": total_adders,
         "Discounts_Total": total_discounts,
