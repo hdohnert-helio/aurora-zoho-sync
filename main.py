@@ -258,6 +258,28 @@ async def aurora_webhook(request: Request):
         if adder.get("is_discount")
     )
 
+    adder_details = []
+    discount_details = []
+
+    for item in pricing_json.get("system_price_breakdown", []):
+        item_type = item.get("item_type")
+
+        if item_type in ["adders", "discounts"]:
+            for sub in item.get("subcomponents", []):
+                record = {
+                    "name": sub.get("adder_name"),
+                    "quantity": sub.get("quantity"),
+                    "total": sub.get("item_price"),
+                }
+
+                if item_type == "adders":
+                    adder_details.append(record)
+                elif item_type == "discounts":
+                    discount_details.append(record)
+
+    adder_details_json = json.dumps(adder_details)
+    discount_details_json = json.dumps(discount_details)
+
 
     # ------------------------
     # Extract Equipment Details
@@ -339,6 +361,8 @@ async def aurora_webhook(request: Request):
         "Discounts_Total": total_discounts,
         "Adder_Name_List": adder_name_list,
         "Discount_Name_List": discount_name_list,
+        "Adder_Details_JSON": adder_details_json,
+        "Discount_Details_JSON": discount_details_json,
         "Consultant_Comp_PPW": consultant_comp_ppw,
         "Helio_Lead_Fee_PPW": helio_lead_fee_ppw,
         "Referral_Payout": referral_payout,
