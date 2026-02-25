@@ -349,6 +349,7 @@ async def aurora_webhook(request: Request):
     snapshot_name = f"{project_id[:8]} | {design_id[:8]} | {milestone_name} | {timestamp_now}"
 
     aurora_design_url = f"https://app.aurorasolar.com/projects/{project_id}/designs/{design_id}"
+    aurora_project_url = f"https://app.aurorasolar.com/projects/{project_id}"
 
     snapshot_data = {
         "Name": snapshot_name,
@@ -384,6 +385,7 @@ async def aurora_webhook(request: Request):
         "Install": install_id,
         "Deal": deal_id,
         "Aurora_Design_URL": aurora_design_url,
+        "Aurora_Project_URL": aurora_project_url,
         "Raw_Design_JSON": json.dumps(design_json),
         "Raw_Pricing_JSON": json.dumps(pricing_json),
         "Processing_Status": "Processed",
