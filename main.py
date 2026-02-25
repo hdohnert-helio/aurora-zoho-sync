@@ -170,6 +170,7 @@ async def aurora_webhook(request: Request):
     # ------------------------
     milestone = design_json.get("milestone", {})
     milestone_name = milestone.get("milestone")
+    milestone_id = milestone.get("id")
 
     milestone_time_raw = milestone.get("recorded_at")
 
@@ -182,6 +183,20 @@ async def aurora_webhook(request: Request):
         )
     else:
         milestone_time = None
+
+    aurora_design_name = design_json.get("name")
+
+    aurora_created_raw = design_json.get("created_at")
+    if aurora_created_raw:
+        aurora_created_at = (
+            datetime.datetime.fromisoformat(aurora_created_raw.replace("Z", "+00:00"))
+            .astimezone()
+            .replace(microsecond=0)
+            .isoformat()
+        )
+    else:
+        aurora_created_at = None
+
 
     # ------------------------
     # Extract Pricing Data
@@ -229,6 +244,19 @@ async def aurora_webhook(request: Request):
             es_upline_discount_ppw = value
         elif name == "A - COMP: EVP Upline Discount":
             evp_upline_discount_ppw = value
+
+
+    adder_name_list = ", ".join(
+        adder.get("adder_name")
+        for adder in pricing_json.get("adders", [])
+        if not adder.get("is_discount")
+    )
+
+    discount_name_list = ", ".join(
+        adder.get("adder_name")
+        for adder in pricing_json.get("adders", [])
+        if adder.get("is_discount")
+    )
 
 
     # ------------------------
@@ -299,6 +327,9 @@ async def aurora_webhook(request: Request):
         "Aurora_Project_ID": project_id,
         "Aurora_Design_ID": design_id,
         "Aurora_Milestone": milestone_name,
+        "Aurora_Milestone_ID": milestone_id,
+        "Aurora_Design_Name": aurora_design_name,
+        "Aurora_Created_At": aurora_created_at,
         "Milestone_Recorded_At": milestone_time,
         "Webhook_Received_At": timestamp_now,
         "System_Size_STC_Watts": system_size_watts,
@@ -306,6 +337,8 @@ async def aurora_webhook(request: Request):
         "Base_Price": base_price,
         "Adders_Total": total_adders,
         "Discounts_Total": total_discounts,
+        "Adder_Name_List": adder_name_list,
+        "Discount_Name_List": discount_name_list,
         "Consultant_Comp_PPW": consultant_comp_ppw,
         "Helio_Lead_Fee_PPW": helio_lead_fee_ppw,
         "Referral_Payout": referral_payout,
