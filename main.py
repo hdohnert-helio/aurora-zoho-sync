@@ -23,7 +23,7 @@ def get_zoho_access_token():
         "grant_type": "refresh_token",
         "client_id": os.getenv("ZOHO_CLIENT_ID"),
         "client_secret": os.getenv("ZOHO_CLIENT_SECRET"),
-        "refresh_token": os.getenv("ZOHO_REFRESH_TOKEN")
+        "refresh_token": os.getenv("ZOHO_REFRESH_TOKEN"),
     }
 
     response = requests.post(url, data=payload)
@@ -36,13 +36,14 @@ def get_zoho_access_token():
 def aurora_headers():
     return {
         "Authorization": f"Bearer {os.getenv('AURORA_API_KEY')}",
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
     }
 
 
 def pull_design(design_id):
     tenant_id = os.getenv("AURORA_TENANT_ID")
-    # IMPORTANT: include_layout=true to get full design details
+    # Note: include_layout=true may still return a summary object in some tenants,
+    # but we keep it as it can be helpful where supported.
     url = f"https://api.aurorasolar.com/tenants/{tenant_id}/designs/{design_id}?include_layout=true"
     return requests.get(url, headers=aurora_headers())
 
@@ -57,9 +58,7 @@ def pull_pricing(design_id):
 # Find Install by Aurora Project ID
 # ------------------------
 def find_install(project_id, access_token):
-    headers = {
-        "Authorization": f"Zoho-oauthtoken {access_token}"
-    }
+    headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
 
     api_domain = os.getenv("ZOHO_API_DOMAIN")
     url = f"{api_domain}/crm/v2/Installs/search?criteria=(Aurora_Project_ID:equals:{project_id})"
@@ -71,16 +70,12 @@ def find_install(project_id, access_token):
 # Create Snapshot Record
 # ------------------------
 def create_snapshot(snapshot_data, access_token):
-    headers = {
-        "Authorization": f"Zoho-oauthtoken {access_token}"
-    }
+    headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
 
     api_domain = os.getenv("ZOHO_API_DOMAIN")
     url = f"{api_domain}/crm/v2/Aurora_Design_Snapshots"
 
-    payload = {
-        "data": [snapshot_data]
-    }
+    payload = {"data": [snapshot_data]}
 
     return requests.post(url, headers=headers, json=payload)
 
@@ -131,21 +126,43 @@ async def aurora_webhook(request: Request):
     pricing_json = pricing_root.get("pricing", pricing_root)
 
     # ------------------------
-    # Extract System Size (From Pricing Breakdown)
+    # Extract System Size (Robust)
     # ------------------------
     system_size_watts = 0
 
     breakdown = pricing_json.get("system_price_breakdown", [])
 
+    # Prefer authoritative calculation when pricing is "price per watt"
+    pricing_method = (pricing_json.get("pricing_method") or "").strip().lower()
+    ppw = float(pricing_json.get("price_per_watt") or 0)
+
+    base_price_for_size = 0.0
     for item in breakdown:
-        if item.get("item_type") in ["adders", "discounts"]:
-            for sub in item.get("subcomponents", []):
-                quantity = sub.get("quantity")
-                if quantity:
-                    system_size_watts = int(float(quantity))
-                    break
-        if system_size_watts > 0:
+        if item.get("item_type") == "base_price":
+            base_price_for_size = float(item.get("item_price") or 0)
             break
+
+    if ("price per watt" in pricing_method) and ppw > 0 and base_price_for_size > 0:
+        # Example: 40260 / 3.05 = 13200 watts
+        system_size_watts = int(round(base_price_for_size / ppw))
+    else:
+        # Fallback: infer from per-watt adders/discounts quantities (choose the largest)
+        max_qty = 0.0
+        for item in breakdown:
+            if item.get("item_type") in ["adders", "discounts"]:
+                for sub in item.get("subcomponents", []):
+                    qty = sub.get("quantity")
+                    if qty is None:
+                        continue
+                    try:
+                        qty_f = float(qty)
+                    except (TypeError, ValueError):
+                        continue
+                    # Filter out flat-quantity adders (often 1) and small non-size quantities
+                    if qty_f >= 1000 and qty_f > max_qty:
+                        max_qty = qty_f
+        if max_qty > 0:
+            system_size_watts = int(round(max_qty))
 
     print("Resolved System Size (Watts):", system_size_watts)
 
@@ -158,9 +175,12 @@ async def aurora_webhook(request: Request):
     milestone_time_raw = milestone.get("recorded_at")
 
     if milestone_time_raw:
-        milestone_time = datetime.datetime.fromisoformat(
-            milestone_time_raw.replace("Z", "+00:00")
-        ).astimezone().replace(microsecond=0).isoformat()
+        milestone_time = (
+            datetime.datetime.fromisoformat(milestone_time_raw.replace("Z", "+00:00"))
+            .astimezone()
+            .replace(microsecond=0)
+            .isoformat()
+        )
     else:
         milestone_time = None
 
@@ -239,7 +259,7 @@ async def aurora_webhook(request: Request):
         "Aurora_Design_URL": aurora_design_url,
         "Raw_Design_JSON": json.dumps(design_json),
         "Raw_Pricing_JSON": json.dumps(pricing_json),
-        "Processing_Status": "Processed"
+        "Processing_Status": "Processed",
     }
 
     snapshot_create_response = create_snapshot(snapshot_data, access_token)
