@@ -342,6 +342,23 @@ async def aurora_webhook(request: Request):
     deal_id = opportunity.get("id") if opportunity else None
 
     # ------------------------
+    # Pull Sales Org Redline from Install (Formula Field)
+    # ------------------------
+    try:
+        sales_org_redline_ppw = float(install_record.get("Sales_Org_Redline_PPW") or 0)
+    except (TypeError, ValueError):
+        sales_org_redline_ppw = 0.0
+
+    # ------------------------
+    # Calculate Effective Redline At Sale
+    # ------------------------
+    redline_at_sale = (
+        sales_org_redline_ppw
+        + es_upline_discount_ppw
+        + evp_upline_discount_ppw
+    )
+
+    # ------------------------
     # Snapshot Creation
     # ------------------------
     timestamp_now = datetime.datetime.now().astimezone().replace(microsecond=0).isoformat()
@@ -376,6 +393,8 @@ async def aurora_webhook(request: Request):
         "Referral_Payout": referral_payout,
         "ES_Upline_Discount_PPW": es_upline_discount_ppw,
         "EVP_Upline_Discount_PPW": evp_upline_discount_ppw,
+        "Sales_Org_Redline_PPW": sales_org_redline_ppw,
+        "Redline_At_Sale": redline_at_sale,
         "Module_Model": module_model,
         "Module_Count": module_count,
         "Inverter_Model": inverter_model,
