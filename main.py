@@ -315,6 +315,65 @@ async def aurora_webhook(request: Request):
         elif component_type == "dc_optimizers":
             optimizer_count = qty
 
+    # ------------------------
+    # Extract Battery Details
+    # ------------------------
+    battery_model = None
+    battery_count = 0
+    battery_base_price = 0.0
+
+    for component in pricing_json.get("pricing_by_component", []):
+        if component.get("component_type") == "batteries":
+            battery_model = component.get("name")
+            try:
+                battery_count = int(float(component.get("quantity") or 0))
+            except (TypeError, ValueError):
+                battery_count = 0
+            battery_base_price = float(component.get("price") or 0)
+
+    # ------------------------
+    # Extract Incentives
+    # ------------------------
+    solar_incentives_total = 0.0
+    storage_incentives_total = 0.0
+    incentive_names = []
+
+    # Solar incentives (top-level incentives array)
+    for inc in pricing_json.get("incentives", []):
+        name = inc.get("name")
+        amount = float(inc.get("amount") or 0)
+
+        if name:
+            incentive_names.append(name)
+
+        # NOTE: Solar incentives are usually per-watt or percentage-based.
+        # We will NOT calculate dollar conversion here since Aurora has already
+        # applied them in pricing breakdown. We just capture names.
+        # Dollar total comes from breakdown if present.
+
+    # Solar price before incentives
+    solar_price_before_incentives = 0.0
+    for item in pricing_json.get("system_price_breakdown", []):
+        if item.get("item_type") == "discounts":
+            solar_price_before_incentives = float(item.get("cumulative_price") or 0)
+        if item.get("item_type") == "incentives":
+            solar_incentives_total = float(item.get("item_price") or 0)
+
+    # Storage price before incentives
+    storage_price_before_incentives = 0.0
+    for item in pricing_json.get("storage_system_price_breakdown", []):
+        if item.get("item_type") == "discounts":
+            storage_price_before_incentives = float(item.get("cumulative_price") or 0)
+        if item.get("item_type") == "incentives":
+            storage_incentives_total = float(item.get("item_price") or 0)
+
+    incentives_total = solar_incentives_total + storage_incentives_total
+    total_price_before_incentives = (
+        solar_price_before_incentives + storage_price_before_incentives
+    )
+
+    incentive_name_list = ", ".join(incentive_names)
+
 
     # ------------------------
     # Zoho Token
@@ -408,6 +467,16 @@ async def aurora_webhook(request: Request):
         "Raw_Design_JSON": json.dumps(design_json),
         "Raw_Pricing_JSON": json.dumps(pricing_json),
         "Processing_Status": "Processed",
+        "Solar_Incentives_Total": solar_incentives_total,
+        "Storage_Incentives_Total": storage_incentives_total,
+        "Incentives_Total": incentives_total,
+        "Incentive_Name_List": incentive_name_list,
+        "Solar_System_Price_Before_Incentives": solar_price_before_incentives,
+        "Storage_System_Price_Before_Incentives": storage_price_before_incentives,
+        "Total_Price_Before_Incentives": total_price_before_incentives,
+        "Battery_Model": battery_model,
+        "Battery_Count": battery_count,
+        "Battery_Base_Price": battery_base_price,
     }
 
     snapshot_create_response = create_snapshot(snapshot_data, access_token)
