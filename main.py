@@ -181,6 +181,7 @@ async def aurora_webhook(request: Request):
         milestone = design_json.get("milestone", {})
         milestone_name = milestone.get("milestone")
         milestone_id = milestone.get("id")
+        milestone_notes = milestone.get("notes")
 
         milestone_time_raw = milestone.get("recorded_at")
 
@@ -450,6 +451,7 @@ async def aurora_webhook(request: Request):
             "Aurora_Design_ID": design_id,
             "Aurora_Milestone": milestone_name,
             "Aurora_Milestone_ID": milestone_id,
+            "Aurora_Milestone_Notes": milestone_notes,
             "Aurora_Design_Name": aurora_design_name,
             "Aurora_Created_At": aurora_created_at,
             "Milestone_Recorded_At": milestone_time,
