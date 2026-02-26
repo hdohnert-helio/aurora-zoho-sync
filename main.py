@@ -15,7 +15,125 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
+
 app = FastAPI()
+
+# ------------------------
+# Internal: Create Initial Snapshot After Install Creation
+# ------------------------
+@app.post("/internal/create-initial-snapshot")
+async def create_initial_snapshot(request: Request):
+    try:
+        body = await request.json()
+        install_id = body.get("install_id")
+        project_id = body.get("project_id")
+        deal_id = body.get("deal_id")
+
+        if not install_id or not project_id:
+            return {"status": "failed - missing install_id or project_id"}
+
+        access_token = get_zoho_access_token()
+        if not access_token:
+            return {"status": "failed - no zoho token"}
+
+        headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
+        api_domain = os.getenv("ZOHO_API_DOMAIN")
+
+        # Pull Install record
+        install_url = f"{api_domain}/crm/v2/Installs/{install_id}"
+        install_response = requests.get(install_url, headers=headers)
+
+        if install_response.status_code != 200:
+            return {"status": "failed - install lookup error"}
+
+        install_data = install_response.json().get("data", [])[0]
+
+        # If Active Snapshot already exists, do nothing
+        if install_data.get("Active_Snapshot"):
+            return {"status": "skipped - active snapshot already exists"}
+
+        # Pull Aurora designs for project
+        tenant_id = os.getenv("AURORA_TENANT_ID")
+        designs_url = f"https://api.aurorasolar.com/tenants/{tenant_id}/projects/{project_id}/designs"
+        designs_response = requests.get(designs_url, headers=aurora_headers())
+
+        if designs_response.status_code != 200:
+            return {"status": "failed - aurora designs pull error"}
+
+        designs = designs_response.json().get("designs", [])
+
+        sold_designs = [
+            d for d in designs
+            if d.get("milestone", {}).get("milestone") == "sold"
+        ]
+
+        if len(sold_designs) != 1:
+            return {"status": "failed - sold design count invalid"}
+
+        design_id = sold_designs[0].get("id")
+
+        # Pull full design + pricing
+        design_response = pull_design(design_id)
+        pricing_response = pull_pricing(design_id)
+
+        if design_response.status_code != 200 or pricing_response.status_code != 200:
+            return {"status": "failed - aurora design/pricing pull error"}
+
+        design_root = design_response.json()
+        design_json = design_root.get("design", design_root)
+
+        pricing_root = pricing_response.json()
+        pricing_json = pricing_root.get("pricing", pricing_root)
+
+        # Reuse minimal snapshot fields for initial lock
+        milestone = design_json.get("milestone", {})
+        milestone_name = milestone.get("milestone")
+
+        timestamp_now = datetime.datetime.now().astimezone().replace(microsecond=0).isoformat()
+
+        snapshot_name = f"{project_id[:8]} | {design_id[:8]} | INITIAL SOLD | {timestamp_now}"
+
+        snapshot_data = {
+            "Name": snapshot_name,
+            "Aurora_Project_ID": project_id,
+            "Aurora_Design_ID": design_id,
+            "Aurora_Milestone": milestone_name,
+            "Install": install_id,
+            "Deal": deal_id,
+            "Snapshot_Is_Active": True,
+            "Processing_Status": "Initial Locked",
+            "Raw_Design_JSON": json.dumps(design_json),
+            "Raw_Pricing_JSON": json.dumps(pricing_json),
+        }
+
+        snapshot_create_response = create_snapshot(snapshot_data, access_token)
+
+        if snapshot_create_response.status_code not in [200, 201, 202]:
+            return {"status": "failed - snapshot creation error"}
+
+        snapshot_id = snapshot_create_response.json()["data"][0]["details"]["id"]
+
+        # Update Install with Active Snapshot
+        update_payload = {
+            "data": [
+                {
+                    "id": install_id,
+                    "Active_Snapshot": snapshot_id
+                }
+            ]
+        }
+
+        update_url = f"{api_domain}/crm/v2/Installs"
+        update_response = requests.put(update_url, headers=headers, json=update_payload)
+
+        if update_response.status_code not in [200, 202]:
+            return {"status": "failed - install update error"}
+
+        return {"status": "initial snapshot created"}
+
+    except Exception:
+        logger.exception("Unhandled exception in initial snapshot creation")
+        return {"status": "failed - exception"}
 
 # ------------------------
 # Health Check
