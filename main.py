@@ -390,6 +390,7 @@ async def aurora_webhook(request: Request):
         # ------------------------
         access_token = get_zoho_access_token()
         if not access_token:
+            logger.error(f"[{event_id}] Failed to obtain Zoho access token")
             return {"status": "failed - no zoho token"}
 
         # ------------------------
@@ -503,13 +504,13 @@ async def aurora_webhook(request: Request):
                 f"status={snapshot_create_response.status_code} | "
                 f"body={snapshot_create_response.text}"
             )
+            return {"status": "failed - snapshot creation error"}
         else:
             logger.info(
                 f"[{event_id}] Snapshot created successfully | "
                 f"status={snapshot_create_response.status_code}"
             )
-
-        return {"status": "processed"}
+            return {"status": "processed"}
     except Exception:
         logger.exception("Unhandled exception during webhook processing")
         return {"status": "failed - exception"}
