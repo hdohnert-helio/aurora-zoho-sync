@@ -98,8 +98,8 @@ async def create_initial_snapshot(request: Request):
             "Aurora_Project_ID": project_id,
             "Aurora_Design_ID": design_id,
             "Aurora_Milestone": milestone_name,
-            "Install": install_id,
-            "Deal": deal_id,
+            "Install": {"id": install_id},
+            "Deal": {"id": deal_id} if deal_id else None,
             "Snapshot_Is_Active": True,
             "Processing_Status": "Initial Locked",
             "Raw_Design_JSON": json.dumps(design_json),
@@ -118,7 +118,7 @@ async def create_initial_snapshot(request: Request):
             "data": [
                 {
                     "id": install_id,
-                    "Active_Snapshot": snapshot_id
+                    "Active_Snapshot": {"id": snapshot_id}
                 }
             ]
         }
@@ -597,8 +597,8 @@ async def aurora_webhook(request: Request):
             "Inverter_Count": inverter_count,
             "Optimizer_Count": optimizer_count,
             "Final_System_Price": round(float(final_price or 0), 2),
-            "Install": install_id,
-            "Deal": deal_id,
+            "Install": {"id": install_id},
+            "Deal": {"id": deal_id} if deal_id else None,
             "Aurora_Design_URL": aurora_design_url,
             "Aurora_Project_URL": aurora_project_url,
             "Raw_Design_JSON": json.dumps(design_json),
