@@ -527,8 +527,15 @@ async def aurora_webhook(request: Request):
 
         install_data = install_response.json().get("data")
         if not install_data:
-            logger.warning(f"[{event_id}] Install not found for project_id={project_id}")
-            return {"status": "failed - install not found"}
+            # Install doesn't exist yet — expected when a milestone fires before the
+            # Install record is created in Zoho. The initial sold snapshot is handled
+            # by /internal/create-initial-snapshot (triggered on Install creation).
+            # Future milestone webhooks will find the install once it exists.
+            logger.info(
+                f"[{event_id}] Install not yet created for project_id={project_id} | "
+                f"milestone={milestone_name} | skipping"
+            )
+            return {"status": "skipped - install not yet created"}
 
         install_record = install_data[0]
         install_id = install_record.get("id")
