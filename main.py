@@ -158,6 +158,11 @@ async def sync_aurora_users_new_only(request: Request):
         }
         logger.info(f"Pulled {len(aurora_by_email)} Aurora users")
 
+        # Pull Aurora team and partner maps once (id -> name)
+        team_map = get_aurora_team_map()
+        partner_map = get_aurora_partner_map()
+        logger.info(f"Loaded {len(team_map)} Aurora teams, {len(partner_map)} Aurora partners")
+
         # Step 2: Pull all existing Zoho Sales Rep emails (paginated)
         access_token = get_zoho_access_token()
         if not access_token:
@@ -214,8 +219,8 @@ async def sync_aurora_users_new_only(request: Request):
             account_status = detail.get("account_status") or user.get("account_status")
             phone = (detail.get("phone") or "").strip() or None
             role_id = detail.get("role_id")
-            team_ids = ", ".join(detail.get("team_ids") or []) or None
-            partner_ids = ", ".join(detail.get("partner_ids") or []) or None
+            team_names = ", ".join(team_map.get(tid, tid) for tid in (detail.get("team_ids") or [])) or None
+            partner_names = ", ".join(partner_map.get(pid, pid) for pid in (detail.get("partner_ids") or [])) or None
             base_ppw_min = detail.get("base_price_per_watt_min")
 
             full_name = f"{first_name} {last_name}".strip() or email
@@ -227,8 +232,8 @@ async def sync_aurora_users_new_only(request: Request):
                 "Active": is_active,
                 "Aurora_User_ID": user_id,
                 "Aurora_Role_ID": role_id,
-                "Aurora_Team_IDs": team_ids,
-                "Aurora_Partner_IDs": partner_ids,
+                "Aurora_Team_IDs": team_names,
+                "Aurora_Partner_IDs": partner_names,
                 "Aurora_Base_PPW_Min": base_ppw_min,
             }
             if phone:
@@ -271,6 +276,11 @@ async def sync_aurora_users_full(request: Request):
         users = users_response.json().get("users", [])
         logger.info(f"Pulled {len(users)} users from Aurora")
 
+        # Pull Aurora team and partner maps once (id -> name)
+        team_map = get_aurora_team_map()
+        partner_map = get_aurora_partner_map()
+        logger.info(f"Loaded {len(team_map)} Aurora teams, {len(partner_map)} Aurora partners")
+
         access_token = get_zoho_access_token()
         if not access_token:
             return {"status": "failed - no zoho token"}
@@ -308,8 +318,8 @@ async def sync_aurora_users_full(request: Request):
             account_status = detail.get("account_status") or user.get("account_status")
             phone = (detail.get("phone") or "").strip() or None
             role_id = detail.get("role_id")
-            team_ids = ", ".join(detail.get("team_ids") or []) or None
-            partner_ids = ", ".join(detail.get("partner_ids") or []) or None
+            team_names = ", ".join(team_map.get(tid, tid) for tid in (detail.get("team_ids") or [])) or None
+            partner_names = ", ".join(partner_map.get(pid, pid) for pid in (detail.get("partner_ids") or [])) or None
             base_ppw_min = detail.get("base_price_per_watt_min")
 
             full_name = f"{first_name} {last_name}".strip()
@@ -325,8 +335,8 @@ async def sync_aurora_users_full(request: Request):
                 "Active": is_active,
                 "Aurora_User_ID": user_id,
                 "Aurora_Role_ID": role_id,
-                "Aurora_Team_IDs": team_ids,
-                "Aurora_Partner_IDs": partner_ids,
+                "Aurora_Team_IDs": team_names,
+                "Aurora_Partner_IDs": partner_names,
                 "Aurora_Base_PPW_Min": base_ppw_min,
             }
 
@@ -400,6 +410,28 @@ def get_zoho_access_token():
 # ------------------------
 # Aurora API Helpers
 # ------------------------
+def get_aurora_team_map():
+    """Returns a dict of {team_id: team_name} for the tenant."""
+    tenant_id = os.getenv("AURORA_TENANT_ID")
+    url = f"https://api.aurorasolar.com/tenants/{tenant_id}/teams"
+    response = requests.get(url, headers=aurora_headers())
+    if response.status_code != 200:
+        logger.warning(f"Could not fetch Aurora teams | status={response.status_code}")
+        return {}
+    return {t["id"]: t["name"] for t in response.json().get("teams", [])}
+
+
+def get_aurora_partner_map():
+    """Returns a dict of {partner_id: partner_name} for the tenant."""
+    tenant_id = os.getenv("AURORA_TENANT_ID")
+    url = f"https://api.aurorasolar.com/tenants/{tenant_id}/partners"
+    response = requests.get(url, headers=aurora_headers())
+    if response.status_code != 200:
+        logger.warning(f"Could not fetch Aurora partners | status={response.status_code}")
+        return {}
+    return {p["id"]: p["name"] for p in response.json().get("partners", [])}
+
+
 def aurora_headers():
     return {
         "Authorization": f"Bearer {os.getenv('AURORA_API_KEY')}",
