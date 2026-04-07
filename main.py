@@ -302,6 +302,9 @@ async def sync_aurora_users_full(request: Request):
                 logger.warning(f"Could not fetch detail for user {email} | status={user_detail_response.status_code}")
                 detail = {}
 
+            logger.info(f"Aurora detail keys for {email}: {list(detail.keys())}")
+            logger.info(f"Aurora team_ids raw for {email}: {detail.get('team_ids')}")
+
             account_status = detail.get("account_status") or user.get("account_status")
             phone = (detail.get("phone") or "").strip() or None
             role_id = detail.get("role_id")
