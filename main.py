@@ -215,15 +215,21 @@ async def sync_aurora_users(request: Request):
                 existing_id = search_response.json()["data"][0]["id"]
                 record["id"] = existing_id
                 update_url = f"{api_domain}/crm/v2/Sales_Reps"
-                requests.put(update_url, headers=headers, json={"data": [record]})
-                updated += 1
-                logger.info(f"Updated Sales Rep: {full_name} ({email})")
+                update_resp = requests.put(update_url, headers=headers, json={"data": [record]})
+                if update_resp.status_code not in [200, 201, 202]:
+                    logger.error(f"Failed to update {email} | status={update_resp.status_code} | body={update_resp.text}")
+                else:
+                    updated += 1
+                    logger.info(f"Updated Sales Rep: {full_name} ({email})")
             else:
                 # Create new record
                 create_url = f"{api_domain}/crm/v2/Sales_Reps"
-                requests.post(create_url, headers=headers, json={"data": [record]})
-                created += 1
-                logger.info(f"Created Sales Rep: {full_name} ({email})")
+                create_resp = requests.post(create_url, headers=headers, json={"data": [record]})
+                if create_resp.status_code not in [200, 201, 202]:
+                    logger.error(f"Failed to create {email} | status={create_resp.status_code} | body={create_resp.text}")
+                else:
+                    created += 1
+                    logger.info(f"Created Sales Rep: {full_name} ({email})")
 
         return {
             "status": "completed",
