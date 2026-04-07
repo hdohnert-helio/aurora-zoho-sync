@@ -136,10 +136,128 @@ async def create_initial_snapshot(request: Request):
         return {"status": "failed - exception"}
 
 # ------------------------
-# Internal: Sync Aurora Users to Zoho Sales Reps Module
+# Internal: Sync New Aurora Users Only (efficient — skips existing)
 # ------------------------
 @app.post("/internal/sync-aurora-users")
-async def sync_aurora_users(request: Request):
+async def sync_aurora_users_new_only(request: Request):
+    try:
+        tenant_id = os.getenv("AURORA_TENANT_ID")
+
+        # Step 1: Pull all Aurora users
+        users_url = f"https://api.aurorasolar.com/tenants/{tenant_id}/users"
+        users_response = requests.get(users_url, headers=aurora_headers())
+        if users_response.status_code != 200:
+            logger.error(f"Aurora users pull failed | status={users_response.status_code}")
+            return {"status": "failed - aurora users pull error"}
+
+        aurora_users = users_response.json().get("users", [])
+        aurora_by_email = {
+            (u.get("email") or "").strip().lower(): u
+            for u in aurora_users
+            if (u.get("email") or "").strip()
+        }
+        logger.info(f"Pulled {len(aurora_by_email)} Aurora users")
+
+        # Step 2: Pull all existing Zoho Sales Rep emails (paginated)
+        access_token = get_zoho_access_token()
+        if not access_token:
+            return {"status": "failed - no zoho token"}
+
+        api_domain = os.getenv("ZOHO_API_DOMAIN")
+        zoho_headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
+
+        zoho_emails = set()
+        page = 1
+        while True:
+            list_url = f"{api_domain}/crm/v2/Sales_Reps?fields=Email&page={page}&per_page=200"
+            list_response = requests.get(list_url, headers=zoho_headers)
+            if list_response.status_code == 204:
+                break
+            if list_response.status_code != 200:
+                logger.error(f"Zoho Sales Reps list failed | status={list_response.status_code}")
+                return {"status": "failed - zoho list error"}
+            for rec in list_response.json().get("data", []):
+                email = (rec.get("Email") or "").strip().lower()
+                if email:
+                    zoho_emails.add(email)
+            if not list_response.json().get("info", {}).get("more_records"):
+                break
+            page += 1
+
+        logger.info(f"Found {len(zoho_emails)} existing Zoho Sales Reps")
+
+        # Step 3: Only process users not already in Zoho
+        new_emails = set(aurora_by_email.keys()) - zoho_emails
+        if not new_emails:
+            logger.info("No new Aurora users to sync")
+            return {"status": "completed", "new": 0, "failed": 0}
+
+        logger.info(f"Syncing {len(new_emails)} new users")
+
+        created = 0
+        failed = 0
+
+        for email in new_emails:
+            user = aurora_by_email[email]
+            user_id = user.get("id")
+            first_name = (user.get("first_name") or "").strip()
+            last_name = (user.get("last_name") or "").strip()
+
+            user_detail_url = f"https://api.aurorasolar.com/tenants/{tenant_id}/users/{user_id}"
+            user_detail_response = requests.get(user_detail_url, headers=aurora_headers())
+            if user_detail_response.status_code == 200:
+                detail = user_detail_response.json().get("user", {})
+            else:
+                logger.warning(f"Could not fetch detail for {email} | status={user_detail_response.status_code}")
+                detail = {}
+
+            account_status = detail.get("account_status") or user.get("account_status")
+            phone = (detail.get("phone") or "").strip() or None
+            role_id = detail.get("role_id")
+            team_ids = ", ".join(detail.get("team_ids") or []) or None
+            partner_ids = ", ".join(detail.get("partner_ids") or []) or None
+            base_ppw_min = detail.get("base_price_per_watt_min")
+
+            full_name = f"{first_name} {last_name}".strip() or email
+            is_active = account_status == "active"
+
+            record = {
+                "Name": full_name,
+                "Email": email,
+                "Active": is_active,
+                "Aurora_Role_ID": role_id,
+                "Aurora_Team_IDs": team_ids,
+                "Aurora_Partner_IDs": partner_ids,
+                "Aurora_Base_PPW_Min": base_ppw_min,
+            }
+            if phone:
+                record["Phone"] = phone
+
+            create_resp = requests.post(
+                f"{api_domain}/crm/v2/Sales_Reps",
+                headers=zoho_headers,
+                json={"data": [record]},
+            )
+            resp_data = create_resp.json().get("data", [{}])[0] if create_resp.status_code in [200, 201, 202] else {}
+            if create_resp.status_code not in [200, 201, 202] or resp_data.get("code") not in [None, "SUCCESS"]:
+                logger.error(f"Failed to create {email} | status={create_resp.status_code} | body={create_resp.text}")
+                failed += 1
+            else:
+                created += 1
+                logger.info(f"Created Sales Rep: {full_name} ({email})")
+
+        return {"status": "completed", "new": created, "failed": failed}
+
+    except Exception:
+        logger.exception("Unhandled exception in sync-aurora-users")
+        return {"status": "failed - exception"}
+
+
+# ------------------------
+# Internal: Full Sync — Upserts All Aurora Users into Zoho Sales Reps
+# ------------------------
+@app.post("/internal/sync-aurora-users/full")
+async def sync_aurora_users_full(request: Request):
     try:
         tenant_id = os.getenv("AURORA_TENANT_ID")
         users_url = f"https://api.aurorasolar.com/tenants/{tenant_id}/users"
