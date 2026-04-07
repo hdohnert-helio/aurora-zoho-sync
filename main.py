@@ -219,8 +219,12 @@ async def sync_aurora_users_new_only(request: Request):
             account_status = detail.get("account_status") or user.get("account_status")
             phone = (detail.get("phone") or "").strip() or None
             role_id = detail.get("role_id")
-            team_names = ", ".join(team_map.get(tid, tid) for tid in (detail.get("team_ids") or [])) or None
-            partner_names = ", ".join(partner_map.get(pid, pid) for pid in (detail.get("partner_ids") or [])) or None
+            raw_team_ids = detail.get("team_ids") or []
+            raw_partner_ids = detail.get("partner_ids") or []
+            team_ids_str = ", ".join(raw_team_ids) or None
+            team_names = ", ".join(team_map.get(tid, tid) for tid in raw_team_ids) or None
+            partner_ids_str = ", ".join(raw_partner_ids) or None
+            partner_names = ", ".join(partner_map.get(pid, pid) for pid in raw_partner_ids) or None
             base_ppw_min = detail.get("base_price_per_watt_min")
 
             full_name = f"{first_name} {last_name}".strip() or email
@@ -232,8 +236,10 @@ async def sync_aurora_users_new_only(request: Request):
                 "Active": is_active,
                 "Aurora_User_ID": user_id,
                 "Aurora_Role_ID": role_id,
-                "Aurora_Team_IDs": team_names,
-                "Aurora_Partner_IDs": partner_names,
+                "Aurora_Team_IDs": team_ids_str,
+                "Aurora_Team_Names": team_names,
+                "Aurora_Partner_IDs": partner_ids_str,
+                "Aurora_Partner_Names": partner_names,
                 "Aurora_Base_PPW_Min": base_ppw_min,
             }
             if phone:
@@ -318,8 +324,12 @@ async def sync_aurora_users_full(request: Request):
             account_status = detail.get("account_status") or user.get("account_status")
             phone = (detail.get("phone") or "").strip() or None
             role_id = detail.get("role_id")
-            team_names = ", ".join(team_map.get(tid, tid) for tid in (detail.get("team_ids") or [])) or None
-            partner_names = ", ".join(partner_map.get(pid, pid) for pid in (detail.get("partner_ids") or [])) or None
+            raw_team_ids = detail.get("team_ids") or []
+            raw_partner_ids = detail.get("partner_ids") or []
+            team_ids_str = ", ".join(raw_team_ids) or None
+            team_names = ", ".join(team_map.get(tid, tid) for tid in raw_team_ids) or None
+            partner_ids_str = ", ".join(raw_partner_ids) or None
+            partner_names = ", ".join(partner_map.get(pid, pid) for pid in raw_partner_ids) or None
             base_ppw_min = detail.get("base_price_per_watt_min")
 
             full_name = f"{first_name} {last_name}".strip()
@@ -335,8 +345,10 @@ async def sync_aurora_users_full(request: Request):
                 "Active": is_active,
                 "Aurora_User_ID": user_id,
                 "Aurora_Role_ID": role_id,
-                "Aurora_Team_IDs": team_names,
-                "Aurora_Partner_IDs": partner_names,
+                "Aurora_Team_IDs": team_ids_str,
+                "Aurora_Team_Names": team_names,
+                "Aurora_Partner_IDs": partner_ids_str,
+                "Aurora_Partner_Names": partner_names,
                 "Aurora_Base_PPW_Min": base_ppw_min,
             }
 
