@@ -164,14 +164,31 @@ async def sync_aurora_users(request: Request):
         skipped = 0
 
         for user in users:
+            user_id = user.get("id")
             first_name = (user.get("first_name") or "").strip()
             last_name = (user.get("last_name") or "").strip()
             email = (user.get("email") or "").strip()
-            account_status = user.get("account_status")
 
             if not email:
                 skipped += 1
                 continue
+
+            # Fetch full user detail for additional fields
+            user_detail_url = f"https://api.aurorasolar.com/tenants/{tenant_id}/users/{user_id}"
+            user_detail_response = requests.get(user_detail_url, headers=aurora_headers())
+
+            if user_detail_response.status_code == 200:
+                detail = user_detail_response.json().get("user", {})
+            else:
+                logger.warning(f"Could not fetch detail for user {email} | status={user_detail_response.status_code}")
+                detail = {}
+
+            account_status = detail.get("account_status") or user.get("account_status")
+            phone = (detail.get("phone") or "").strip() or None
+            role_id = detail.get("role_id")
+            team_ids = ", ".join(detail.get("team_ids") or []) or None
+            partner_ids = ", ".join(detail.get("partner_ids") or []) or None
+            base_ppw_min = detail.get("base_price_per_watt_min")
 
             full_name = f"{first_name} {last_name}".strip()
             is_active = account_status == "active"
@@ -184,7 +201,14 @@ async def sync_aurora_users(request: Request):
                 "Name": full_name,
                 "Email": email,
                 "Active": is_active,
+                "Aurora_Role_ID": role_id,
+                "Aurora_Team_IDs": team_ids,
+                "Aurora_Partner_IDs": partner_ids,
+                "Aurora_Base_PPW_Min": base_ppw_min,
             }
+
+            if phone:
+                record["Phone"] = phone
 
             if search_response.status_code == 200 and search_response.json().get("data"):
                 # Update existing record
