@@ -136,6 +136,84 @@ async def create_initial_snapshot(request: Request):
         return {"status": "failed - exception"}
 
 # ------------------------
+# Internal: Sync Aurora Users to Zoho Sales Reps Module
+# ------------------------
+@app.post("/internal/sync-aurora-users")
+async def sync_aurora_users(request: Request):
+    try:
+        tenant_id = os.getenv("AURORA_TENANT_ID")
+        users_url = f"https://api.aurorasolar.com/tenants/{tenant_id}/users"
+        users_response = requests.get(users_url, headers=aurora_headers())
+
+        if users_response.status_code != 200:
+            logger.error(f"Aurora users pull failed | status={users_response.status_code}")
+            return {"status": "failed - aurora users pull error"}
+
+        users = users_response.json().get("users", [])
+        logger.info(f"Pulled {len(users)} users from Aurora")
+
+        access_token = get_zoho_access_token()
+        if not access_token:
+            return {"status": "failed - no zoho token"}
+
+        api_domain = os.getenv("ZOHO_API_DOMAIN")
+        headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
+
+        created = 0
+        updated = 0
+        skipped = 0
+
+        for user in users:
+            first_name = (user.get("first_name") or "").strip()
+            last_name = (user.get("last_name") or "").strip()
+            email = (user.get("email") or "").strip()
+            account_status = user.get("account_status")
+
+            if not email:
+                skipped += 1
+                continue
+
+            full_name = f"{first_name} {last_name}".strip()
+            is_active = account_status == "active"
+
+            # Check if Sales Rep already exists by email
+            search_url = f"{api_domain}/crm/v2/CustomModule34/search?criteria=(Email:equals:{email})"
+            search_response = requests.get(search_url, headers=headers)
+
+            record = {
+                "Name": full_name,
+                "Email": email,
+                "Active": is_active,
+            }
+
+            if search_response.status_code == 200 and search_response.json().get("data"):
+                # Update existing record
+                existing_id = search_response.json()["data"][0]["id"]
+                record["id"] = existing_id
+                update_url = f"{api_domain}/crm/v2/CustomModule34"
+                requests.put(update_url, headers=headers, json={"data": [record]})
+                updated += 1
+                logger.info(f"Updated Sales Rep: {full_name} ({email})")
+            else:
+                # Create new record
+                create_url = f"{api_domain}/crm/v2/CustomModule34"
+                requests.post(create_url, headers=headers, json={"data": [record]})
+                created += 1
+                logger.info(f"Created Sales Rep: {full_name} ({email})")
+
+        return {
+            "status": "completed",
+            "created": created,
+            "updated": updated,
+            "skipped": skipped,
+        }
+
+    except Exception:
+        logger.exception("Unhandled exception in sync-aurora-users")
+        return {"status": "failed - exception"}
+
+
+# ------------------------
 # Health Check
 # ------------------------
 @app.get("/")
