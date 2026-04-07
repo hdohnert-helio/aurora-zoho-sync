@@ -453,9 +453,13 @@ def aurora_headers():
 
 def pull_design(design_id):
     tenant_id = os.getenv("AURORA_TENANT_ID")
-    # Note: include_layout=true may still return a summary object in some tenants,
-    # but we keep it as it can be helpful where supported.
     url = f"https://api.aurorasolar.com/tenants/{tenant_id}/designs/{design_id}?include_layout=true"
+    return requests.get(url, headers=aurora_headers())
+
+
+def pull_design_summary(design_id):
+    tenant_id = os.getenv("AURORA_TENANT_ID")
+    url = f"https://api.aurorasolar.com/tenants/{tenant_id}/designs/{design_id}/summary"
     return requests.get(url, headers=aurora_headers())
 
 
@@ -520,6 +524,7 @@ async def aurora_webhook(request: Request):
         # ------------------------
         design_response = pull_design(design_id)
         pricing_response = pull_pricing(design_id)
+        summary_response = pull_design_summary(design_id)
 
         logger.info(f"[{event_id}] Design pull status={design_response.status_code}")
         logger.info(f"[{event_id}] Pricing pull status={pricing_response.status_code}")
@@ -533,6 +538,8 @@ async def aurora_webhook(request: Request):
 
         pricing_root = pricing_response.json()
         pricing_json = pricing_root.get("pricing", pricing_root)
+
+        summary_json = summary_response.json().get("design", {}) if summary_response.status_code == 200 else {}
 
         # ------------------------
         # Extract System Size (Robust)
@@ -700,6 +707,8 @@ async def aurora_webhook(request: Request):
 
         # ------------------------
         # Extract Equipment Details
+        # Primary source: design summary bill_of_materials + string_inverters
+        # Fallback: pricing_by_component, then adder name parsing for TPO
         # ------------------------
         module_model = None
         module_count = 0
@@ -707,32 +716,51 @@ async def aurora_webhook(request: Request):
         inverter_count = 0
         optimizer_count = 0
 
-        for component in pricing_json.get("pricing_by_component", []):
-            component_type = component.get("component_type")
-            name = component.get("name")
-            manufacturer = component.get("manufacturer_name", "")
-            quantity = component.get("quantity")
-
-            try:
-                qty = int(float(quantity)) if quantity is not None else 0
-            except (TypeError, ValueError):
-                qty = 0
+        # Primary: bill_of_materials from design summary
+        for item in summary_json.get("bill_of_materials", []):
+            component_type = item.get("component_type")
+            name = item.get("name")
+            manufacturer = item.get("manufacturer_name", "")
+            qty = int(float(item.get("quantity") or 0))
+            full_name = f"{manufacturer} {name}".strip() if manufacturer else name
 
             if component_type == "modules":
-                module_model = f"{manufacturer} {name}".strip() if manufacturer else name
+                module_model = full_name
                 module_count = qty
             elif component_type in ("inverters", "microinverters", "string_inverters"):
-                inverter_model = f"{manufacturer} {name}".strip() if manufacturer else name
+                inverter_model = full_name
                 inverter_count = qty
             elif component_type == "dc_optimizers":
                 optimizer_count = qty
 
-        # Fallback for TPO projects: parse module model from adders if pricing_by_component is empty
+        # String inverters from summary (separate field)
+        if not inverter_model:
+            for inv in summary_json.get("string_inverters", []):
+                name = inv.get("name")
+                manufacturer = inv.get("manufacturer_name", "")
+                inverter_model = f"{manufacturer} {name}".strip() if manufacturer else name
+                inverter_count = int(float(inv.get("quantity") or 0))
+                break
+
+        # Fallback: pricing_by_component for microinverter models not in BOM
+        if not inverter_model:
+            for component in pricing_json.get("pricing_by_component", []):
+                component_type = component.get("component_type")
+                name = component.get("name")
+                manufacturer = component.get("manufacturer_name", "")
+                qty = int(float(component.get("quantity") or 0))
+                full_name = f"{manufacturer} {name}".strip() if manufacturer else name
+                if component_type in ("inverters", "microinverters", "string_inverters"):
+                    inverter_model = full_name
+                    inverter_count = qty
+                elif component_type == "dc_optimizers" and optimizer_count == 0:
+                    optimizer_count = qty
+
+        # Last resort for TPO: parse module model from adder name
         if not module_model:
             for adder in pricing_json.get("adders", []):
                 adder_name = (adder.get("adder_name") or "").strip()
                 if adder_name.upper().startswith("A. EQUIP:"):
-                    # Strip the "A. EQUIP: " prefix and clean up
                     module_model = adder_name[9:].strip().replace(" (TPO ONLY)", "").replace(" (TPO)", "").strip()
                     break
 
