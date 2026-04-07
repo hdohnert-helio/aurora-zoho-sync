@@ -710,6 +710,7 @@ async def aurora_webhook(request: Request):
         for component in pricing_json.get("pricing_by_component", []):
             component_type = component.get("component_type")
             name = component.get("name")
+            manufacturer = component.get("manufacturer_name", "")
             quantity = component.get("quantity")
 
             try:
@@ -718,13 +719,22 @@ async def aurora_webhook(request: Request):
                 qty = 0
 
             if component_type == "modules":
-                module_model = name
+                module_model = f"{manufacturer} {name}".strip() if manufacturer else name
                 module_count = qty
-            elif component_type == "inverters":
-                inverter_model = name
+            elif component_type in ("inverters", "microinverters", "string_inverters"):
+                inverter_model = f"{manufacturer} {name}".strip() if manufacturer else name
                 inverter_count = qty
             elif component_type == "dc_optimizers":
                 optimizer_count = qty
+
+        # Fallback for TPO projects: parse module model from adders if pricing_by_component is empty
+        if not module_model:
+            for adder in pricing_json.get("adders", []):
+                adder_name = (adder.get("adder_name") or "").strip()
+                if adder_name.upper().startswith("A. EQUIP:"):
+                    # Strip the "A. EQUIP: " prefix and clean up
+                    module_model = adder_name[9:].strip().replace(" (TPO ONLY)", "").replace(" (TPO)", "").strip()
+                    break
 
         # ------------------------
         # Extract Battery Details
