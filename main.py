@@ -194,7 +194,7 @@ async def sync_aurora_users(request: Request):
             is_active = account_status == "active"
 
             # Check if Sales Rep already exists by email
-            search_url = f"{api_domain}/crm/v2/CustomModule34/search?criteria=(Email:equals:{email})"
+            search_url = f"{api_domain}/crm/v2/Sales_Reps/search?criteria=(Email:equals:{email})"
             search_response = requests.get(search_url, headers=headers)
 
             record = {
@@ -214,13 +214,13 @@ async def sync_aurora_users(request: Request):
                 # Update existing record
                 existing_id = search_response.json()["data"][0]["id"]
                 record["id"] = existing_id
-                update_url = f"{api_domain}/crm/v2/CustomModule34"
+                update_url = f"{api_domain}/crm/v2/Sales_Reps"
                 requests.put(update_url, headers=headers, json={"data": [record]})
                 updated += 1
                 logger.info(f"Updated Sales Rep: {full_name} ({email})")
             else:
                 # Create new record
-                create_url = f"{api_domain}/crm/v2/CustomModule34"
+                create_url = f"{api_domain}/crm/v2/Sales_Reps"
                 requests.post(create_url, headers=headers, json={"data": [record]})
                 created += 1
                 logger.info(f"Created Sales Rep: {full_name} ({email})")
