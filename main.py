@@ -72,9 +72,10 @@ async def create_initial_snapshot(request: Request):
 
         design_id = sold_designs[0].get("id")
 
-        # Pull full design + pricing
+        # Pull full design, pricing, and summary
         design_response = pull_design(design_id)
         pricing_response = pull_pricing(design_id)
+        summary_response = pull_design_summary(design_id)
 
         if design_response.status_code != 200 or pricing_response.status_code != 200:
             return {"status": "failed - aurora design/pricing pull error"}
@@ -85,25 +86,29 @@ async def create_initial_snapshot(request: Request):
         pricing_root = pricing_response.json()
         pricing_json = pricing_root.get("pricing", pricing_root)
 
-        # Reuse minimal snapshot fields for initial lock
-        milestone = design_json.get("milestone", {})
-        milestone_name = milestone.get("milestone")
+        summary_json = summary_response.json().get("design", {}) if summary_response.status_code == 200 else {}
 
         timestamp_now = datetime.datetime.now().astimezone().replace(microsecond=0).isoformat()
-
         snapshot_name = f"{project_id[:8]} | {design_id[:8]} | INITIAL SOLD | {timestamp_now}"
+
+        aurora_design_url = f"https://v2.aurorasolar.com/projects/{project_id}/designs/{design_id}/cad"
+        aurora_project_url = f"https://v2.aurorasolar.com/projects/{project_id}/overview/dashboard"
+
+        # Extract all pricing/equipment fields using shared helper
+        pricing_fields = extract_pricing_fields(design_json, pricing_json, summary_json)
 
         snapshot_data = {
             "Name": snapshot_name,
             "Aurora_Project_ID": project_id,
             "Aurora_Design_ID": design_id,
-            "Aurora_Milestone": milestone_name,
             "Install": {"id": install_id},
             "Deal": {"id": deal_id} if deal_id else None,
             "Snapshot_Is_Active": True,
             "Processing_Status": "Initial Locked",
-            "Raw_Design_JSON": json.dumps(design_json),
-            "Raw_Pricing_JSON": json.dumps(pricing_json),
+            "Webhook_Received_At": timestamp_now,
+            "Aurora_Design_URL": aurora_design_url,
+            "Aurora_Project_URL": aurora_project_url,
+            **pricing_fields,
         }
 
         snapshot_create_response = create_snapshot(snapshot_data, access_token)
@@ -422,6 +427,242 @@ def get_zoho_access_token():
 # ------------------------
 # Aurora API Helpers
 # ------------------------
+def extract_pricing_fields(design_json, pricing_json, summary_json):
+    """
+    Parses design, pricing, and summary JSON from Aurora into a flat dict
+    of snapshot fields. Used by both the webhook and the initial snapshot endpoint.
+    """
+    fields = {}
+
+    # --- System Size ---
+    breakdown = pricing_json.get("system_price_breakdown", [])
+    pricing_method = (pricing_json.get("pricing_method") or "").strip().lower()
+    ppw = float(pricing_json.get("price_per_watt") or 0)
+    base_price_for_size = 0.0
+    for item in breakdown:
+        if item.get("item_type") == "base_price":
+            base_price_for_size = float(item.get("item_price") or 0)
+            break
+
+    if ("price per watt" in pricing_method) and ppw > 0 and base_price_for_size > 0:
+        system_size_watts = int(round(base_price_for_size / ppw))
+    else:
+        max_qty = 0.0
+        for item in breakdown:
+            if item.get("item_type") in ["adders", "discounts"]:
+                for sub in item.get("subcomponents", []):
+                    qty = sub.get("quantity")
+                    if qty is None:
+                        continue
+                    try:
+                        qty_f = float(qty)
+                    except (TypeError, ValueError):
+                        continue
+                    if qty_f >= 1000 and qty_f > max_qty:
+                        max_qty = qty_f
+        system_size_watts = int(round(max_qty)) if max_qty > 0 else 0
+
+    fields["System_Size_STC_Watts"] = system_size_watts
+
+    # --- Milestone / Design Metadata ---
+    milestone = design_json.get("milestone", {})
+    fields["Aurora_Milestone"] = milestone.get("milestone")
+    fields["Aurora_Milestone_ID"] = milestone.get("id")
+    fields["Aurora_Milestone_Notes"] = milestone.get("notes")
+    fields["Aurora_Design_Name"] = design_json.get("name")
+
+    milestone_time_raw = milestone.get("recorded_at")
+    fields["Milestone_Recorded_At"] = (
+        datetime.datetime.fromisoformat(milestone_time_raw.replace("Z", "+00:00"))
+        .astimezone().replace(microsecond=0).isoformat()
+        if milestone_time_raw else None
+    )
+
+    aurora_created_raw = design_json.get("created_at")
+    fields["Aurora_Created_At"] = (
+        datetime.datetime.fromisoformat(aurora_created_raw.replace("Z", "+00:00"))
+        .astimezone().replace(microsecond=0).isoformat()
+        if aurora_created_raw else None
+    )
+
+    # --- Pricing ---
+    final_price = pricing_json.get("system_price")
+    fields["Price_Per_Watt"] = pricing_json.get("price_per_watt")
+    fields["Final_System_Price"] = round(float(final_price or 0), 2)
+    fields["Gross_Price_Per_Watt"] = (
+        round(float(final_price) / system_size_watts, 4)
+        if system_size_watts and float(final_price or 0) > 0 else 0
+    )
+
+    base_price = 0.0
+    total_adders = 0.0
+    total_discounts = 0.0
+    for item in breakdown:
+        item_type = item.get("item_type")
+        item_price = float(item.get("item_price", 0) or 0)
+        if item_type == "base_price":
+            base_price = round(item_price, 2)
+        elif item_type == "adders":
+            total_adders = round(item_price, 2)
+        elif item_type == "discounts":
+            total_discounts = round(item_price, 2)
+
+    fields["Base_Price"] = base_price
+    fields["Adders_Total"] = total_adders
+    fields["Discounts_Total"] = total_discounts
+
+    # --- Commission Adders ---
+    consultant_comp_ppw = 0.0
+    helio_lead_fee_ppw = 0.0
+    referral_payout = 0.0
+    es_upline_discount_ppw = 0.0
+    evp_upline_discount_ppw = 0.0
+
+    for adder in pricing_json.get("adders", []):
+        name = (adder.get("adder_name") or "").strip()
+        value = float(adder.get("adder_value") or 0)
+        if name == "A - Consultant Comp":
+            consultant_comp_ppw = value
+        elif name == "A - Helio Provided Lead":
+            helio_lead_fee_ppw = value
+        elif name == "A - Referral Payout":
+            referral_payout = value
+        elif name == "A - COMP: ES Upline Discount":
+            es_upline_discount_ppw = value
+        elif name == "A - COMP: EVP Upline Discount":
+            evp_upline_discount_ppw = value
+
+    fields["Consultant_Comp_PPW"] = consultant_comp_ppw
+    fields["Helio_Lead_Fee_PPW"] = helio_lead_fee_ppw
+    fields["Referral_Payout"] = referral_payout
+    fields["ES_Upline_Discount_PPW"] = es_upline_discount_ppw
+    fields["EVP_Upline_Discount_PPW"] = evp_upline_discount_ppw
+
+    # --- Adder / Discount Lists ---
+    fields["Adder_Name_List"] = ", ".join(
+        a.get("adder_name") for a in pricing_json.get("adders", []) if not a.get("is_discount")
+    )
+    fields["Discount_Name_List"] = ", ".join(
+        a.get("adder_name") for a in pricing_json.get("adders", []) if a.get("is_discount")
+    )
+
+    adder_details = []
+    discount_details = []
+    for item in pricing_json.get("system_price_breakdown", []):
+        item_type = item.get("item_type")
+        if item_type in ["adders", "discounts"]:
+            for sub in item.get("subcomponents", []):
+                rec = {"name": sub.get("adder_name"), "quantity": sub.get("quantity"), "total": sub.get("item_price")}
+                if item_type == "adders":
+                    adder_details.append(rec)
+                else:
+                    discount_details.append(rec)
+
+    fields["Adder_Details_JSON"] = json.dumps(adder_details)
+    fields["Discount_Details_JSON"] = json.dumps(discount_details)
+
+    # --- Equipment ---
+    module_model = None
+    module_count = 0
+    inverter_model = None
+    inverter_count = 0
+    optimizer_count = 0
+
+    for item in summary_json.get("bill_of_materials", []):
+        ct = item.get("component_type")
+        name = item.get("name")
+        mfr = item.get("manufacturer_name", "")
+        qty = int(float(item.get("quantity") or 0))
+        full = f"{mfr} {name}".strip() if mfr else name
+        if ct == "modules":
+            module_model, module_count = full, qty
+        elif ct in ("inverters", "microinverters", "string_inverters"):
+            inverter_model, inverter_count = full, qty
+        elif ct == "dc_optimizers":
+            optimizer_count = qty
+
+    if not inverter_model:
+        for inv in summary_json.get("string_inverters", []):
+            mfr = inv.get("manufacturer_name", "")
+            name = inv.get("name")
+            inverter_model = f"{mfr} {name}".strip() if mfr else name
+            inverter_count = int(float(inv.get("quantity") or 0))
+            break
+
+    if not inverter_model:
+        for component in pricing_json.get("pricing_by_component", []):
+            ct = component.get("component_type")
+            mfr = component.get("manufacturer_name", "")
+            name = component.get("name")
+            qty = int(float(component.get("quantity") or 0))
+            full = f"{mfr} {name}".strip() if mfr else name
+            if ct in ("inverters", "microinverters", "string_inverters"):
+                inverter_model, inverter_count = full, qty
+            elif ct == "dc_optimizers" and optimizer_count == 0:
+                optimizer_count = qty
+
+    if not module_model:
+        for adder in pricing_json.get("adders", []):
+            adder_name = (adder.get("adder_name") or "").strip()
+            if adder_name.upper().startswith("A. EQUIP:"):
+                module_model = adder_name[9:].strip().replace(" (TPO ONLY)", "").replace(" (TPO)", "").strip()
+                break
+
+    fields["Module_Model"] = module_model
+    fields["Module_Count"] = module_count
+    fields["Inverter_Model"] = inverter_model
+    fields["Inverter_Count"] = inverter_count
+    fields["Optimizer_Count"] = optimizer_count
+
+    # --- Battery ---
+    battery_model = None
+    battery_count = 0
+    battery_base_price = 0.0
+    for component in pricing_json.get("pricing_by_component", []):
+        if component.get("component_type") == "batteries":
+            battery_model = component.get("name")
+            battery_count = int(float(component.get("quantity") or 0))
+            battery_base_price = float(component.get("price") or 0)
+
+    fields["Battery_Model"] = battery_model
+    fields["Battery_Count"] = battery_count
+    fields["Battery_Base_Price"] = battery_base_price
+
+    # --- Incentives ---
+    solar_incentives_total = 0.0
+    storage_incentives_total = 0.0
+    incentive_names = [inc.get("name") for inc in pricing_json.get("incentives", []) if inc.get("name")]
+
+    for item in pricing_json.get("system_price_breakdown", []):
+        if item.get("item_type") == "incentives":
+            solar_incentives_total = float(item.get("item_price") or 0)
+
+    solar_price_before_incentives = 0.0
+    for item in pricing_json.get("system_price_breakdown", []):
+        if item.get("item_type") == "discounts":
+            solar_price_before_incentives = float(item.get("cumulative_price") or 0)
+
+    storage_price_before_incentives = 0.0
+    for item in pricing_json.get("storage_system_price_breakdown", []):
+        if item.get("item_type") == "discounts":
+            storage_price_before_incentives = float(item.get("cumulative_price") or 0)
+        if item.get("item_type") == "incentives":
+            storage_incentives_total = float(item.get("item_price") or 0)
+
+    fields["Solar_Incentives_Total"] = solar_incentives_total
+    fields["Storage_Incentives_Total"] = storage_incentives_total
+    fields["Incentives_Total"] = solar_incentives_total + storage_incentives_total
+    fields["Incentive_Name_List"] = ", ".join(incentive_names)
+    fields["Solar_System_Price_Before_Incentives"] = solar_price_before_incentives
+    fields["Storage_System_Price_Before_Incentives"] = storage_price_before_incentives
+    fields["Total_Price_Before_Incentives"] = solar_price_before_incentives + storage_price_before_incentives
+
+    fields["Raw_Design_JSON"] = json.dumps(design_json)
+    fields["Raw_Pricing_JSON"] = json.dumps(pricing_json)
+
+    return fields
+
+
 def get_aurora_team_map():
     """Returns a dict of {team_id: team_name} for the tenant."""
     tenant_id = os.getenv("AURORA_TENANT_ID")
@@ -541,287 +782,15 @@ async def aurora_webhook(request: Request):
 
         summary_json = summary_response.json().get("design", {}) if summary_response.status_code == 200 else {}
 
-        # ------------------------
-        # Extract System Size (Robust)
-        # ------------------------
-        system_size_watts = 0
-
-        breakdown = pricing_json.get("system_price_breakdown", [])
-
-        # Prefer authoritative calculation when pricing is "price per watt"
-        pricing_method = (pricing_json.get("pricing_method") or "").strip().lower()
-        ppw = float(pricing_json.get("price_per_watt") or 0)
-
-        base_price_for_size = 0.0
-        for item in breakdown:
-            if item.get("item_type") == "base_price":
-                base_price_for_size = float(item.get("item_price") or 0)
-                break
-
-        if ("price per watt" in pricing_method) and ppw > 0 and base_price_for_size > 0:
-            # Example: 40260 / 3.05 = 13200 watts
-            system_size_watts = int(round(base_price_for_size / ppw))
-        else:
-            # Fallback: infer from per-watt adders/discounts quantities (choose the largest)
-            max_qty = 0.0
-            for item in breakdown:
-                if item.get("item_type") in ["adders", "discounts"]:
-                    for sub in item.get("subcomponents", []):
-                        qty = sub.get("quantity")
-                        if qty is None:
-                            continue
-                        try:
-                            qty_f = float(qty)
-                        except (TypeError, ValueError):
-                            continue
-                        # Filter out flat-quantity adders (often 1) and small non-size quantities
-                        if qty_f >= 1000 and qty_f > max_qty:
-                            max_qty = qty_f
-            if max_qty > 0:
-                system_size_watts = int(round(max_qty))
+        # Extract all pricing/equipment/milestone fields via shared helper
+        pricing_fields = extract_pricing_fields(design_json, pricing_json, summary_json)
+        system_size_watts = pricing_fields["System_Size_STC_Watts"]
+        milestone_name = pricing_fields["Aurora_Milestone"]
+        es_upline_discount_ppw = pricing_fields["ES_Upline_Discount_PPW"]
+        evp_upline_discount_ppw = pricing_fields["EVP_Upline_Discount_PPW"]
 
         logger.info(f"[{event_id}] Resolved System Size (Watts)={system_size_watts}")
 
-        # ------------------------
-        # Extract Milestone Data
-        # ------------------------
-        milestone = design_json.get("milestone", {})
-        milestone_name = milestone.get("milestone")
-        milestone_id = milestone.get("id")
-        milestone_notes = milestone.get("notes")
-
-        milestone_time_raw = milestone.get("recorded_at")
-
-        if milestone_time_raw:
-            milestone_time = (
-                datetime.datetime.fromisoformat(milestone_time_raw.replace("Z", "+00:00"))
-                .astimezone()
-                .replace(microsecond=0)
-                .isoformat()
-            )
-        else:
-            milestone_time = None
-
-        aurora_design_name = design_json.get("name")
-
-        aurora_created_raw = design_json.get("created_at")
-        if aurora_created_raw:
-            aurora_created_at = (
-                datetime.datetime.fromisoformat(aurora_created_raw.replace("Z", "+00:00"))
-                .astimezone()
-                .replace(microsecond=0)
-                .isoformat()
-            )
-        else:
-            aurora_created_at = None
-
-
-        # ------------------------
-        # Extract Pricing Data
-        # ------------------------
-        price_per_watt = pricing_json.get("price_per_watt")
-        final_price = pricing_json.get("system_price")
-
-        gross_price_per_watt = (
-            round(float(final_price) / system_size_watts, 4)
-            if system_size_watts and float(final_price or 0) > 0
-            else 0
-        )
-
-        breakdown = pricing_json.get("system_price_breakdown", [])
-
-        base_price = 0.00
-        total_adders = 0.00
-        total_discounts = 0.00
-
-        for item in breakdown:
-            item_type = item.get("item_type")
-            item_price = float(item.get("item_price", 0) or 0)
-
-            if item_type == "base_price":
-                base_price = round(item_price, 2)
-            elif item_type == "adders":
-                total_adders = round(item_price, 2)
-            elif item_type == "discounts":
-                total_discounts = round(item_price, 2)
-
-        # ------------------------
-        # Extract Commission-Related Adders
-        # ------------------------
-        consultant_comp_ppw = 0.0
-        helio_lead_fee_ppw = 0.0
-        referral_payout = 0.0
-        es_upline_discount_ppw = 0.0
-        evp_upline_discount_ppw = 0.0
-
-        for adder in pricing_json.get("adders", []):
-            name = (adder.get("adder_name") or "").strip()
-            value = float(adder.get("adder_value") or 0)
-
-            if name == "A - Consultant Comp":
-                consultant_comp_ppw = value
-            elif name == "A - Helio Provided Lead":
-                helio_lead_fee_ppw = value
-            elif name == "A - Referral Payout":
-                referral_payout = value
-            elif name == "A - COMP: ES Upline Discount":
-                es_upline_discount_ppw = value
-            elif name == "A - COMP: EVP Upline Discount":
-                evp_upline_discount_ppw = value
-
-
-        adder_name_list = ", ".join(
-            adder.get("adder_name")
-            for adder in pricing_json.get("adders", [])
-            if not adder.get("is_discount")
-        )
-
-        discount_name_list = ", ".join(
-            adder.get("adder_name")
-            for adder in pricing_json.get("adders", [])
-            if adder.get("is_discount")
-        )
-
-        adder_details = []
-        discount_details = []
-
-        for item in pricing_json.get("system_price_breakdown", []):
-            item_type = item.get("item_type")
-
-            if item_type in ["adders", "discounts"]:
-                for sub in item.get("subcomponents", []):
-                    record = {
-                        "name": sub.get("adder_name"),
-                        "quantity": sub.get("quantity"),
-                        "total": sub.get("item_price"),
-                    }
-
-                    if item_type == "adders":
-                        adder_details.append(record)
-                    elif item_type == "discounts":
-                        discount_details.append(record)
-
-        adder_details_json = json.dumps(adder_details)
-        discount_details_json = json.dumps(discount_details)
-
-
-        # ------------------------
-        # Extract Equipment Details
-        # Primary source: design summary bill_of_materials + string_inverters
-        # Fallback: pricing_by_component, then adder name parsing for TPO
-        # ------------------------
-        module_model = None
-        module_count = 0
-        inverter_model = None
-        inverter_count = 0
-        optimizer_count = 0
-
-        # Primary: bill_of_materials from design summary
-        for item in summary_json.get("bill_of_materials", []):
-            component_type = item.get("component_type")
-            name = item.get("name")
-            manufacturer = item.get("manufacturer_name", "")
-            qty = int(float(item.get("quantity") or 0))
-            full_name = f"{manufacturer} {name}".strip() if manufacturer else name
-
-            if component_type == "modules":
-                module_model = full_name
-                module_count = qty
-            elif component_type in ("inverters", "microinverters", "string_inverters"):
-                inverter_model = full_name
-                inverter_count = qty
-            elif component_type == "dc_optimizers":
-                optimizer_count = qty
-
-        # String inverters from summary (separate field)
-        if not inverter_model:
-            for inv in summary_json.get("string_inverters", []):
-                name = inv.get("name")
-                manufacturer = inv.get("manufacturer_name", "")
-                inverter_model = f"{manufacturer} {name}".strip() if manufacturer else name
-                inverter_count = int(float(inv.get("quantity") or 0))
-                break
-
-        # Fallback: pricing_by_component for microinverter models not in BOM
-        if not inverter_model:
-            for component in pricing_json.get("pricing_by_component", []):
-                component_type = component.get("component_type")
-                name = component.get("name")
-                manufacturer = component.get("manufacturer_name", "")
-                qty = int(float(component.get("quantity") or 0))
-                full_name = f"{manufacturer} {name}".strip() if manufacturer else name
-                if component_type in ("inverters", "microinverters", "string_inverters"):
-                    inverter_model = full_name
-                    inverter_count = qty
-                elif component_type == "dc_optimizers" and optimizer_count == 0:
-                    optimizer_count = qty
-
-        # Last resort for TPO: parse module model from adder name
-        if not module_model:
-            for adder in pricing_json.get("adders", []):
-                adder_name = (adder.get("adder_name") or "").strip()
-                if adder_name.upper().startswith("A. EQUIP:"):
-                    module_model = adder_name[9:].strip().replace(" (TPO ONLY)", "").replace(" (TPO)", "").strip()
-                    break
-
-        # ------------------------
-        # Extract Battery Details
-        # ------------------------
-        battery_model = None
-        battery_count = 0
-        battery_base_price = 0.0
-
-        for component in pricing_json.get("pricing_by_component", []):
-            if component.get("component_type") == "batteries":
-                battery_model = component.get("name")
-                try:
-                    battery_count = int(float(component.get("quantity") or 0))
-                except (TypeError, ValueError):
-                    battery_count = 0
-                battery_base_price = float(component.get("price") or 0)
-
-        # ------------------------
-        # Extract Incentives
-        # ------------------------
-        solar_incentives_total = 0.0
-        storage_incentives_total = 0.0
-        incentive_names = []
-
-        # Solar incentives (top-level incentives array)
-        for inc in pricing_json.get("incentives", []):
-            name = inc.get("name")
-            amount = float(inc.get("amount") or 0)
-
-            if name:
-                incentive_names.append(name)
-
-            # NOTE: Solar incentives are usually per-watt or percentage-based.
-            # We will NOT calculate dollar conversion here since Aurora has already
-            # applied them in pricing breakdown. We just capture names.
-            # Dollar total comes from breakdown if present.
-
-        # Solar price before incentives
-        solar_price_before_incentives = 0.0
-        for item in pricing_json.get("system_price_breakdown", []):
-            if item.get("item_type") == "discounts":
-                solar_price_before_incentives = float(item.get("cumulative_price") or 0)
-            if item.get("item_type") == "incentives":
-                solar_incentives_total = float(item.get("item_price") or 0)
-
-        # Storage price before incentives
-        storage_price_before_incentives = 0.0
-        for item in pricing_json.get("storage_system_price_breakdown", []):
-            if item.get("item_type") == "discounts":
-                storage_price_before_incentives = float(item.get("cumulative_price") or 0)
-            if item.get("item_type") == "incentives":
-                storage_incentives_total = float(item.get("item_price") or 0)
-
-        incentives_total = solar_incentives_total + storage_incentives_total
-        total_price_before_incentives = (
-            solar_price_before_incentives + storage_price_before_incentives
-        )
-
-        incentive_name_list = ", ".join(incentive_names)
 
 
         # ------------------------
@@ -902,53 +871,15 @@ async def aurora_webhook(request: Request):
             "Name": snapshot_name,
             "Aurora_Project_ID": project_id,
             "Aurora_Design_ID": design_id,
-            "Aurora_Milestone": milestone_name,
-            "Aurora_Milestone_ID": milestone_id,
-            "Aurora_Milestone_Notes": milestone_notes,
-            "Aurora_Design_Name": aurora_design_name,
-            "Aurora_Created_At": aurora_created_at,
-            "Milestone_Recorded_At": milestone_time,
             "Webhook_Received_At": timestamp_now,
-            "System_Size_STC_Watts": system_size_watts,
-            "Price_Per_Watt": price_per_watt,
-            "Gross_Price_Per_Watt": gross_price_per_watt,
-            "Base_Price": base_price,
-            "Adders_Total": total_adders,
-            "Discounts_Total": total_discounts,
-            "Adder_Name_List": adder_name_list,
-            "Discount_Name_List": discount_name_list,
-            "Adder_Details_JSON": adder_details_json,
-            "Discount_Details_JSON": discount_details_json,
-            "Consultant_Comp_PPW": consultant_comp_ppw,
-            "Helio_Lead_Fee_PPW": helio_lead_fee_ppw,
-            "Referral_Payout": referral_payout,
-            "ES_Upline_Discount_PPW": es_upline_discount_ppw,
-            "EVP_Upline_Discount_PPW": evp_upline_discount_ppw,
-            "Sales_Org_Redline_PPW": sales_org_redline_ppw,
-            "Redline_At_Sale": redline_at_sale,
-            "Module_Model": module_model,
-            "Module_Count": module_count,
-            "Inverter_Model": inverter_model,
-            "Inverter_Count": inverter_count,
-            "Optimizer_Count": optimizer_count,
-            "Final_System_Price": round(float(final_price or 0), 2),
             "Install": {"id": install_id},
             "Deal": {"id": deal_id} if deal_id else None,
             "Aurora_Design_URL": aurora_design_url,
             "Aurora_Project_URL": aurora_project_url,
-            "Raw_Design_JSON": json.dumps(design_json),
-            "Raw_Pricing_JSON": json.dumps(pricing_json),
+            "Sales_Org_Redline_PPW": sales_org_redline_ppw,
+            "Redline_At_Sale": redline_at_sale,
             "Processing_Status": "Processed",
-            "Solar_Incentives_Total": solar_incentives_total,
-            "Storage_Incentives_Total": storage_incentives_total,
-            "Incentives_Total": incentives_total,
-            "Incentive_Name_List": incentive_name_list,
-            "Solar_System_Price_Before_Incentives": solar_price_before_incentives,
-            "Storage_System_Price_Before_Incentives": storage_price_before_incentives,
-            "Total_Price_Before_Incentives": total_price_before_incentives,
-            "Battery_Model": battery_model,
-            "Battery_Count": battery_count,
-            "Battery_Base_Price": battery_base_price,
+            **pricing_fields,
         }
 
         snapshot_create_response = create_snapshot(snapshot_data, access_token)
