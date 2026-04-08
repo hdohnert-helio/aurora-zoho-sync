@@ -837,6 +837,14 @@ async def aurora_webhook(request: Request):
         # ------------------------
         install_response = find_install(project_id, access_token)
 
+        if install_response.status_code == 204:
+            # 204 = no records found — Install not yet created, graceful skip
+            logger.info(
+                f"[{event_id}] Install not yet created for project_id={project_id} | "
+                f"milestone={milestone_name} | skipping (204)"
+            )
+            return {"status": "skipped - install not yet created"}
+
         if install_response.status_code != 200:
             logger.error(
                 f"[{event_id}] Install search failed | "
