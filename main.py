@@ -1,4 +1,5 @@
 from fastapi import FastAPI, Request, HTTPException
+from urllib.parse import quote
 import os
 import requests
 import datetime
@@ -341,7 +342,7 @@ async def sync_aurora_users_full(request: Request):
             is_active = account_status == "active"
 
             # Check if Sales Rep already exists by email
-            search_url = f"{api_domain}/crm/v2/Sales_Reps/search?criteria=(Email:equals:{email})"
+            search_url = f"{api_domain}/crm/v2/Sales_Reps/search?criteria=(Email:equals:{quote(email, safe='')})"
             search_response = requests.get(search_url, headers=headers)
 
             record = {
