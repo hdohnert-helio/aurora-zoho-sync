@@ -786,11 +786,7 @@ async def lightreach_webhook(request: Request):
             f"contact_id={contact_id} email={customer_email}"
         )
 
-        # --- Find matching Zoho Install by customer email ---
-        if not customer_email:
-            logger.warning("LightReach webhook: no customer email in payload — cannot match Install")
-            return {"status": "logged - no email to match"}
-
+        # --- Find matching Zoho Install — try email first, fall back to quote ID ---
         access_token = get_zoho_access_token()
         if not access_token:
             logger.error("LightReach webhook: failed to obtain Zoho token")
@@ -799,38 +795,45 @@ async def lightreach_webhook(request: Request):
         api_domain = os.getenv("ZOHO_API_DOMAIN")
         headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
 
-        # Search Installs by customer email (field name: Primary_Email)
-        search_url = (
-            f"{api_domain}/crm/v2/Installs/search"
-            f"?criteria=(Primary_Email:equals:{quote(customer_email, safe='')})"
-        )
-        search_resp = requests.get(search_url, headers=headers)
+        install_id = None
 
-        if search_resp.status_code == 204:
-            logger.warning(f"LightReach webhook: no Install found for email={customer_email}")
-            return {"status": "logged - no matching install"}
-
-        if search_resp.status_code != 200:
-            logger.error(
-                f"LightReach webhook: Install search failed | "
-                f"status={search_resp.status_code} | body={search_resp.text}"
+        if customer_email:
+            search_url = (
+                f"{api_domain}/crm/v2/Installs/search"
+                f"?criteria=(Primary_Email:equals:{quote(customer_email, safe='')})"
             )
-            return {"status": "failed - install search error"}
+            search_resp = requests.get(search_url, headers=headers)
+            if search_resp.status_code == 200:
+                records = search_resp.json().get("data", [])
+                if records:
+                    install_id = records[0].get("id")
 
-        install_records = search_resp.json().get("data", [])
-        if not install_records:
-            logger.warning(f"LightReach webhook: no Install found for email={customer_email}")
+        if not install_id and quote_id:
+            search_url = (
+                f"{api_domain}/crm/v2/Installs/search"
+                f"?criteria=(LightReach_Quote_ID:equals:{quote(quote_id, safe='')})"
+            )
+            search_resp = requests.get(search_url, headers=headers)
+            if search_resp.status_code == 200:
+                records = search_resp.json().get("data", [])
+                if records:
+                    install_id = records[0].get("id")
+
+        if not install_id:
+            logger.warning(
+                f"LightReach webhook: no Install found | "
+                f"email={customer_email} quote_id={quote_id}"
+            )
             return {"status": "logged - no matching install"}
 
-        install_id = install_records[0].get("id")
-        logger.info(f"LightReach webhook: matched Install id={install_id} for email={customer_email}")
+        logger.info(f"LightReach webhook: matched Install id={install_id}")
 
-        # --- Update Install with LightReach data ---
+        # --- Build update fields ---
         timestamp_now = datetime.datetime.now().astimezone().replace(microsecond=0).isoformat()
 
         update_fields = {
             "id": install_id,
-            "LightReach_Contract_Status": event_type,
+            "LightReach_Finance_Status": event_type,
             "LightReach_Last_Updated": timestamp_now,
             "LightReach_Raw_Payload": json.dumps(body),
         }
@@ -838,8 +841,54 @@ async def lightreach_webhook(request: Request):
             update_fields["LightReach_Quote_ID"] = quote_id
         if contact_id:
             update_fields["LightReach_Contact_ID"] = contact_id
-        if signed_at:
-            update_fields["LightReach_Contract_Signed_At"] = signed_at
+
+        # --- Event-specific logic ---
+        if event_type == "contractSigned":
+            update_fields["LightReach_Contract_Status"] = "contractSigned"
+            if signed_at:
+                update_fields["LightReach_Contract_Signed_At"] = signed_at
+
+        elif event_type == "applicationStatus":
+            status = (
+                body.get("status")
+                or body.get("applicationStatus")
+                or body.get("state")
+                or event_type
+            )
+            update_fields["LightReach_Finance_Status"] = status
+
+        elif event_type == "stipulationAdded":
+            stip = body.get("stipulation") or body.get("requirement") or {}
+            stip_name = (
+                stip.get("name") or stip.get("description") or stip.get("type")
+                or body.get("stipulationName") or body.get("stipulationDescription")
+                or "Unknown stipulation"
+            )
+            update_fields["LightReach_Stipulation_Action_Needed"] = True
+            update_fields["LightReach_Outstanding_Stipulations"] = stip_name
+            logger.info(f"LightReach stipulation added: {stip_name}")
+
+        elif event_type == "allStipulationsCleared":
+            update_fields["LightReach_Stipulation_Action_Needed"] = False
+            update_fields["LightReach_Outstanding_Stipulations"] = ""
+
+        elif event_type in ("stipulationCleared", "requirementCompleted", "requirementStatusChanged"):
+            stip = body.get("stipulation") or body.get("requirement") or {}
+            stip_name = (
+                stip.get("name") or stip.get("description")
+                or body.get("stipulationName") or body.get("requirementName") or ""
+            )
+            if stip_name:
+                logger.info(f"LightReach {event_type}: {stip_name}")
+
+        elif event_type == "milestoneAchieved":
+            milestone = body.get("milestone") or body.get("milestoneName") or body.get("name") or ""
+            if isinstance(milestone, dict):
+                milestone = milestone.get("name") or milestone.get("type") or ""
+            logger.info(f"LightReach milestone achieved: {milestone}")
+            if "ntp" in str(milestone).lower() or "notice to proceed" in str(milestone).lower():
+                update_fields["LightReach_NTP_Granted_At"] = timestamp_now
+                logger.info(f"LightReach NTP granted for Install id={install_id}")
 
         update_resp = requests.put(
             f"{api_domain}/crm/v2/Installs",
