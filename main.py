@@ -744,11 +744,17 @@ def create_snapshot(snapshot_data, access_token):
 async def lightreach_webhook(request: Request):
     try:
         # Validate Palmetto-generated API key (sent as `apiKey` header)
-        expected_key = os.getenv("LIGHTREACH_API_KEY")
-        received_key = request.headers.get("apiKey")
+        expected_key = (os.getenv("LIGHTREACH_API_KEY") or "").strip()
+        received_key = request.headers.get("apiKey") or ""
 
-        if expected_key and received_key != expected_key:
-            logger.warning(f"LightReach webhook rejected — invalid apiKey")
+        if not expected_key:
+            logger.warning("LIGHTREACH_API_KEY is not set — skipping auth (open endpoint!)")
+        elif received_key != expected_key:
+            logger.warning(
+                f"LightReach webhook rejected — apiKey mismatch | "
+                f"received={'<empty>' if not received_key else received_key[:4] + '****'} | "
+                f"expected={expected_key[:4] + '****'}"
+            )
             raise HTTPException(status_code=401, detail="Unauthorized")
 
         body = await request.json()
