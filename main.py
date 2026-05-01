@@ -737,6 +737,136 @@ def create_snapshot(snapshot_data, access_token):
     return requests.post(url, headers=headers, json=payload)
 
 
+# ------------------------
+# Webhook: LightReach (Palmetto) — Contract Signed & Status Events
+# ------------------------
+@app.post("/webhook/lightreach")
+async def lightreach_webhook(request: Request):
+    try:
+        # Validate Palmetto-generated API key (sent as `apiKey` header)
+        expected_key = os.getenv("LIGHTREACH_API_KEY")
+        received_key = request.headers.get("apiKey")
+
+        if expected_key and received_key != expected_key:
+            logger.warning(f"LightReach webhook rejected — invalid apiKey")
+            raise HTTPException(status_code=401, detail="Unauthorized")
+
+        body = await request.json()
+        logger.info(f"LightReach webhook received | payload={json.dumps(body)}")
+
+        # --- Extract fields from payload (flexible — log raw if structure changes) ---
+        event_type = body.get("event") or body.get("eventType") or body.get("type") or "unknown"
+        quote_id = (
+            body.get("quoteId")
+            or body.get("quote_id")
+            or (body.get("quote") or {}).get("id")
+        )
+        contact_id = (
+            body.get("contactId")
+            or body.get("contact_id")
+            or body.get("alchemyContactId")
+        )
+
+        customer = body.get("customer") or body.get("homeowner") or body.get("applicant") or {}
+        customer_email = (
+            body.get("email")
+            or customer.get("email")
+            or ""
+        ).strip().lower()
+
+        signed_at = (
+            body.get("signedAt")
+            or body.get("signed_at")
+            or body.get("contractSignedAt")
+            or body.get("timestamp")
+        )
+
+        logger.info(
+            f"LightReach event | type={event_type} quote_id={quote_id} "
+            f"contact_id={contact_id} email={customer_email}"
+        )
+
+        # --- Find matching Zoho Install by customer email ---
+        if not customer_email:
+            logger.warning("LightReach webhook: no customer email in payload — cannot match Install")
+            return {"status": "logged - no email to match"}
+
+        access_token = get_zoho_access_token()
+        if not access_token:
+            logger.error("LightReach webhook: failed to obtain Zoho token")
+            return {"status": "failed - no zoho token"}
+
+        api_domain = os.getenv("ZOHO_API_DOMAIN")
+        headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
+
+        # Search Installs by customer email (field name: Primary_Email)
+        search_url = (
+            f"{api_domain}/crm/v2/Installs/search"
+            f"?criteria=(Primary_Email:equals:{quote(customer_email, safe='')})"
+        )
+        search_resp = requests.get(search_url, headers=headers)
+
+        if search_resp.status_code == 204:
+            logger.warning(f"LightReach webhook: no Install found for email={customer_email}")
+            return {"status": "logged - no matching install"}
+
+        if search_resp.status_code != 200:
+            logger.error(
+                f"LightReach webhook: Install search failed | "
+                f"status={search_resp.status_code} | body={search_resp.text}"
+            )
+            return {"status": "failed - install search error"}
+
+        install_records = search_resp.json().get("data", [])
+        if not install_records:
+            logger.warning(f"LightReach webhook: no Install found for email={customer_email}")
+            return {"status": "logged - no matching install"}
+
+        install_id = install_records[0].get("id")
+        logger.info(f"LightReach webhook: matched Install id={install_id} for email={customer_email}")
+
+        # --- Update Install with LightReach data ---
+        timestamp_now = datetime.datetime.now().astimezone().replace(microsecond=0).isoformat()
+
+        update_fields = {
+            "id": install_id,
+            "LightReach_Contract_Status": event_type,
+            "LightReach_Last_Updated": timestamp_now,
+            "LightReach_Raw_Payload": json.dumps(body),
+        }
+        if quote_id:
+            update_fields["LightReach_Quote_ID"] = quote_id
+        if contact_id:
+            update_fields["LightReach_Contact_ID"] = contact_id
+        if signed_at:
+            update_fields["LightReach_Contract_Signed_At"] = signed_at
+
+        update_resp = requests.put(
+            f"{api_domain}/crm/v2/Installs",
+            headers=headers,
+            json={"data": [update_fields]},
+        )
+
+        if update_resp.status_code not in [200, 201, 202]:
+            logger.error(
+                f"LightReach webhook: Install update failed | "
+                f"status={update_resp.status_code} | body={update_resp.text}"
+            )
+            return {"status": "failed - install update error"}
+
+        logger.info(
+            f"LightReach webhook: Install id={install_id} updated | "
+            f"event={event_type} quote_id={quote_id}"
+        )
+        return {"status": "processed"}
+
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("Unhandled exception in LightReach webhook")
+        return {"status": "failed - exception"}
+
+
 @app.api_route("/webhook/aurora", methods=["GET", "POST"])
 async def aurora_webhook(request: Request):
     try:
