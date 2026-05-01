@@ -799,10 +799,10 @@ async def lightreach_webhook(request: Request):
         api_domain = os.getenv("ZOHO_API_DOMAIN")
         headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
 
-        # Search Installs by customer email (field name: Customer_Email)
+        # Search Installs by customer email (field name: Primary_Email)
         search_url = (
             f"{api_domain}/crm/v2/Installs/search"
-            f"?criteria=(Customer_Email:equals:{quote(customer_email, safe='')})"
+            f"?criteria=(Primary_Email:equals:{quote(customer_email, safe='')})"
         )
         search_resp = requests.get(search_url, headers=headers)
 
