@@ -745,7 +745,7 @@ async def lightreach_webhook(request: Request):
     try:
         # Validate Palmetto-generated API key (sent as `apiKey` header)
         expected_key = os.getenv("LIGHTREACH_API_KEY")
-        received_key = request.headers.get("apiKey")
+        received_key = request.headers.get("api_key") or request.headers.get("apikey")
 
         if expected_key and received_key != expected_key:
             logger.warning(
