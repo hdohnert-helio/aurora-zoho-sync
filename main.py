@@ -748,7 +748,10 @@ async def lightreach_webhook(request: Request):
         received_key = request.headers.get("apiKey")
 
         if expected_key and received_key != expected_key:
-            logger.warning(f"LightReach webhook rejected — invalid apiKey")
+            logger.warning(
+                f"LightReach webhook rejected — invalid apiKey | "
+                f"headers={dict(request.headers)}"
+            )
             raise HTTPException(status_code=401, detail="Unauthorized")
 
         body = await request.json()
