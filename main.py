@@ -119,12 +119,23 @@ async def create_initial_snapshot(request: Request):
 
         snapshot_id = snapshot_create_response.json()["data"][0]["details"]["id"]
 
-        # Update Install with Active Snapshot
+        # Pull LightReach IDs from Aurora financings (if a palmetto financing exists
+        # on this design). These get merged into the same Install update below so
+        # the LightReach webhook handler can match by LightReach_Account_ID.
+        lightreach_fields = extract_lightreach_install_fields(design_id)
+        if lightreach_fields:
+            logger.info(
+                f"create_initial_snapshot: writing LightReach fields | "
+                f"install_id={install_id} keys={list(lightreach_fields.keys())}"
+            )
+
+        # Update Install with Active Snapshot (and LightReach fields, if any)
         update_payload = {
             "data": [
                 {
                     "id": install_id,
-                    "Active_Snapshot": {"id": snapshot_id}
+                    "Active_Snapshot": {"id": snapshot_id},
+                    **lightreach_fields,
                 }
             ]
         }
@@ -398,6 +409,92 @@ async def sync_aurora_users_full(request: Request):
 
     except Exception:
         logger.exception("Unhandled exception in sync-aurora-users")
+        return {"status": "failed - exception"}
+
+
+# ------------------------
+# Internal: Backfill LightReach fields onto an existing Install
+# ------------------------
+# POST /internal/backfill-lightreach { "install_id": "..." }
+# Looks up the install's Aurora_Project_ID, finds the financing record on
+# Aurora that has provider == "palmetto", and writes the resulting
+# LightReach_* fields onto the Install. Use this for installs created before
+# the Aurora→LightReach sync was wired in.
+@app.post("/internal/backfill-lightreach")
+async def backfill_lightreach(request: Request):
+    try:
+        body = await request.json()
+        install_id = body.get("install_id")
+        if not install_id:
+            return {"status": "failed - missing install_id"}
+
+        access_token = get_zoho_access_token()
+        if not access_token:
+            return {"status": "failed - no zoho token"}
+
+        api_domain = os.getenv("ZOHO_API_DOMAIN")
+        headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
+
+        # Pull the install to get its Aurora_Project_ID.
+        install_resp = requests.get(f"{api_domain}/crm/v2/Installs/{install_id}", headers=headers)
+        if install_resp.status_code != 200:
+            return {"status": f"failed - install lookup error ({install_resp.status_code})"}
+        records = install_resp.json().get("data", [])
+        if not records:
+            return {"status": "failed - install not found"}
+        install = records[0]
+        project_id = install.get("Aurora_Project_ID")
+        if not project_id:
+            return {"status": "failed - install has no Aurora_Project_ID"}
+
+        # Pull all Aurora designs for this project.
+        tenant_id = os.getenv("AURORA_TENANT_ID")
+        designs_url = f"https://api.aurorasolar.com/tenants/{tenant_id}/projects/{project_id}/designs"
+        designs_resp = requests.get(designs_url, headers=aurora_headers())
+        if designs_resp.status_code != 200:
+            return {"status": f"failed - aurora designs pull error ({designs_resp.status_code})"}
+        designs = designs_resp.json().get("designs", [])
+        if not designs:
+            return {"status": "failed - no aurora designs for project"}
+
+        # Walk every design until we find one with a palmetto financing. Prefer
+        # the sold design if there is one (it's the design the customer actually
+        # contracted), otherwise scan all designs.
+        sold_designs = [d for d in designs if d.get("milestone", {}).get("milestone") == "sold"]
+        ordered_designs = sold_designs + [d for d in designs if d not in sold_designs]
+
+        lightreach_fields = {}
+        for d in ordered_designs:
+            d_id = d.get("id")
+            if not d_id:
+                continue
+            fields = extract_lightreach_install_fields(d_id)
+            if fields:
+                lightreach_fields = fields
+                logger.info(
+                    f"backfill_lightreach: matched design {d_id} | "
+                    f"install_id={install_id} keys={list(fields.keys())}"
+                )
+                break
+
+        if not lightreach_fields:
+            return {"status": "no palmetto financing found on any design"}
+
+        update_payload = {"data": [{"id": install_id, **lightreach_fields}]}
+        update_resp = requests.put(
+            f"{api_domain}/crm/v2/Installs", headers=headers, json=update_payload
+        )
+        if update_resp.status_code not in [200, 201, 202]:
+            return {
+                "status": "failed - install update error",
+                "code": update_resp.status_code,
+                "body": update_resp.text[:500],
+            }
+
+        return {"status": "ok", "fields_written": list(lightreach_fields.keys())}
+
+    except Exception:
+        logger.exception("Unhandled exception in backfill_lightreach")
         return {"status": "failed - exception"}
 
 
@@ -711,6 +808,117 @@ def pull_pricing(design_id):
     return requests.get(url, headers=aurora_headers())
 
 
+def _normalize_aurora_datetime(s):
+    """
+    Convert Aurora's 'YYYY-MM-DD HH:MM:SS UTC' string format to ISO 8601 so it
+    parses cleanly into Zoho DateTime fields. Returns the original input on
+    any parse failure so we never block an update on date formatting.
+    """
+    if not s or not isinstance(s, str):
+        return s
+    try:
+        cleaned = s.replace(" UTC", "").strip()
+        dt = datetime.datetime.strptime(cleaned, "%Y-%m-%d %H:%M:%S")
+        return dt.replace(tzinfo=datetime.timezone.utc).isoformat()
+    except (ValueError, TypeError):
+        return s
+
+
+def pull_financings(design_id):
+    """List all financings for a design (palmetto, sungage, cash, etc.)."""
+    tenant_id = os.getenv("AURORA_TENANT_ID")
+    url = f"https://api.aurorasolar.com/tenants/{tenant_id}/designs/{design_id}/financings"
+    return requests.get(url, headers=aurora_headers())
+
+
+def pull_financing(design_id, financing_id):
+    """Retrieve the full record for one financing by ID."""
+    tenant_id = os.getenv("AURORA_TENANT_ID")
+    url = f"https://api.aurorasolar.com/tenants/{tenant_id}/designs/{design_id}/financings/{financing_id}"
+    return requests.get(url, headers=aurora_headers())
+
+
+def extract_lightreach_install_fields(design_id):
+    """
+    Walk every financing on a design, find the LightReach (provider == "palmetto")
+    one, and return a dict of Zoho Install field updates.
+
+    Returns {} if the design has no LightReach financing.
+
+    Field mapping (verified against the Aurora financing payload):
+      financing.financier.external.consumer_id        -> LightReach_Account_ID
+      financing.financier.external.request_id         -> LightReach_Request_ID
+      financing.financier.external.quote_id           -> LightReach_Quote_ID
+      financing.financier.external.provider_status    -> LightReach_Finance_Status
+      financing.financier.external.contract_signed_at -> LightReach_Contract_Signed_At
+      financing.financier.status                      -> LightReach_Application_Status
+    """
+    list_resp = pull_financings(design_id)
+    if list_resp.status_code != 200:
+        logger.warning(
+            f"extract_lightreach_install_fields: list failed | "
+            f"design_id={design_id} status={list_resp.status_code}"
+        )
+        return {}
+
+    listed = list_resp.json()
+    summaries = listed.get("financings") if isinstance(listed, dict) else listed
+    if not summaries:
+        return {}
+
+    # Pull each financing's full record; keep the palmetto ones that have a consumer_id.
+    palmetto_records = []
+    for s in summaries:
+        f_id = s.get("id") if isinstance(s, dict) else None
+        if not f_id:
+            continue
+        full_resp = pull_financing(design_id, f_id)
+        if full_resp.status_code != 200:
+            continue
+        full = full_resp.json().get("financing", full_resp.json())
+        financier = full.get("financier") or {}
+        if financier.get("provider") != "palmetto":
+            continue
+        external = financier.get("external") or {}
+        if not external.get("consumer_id"):
+            continue
+        palmetto_records.append({"financier": financier, "external": external})
+
+    if not palmetto_records:
+        return {}
+
+    # Multiple palmetto financings can exist (re-quotes). Prefer the most-progressed:
+    # contract_signed_at > request_id > quote_id.
+    def _progress_score(rec):
+        ext = rec["external"]
+        return (
+            1 if ext.get("contract_signed_at") else 0,
+            1 if ext.get("request_id") else 0,
+            1 if ext.get("quote_id") else 0,
+        )
+
+    best = max(palmetto_records, key=_progress_score)
+    external = best["external"]
+    financier = best["financier"]
+
+    fields = {}
+    if external.get("consumer_id"):
+        fields["LightReach_Account_ID"] = external["consumer_id"]
+    if external.get("request_id"):
+        fields["LightReach_Request_ID"] = external["request_id"]
+    if external.get("quote_id"):
+        fields["LightReach_Quote_ID"] = external["quote_id"]
+    if external.get("provider_status"):
+        fields["LightReach_Finance_Status"] = external["provider_status"]
+    if external.get("contract_signed_at"):
+        fields["LightReach_Contract_Signed_At"] = _normalize_aurora_datetime(
+            external["contract_signed_at"]
+        )
+    if financier.get("status"):
+        fields["LightReach_Application_Status"] = financier["status"]
+    return fields
+
+
 # ------------------------
 # Find Install by Aurora Project ID
 # ------------------------
@@ -759,6 +967,14 @@ async def lightreach_webhook(request: Request):
 
         # --- Extract fields from payload (flexible — log raw if structure changes) ---
         event_type = body.get("event") or body.get("eventType") or body.get("type") or "unknown"
+        # LightReach's `accountId` is the primary stable identifier on every event.
+        # We mirror it onto the Install as LightReach_Account_ID via Aurora's
+        # financing.financier.external.consumer_id field.
+        account_id = (
+            body.get("accountId")
+            or body.get("account_id")
+            or (body.get("account") or {}).get("id")
+        )
         quote_id = (
             body.get("quoteId")
             or body.get("quote_id")
@@ -785,11 +1001,14 @@ async def lightreach_webhook(request: Request):
         )
 
         logger.info(
-            f"LightReach event | type={event_type} quote_id={quote_id} "
-            f"contact_id={contact_id} email={customer_email}"
+            f"LightReach event | type={event_type} account_id={account_id} "
+            f"quote_id={quote_id} contact_id={contact_id} email={customer_email}"
         )
 
-        # --- Find matching Zoho Install — try email first, fall back to quote ID ---
+        # --- Find matching Zoho Install ---
+        # Primary path: match by LightReach_Account_ID (populated by aurora-zoho-sync
+        # from financing.financier.external.consumer_id). This is the steady state.
+        # Fallbacks: email, then LightReach_Quote_ID, for installs not yet bootstrapped.
         access_token = get_zoho_access_token()
         if not access_token:
             logger.error("LightReach webhook: failed to obtain Zoho token")
@@ -800,7 +1019,18 @@ async def lightreach_webhook(request: Request):
 
         install_id = None
 
-        if customer_email:
+        if account_id:
+            search_url = (
+                f"{api_domain}/crm/v2/Installs/search"
+                f"?criteria=(LightReach_Account_ID:equals:{quote(account_id, safe='')})"
+            )
+            search_resp = requests.get(search_url, headers=headers)
+            if search_resp.status_code == 200:
+                records = search_resp.json().get("data", [])
+                if records:
+                    install_id = records[0].get("id")
+
+        if not install_id and customer_email:
             search_url = (
                 f"{api_domain}/crm/v2/Installs/search"
                 f"?criteria=(Primary_Email:equals:{quote(customer_email, safe='')})"
@@ -825,7 +1055,7 @@ async def lightreach_webhook(request: Request):
         if not install_id:
             logger.warning(
                 f"LightReach webhook: no Install found | "
-                f"email={customer_email} quote_id={quote_id}"
+                f"account_id={account_id} email={customer_email} quote_id={quote_id}"
             )
             return {"status": "logged - no matching install"}
 
@@ -840,6 +1070,10 @@ async def lightreach_webhook(request: Request):
             "LightReach_Last_Updated": timestamp_now,
             "LightReach_Raw_Payload": json.dumps(body),
         }
+        if account_id:
+            # Persist the link so future webhooks for this install short-circuit
+            # to the LightReach_Account_ID branch above.
+            update_fields["LightReach_Account_ID"] = account_id
         if quote_id:
             update_fields["LightReach_Quote_ID"] = quote_id
         if contact_id:
