@@ -150,10 +150,15 @@ def _create_initial_snapshot_for_install(
     if first.get("code") != "SUCCESS":
         code = first.get("code") or "UNKNOWN"
         message = first.get("message") or "no message"
+        # Zoho returns field-level diagnostic info in `details` for INVALID_DATA
+        # and similar responses (e.g. {"api_name": "Aurora_Design_ID",
+        # "expected_data_type": "string"}). Log the whole thing to make these
+        # debuggable from the Render logs.
+        details = first.get("details")
         logger.warning(
             f"create_initial_snapshot: snapshot creation rejected | "
             f"install_id={install_id} project_id={project_id} "
-            f"code={code} message={message}"
+            f"code={code} message={message} details={json.dumps(details)}"
         )
         return {"status": f"failed - snapshot creation: {code} ({message})"}
 
@@ -1435,6 +1440,114 @@ def create_snapshot(snapshot_data, access_token):
     payload = {"data": [snapshot_data]}
 
     return requests.post(url, headers=headers, json=payload)
+
+
+# ------------------------
+# Webhook: Aurora — Milestone Created (auto-snapshot on "sold")
+# ------------------------
+# Aurora fires this webhook every time a milestone is created on a project.
+# We filter to the `sold` stage server-side, look up the matching Zoho Install
+# by Aurora_Project_ID, and call the same snapshot helper that
+# /internal/create-initial-snapshot uses. This closes the timing gap that
+# leaves Zoho-side workflow rules (which fire on Install creation) unable to
+# reliably trigger snapshot creation when the rep marks the design "sold"
+# *after* the Install record was already created in Zoho.
+#
+# Aurora's URL template style (from their docs):
+#   https://your-app.example.com/webhook/aurora/milestone-created
+#       ?project_id=<PROJECT_ID>&design_id=<DESIGN_ID>
+#       &stage=<STAGE>&source=<SOURCE>
+#
+# Optional shared-secret auth: set AURORA_WEBHOOK_TOKEN in env, then include
+# `&token=<value>` in the URL Aurora is configured to call. If the env var
+# is unset, the endpoint is open (use only inside a trusted network).
+@app.api_route("/webhook/aurora/milestone-created", methods=["GET", "POST"])
+async def aurora_milestone_created_webhook(request: Request):
+    try:
+        # Aurora's URL template substitutes everything as query params, but
+        # accept body fields as a fallback in case POST sends a JSON body.
+        params = dict(request.query_params)
+        body = {}
+        if request.method == "POST":
+            try:
+                raw = await request.body()
+                if raw:
+                    body = json.loads(raw)
+            except (ValueError, json.JSONDecodeError):
+                body = {}
+
+        def _pick(key):
+            return params.get(key) or body.get(key)
+
+        project_id = _pick("project_id")
+        design_id = _pick("design_id")
+        stage = _pick("stage")
+        source = _pick("source")
+        token = _pick("token")
+
+        logger.info(
+            f"Aurora milestone webhook | project_id={project_id} design_id={design_id} "
+            f"stage={stage} source={source}"
+        )
+
+        # Optional token check
+        expected_token = os.getenv("AURORA_WEBHOOK_TOKEN")
+        if expected_token and token != expected_token:
+            logger.warning("Aurora milestone webhook rejected — invalid token")
+            raise HTTPException(status_code=401, detail="Unauthorized")
+
+        if not project_id:
+            return {"status": "ignored - missing project_id"}
+
+        # Server-side filter: only act on "sold" milestones, even if Aurora's
+        # filter happens to pass us something else.
+        if (stage or "").lower() != "sold":
+            return {"status": "ignored - stage is not sold", "stage": stage}
+
+        # Look up the Zoho Install by Aurora_Project_ID.
+        access_token = get_zoho_access_token()
+        if not access_token:
+            logger.error("Aurora milestone webhook: failed to obtain Zoho token")
+            return {"status": "failed - no zoho token"}
+
+        find_resp = find_install(project_id, access_token)
+        if find_resp.status_code != 200:
+            logger.warning(
+                f"Aurora milestone webhook: install search failed | "
+                f"project_id={project_id} status={find_resp.status_code}"
+            )
+            return {"status": "failed - install lookup error"}
+
+        records = find_resp.json().get("data", []) or []
+        if not records:
+            logger.warning(
+                f"Aurora milestone webhook: no install found | project_id={project_id}"
+            )
+            return {"status": "no install found for project"}
+
+        install = records[0]
+        install_id = install.get("id")
+
+        # If the install has a Deal lookup, pass it through to the snapshot.
+        deal = install.get("Deal") or {}
+        deal_id = deal.get("id") if isinstance(deal, dict) else None
+
+        result = _create_initial_snapshot_for_install(
+            install_id=install_id,
+            project_id=project_id,
+            deal_id=deal_id,
+        )
+        logger.info(
+            f"Aurora milestone webhook: result | install_id={install_id} "
+            f"project_id={project_id} status={result.get('status')}"
+        )
+        return result
+
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("Unhandled exception in aurora_milestone_created_webhook")
+        return {"status": "failed - exception"}
 
 
 # ------------------------
