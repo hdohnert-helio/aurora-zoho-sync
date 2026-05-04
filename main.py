@@ -134,7 +134,32 @@ def _create_initial_snapshot_for_install(
     if snapshot_create_response.status_code not in [200, 201, 202]:
         return {"status": "failed - snapshot creation error"}
 
-    snapshot_id = snapshot_create_response.json()["data"][0]["details"]["id"]
+    # Zoho can return HTTP 2xx but include per-record failures in the body
+    # (DUPLICATE_DATA, INVALID_DATA, etc.). Inspect data[0].code before
+    # assuming details.id exists.
+    try:
+        resp_json = snapshot_create_response.json()
+    except ValueError:
+        return {"status": "failed - snapshot creation: non-JSON response"}
+
+    data_list = resp_json.get("data") or []
+    if not data_list:
+        return {"status": "failed - snapshot creation: empty data array"}
+
+    first = data_list[0]
+    if first.get("code") != "SUCCESS":
+        code = first.get("code") or "UNKNOWN"
+        message = first.get("message") or "no message"
+        logger.warning(
+            f"create_initial_snapshot: snapshot creation rejected | "
+            f"install_id={install_id} project_id={project_id} "
+            f"code={code} message={message}"
+        )
+        return {"status": f"failed - snapshot creation: {code} ({message})"}
+
+    snapshot_id = (first.get("details") or {}).get("id")
+    if not snapshot_id:
+        return {"status": "failed - snapshot creation: missing id in response"}
 
     # Pull LightReach IDs from Aurora financings on this design.
     lightreach_fields = extract_lightreach_install_fields(design_id)
