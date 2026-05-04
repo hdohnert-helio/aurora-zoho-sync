@@ -23,132 +23,155 @@ app = FastAPI()
 # ------------------------
 # Internal: Create Initial Snapshot After Install Creation
 # ------------------------
+def _create_initial_snapshot_for_install(
+    install_id,
+    project_id,
+    deal_id=None,
+    access_token=None,
+    headers=None,
+    api_domain=None,
+):
+    """
+    Core logic for creating an initial snapshot. Callable from both the HTTP
+    endpoint below and the bulk backfill background task. Returns a dict with
+    a "status" string identical to what the endpoint returns.
+
+    If access_token / headers / api_domain are passed in, they're reused (saves
+    per-call overhead in bulk loops). Otherwise this function acquires them.
+    """
+    if not install_id or not project_id:
+        return {"status": "failed - missing install_id or project_id"}
+
+    if not access_token:
+        access_token = get_zoho_access_token()
+    if not access_token:
+        return {"status": "failed - no zoho token"}
+
+    if not headers:
+        headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
+    if not api_domain:
+        api_domain = os.getenv("ZOHO_API_DOMAIN")
+
+    # Pull Install record
+    install_url = f"{api_domain}/crm/v2/Installs/{install_id}"
+    install_response = requests.get(install_url, headers=headers)
+    if install_response.status_code != 200:
+        return {"status": "failed - install lookup error"}
+
+    install_records = install_response.json().get("data", [])
+    if not install_records:
+        return {"status": "failed - install not found"}
+    install_data = install_records[0]
+
+    # If Active Snapshot already exists, do nothing
+    if install_data.get("Active_Snapshot"):
+        return {"status": "skipped - active snapshot already exists"}
+
+    # Pull Aurora designs for project (with 429 retry)
+    tenant_id = os.getenv("AURORA_TENANT_ID")
+    designs_url = f"https://api.aurorasolar.com/tenants/{tenant_id}/projects/{project_id}/designs"
+    designs_response = _aurora_get_with_retry(designs_url)
+    if designs_response.status_code != 200:
+        return {
+            "status": f"failed - aurora designs pull error ({designs_response.status_code})"
+        }
+
+    designs = designs_response.json().get("designs", [])
+    sold_designs = [
+        d for d in designs
+        if (d.get("milestone") or {}).get("milestone") == "sold"
+    ]
+
+    if len(sold_designs) != 1:
+        return {
+            "status": f"failed - sold design count invalid ({len(sold_designs)})"
+        }
+
+    design_id = sold_designs[0].get("id")
+
+    # Pull full design, pricing, and summary
+    design_response = pull_design(design_id)
+    pricing_response = pull_pricing(design_id)
+    summary_response = pull_design_summary(design_id)
+
+    if design_response.status_code != 200 or pricing_response.status_code != 200:
+        return {"status": "failed - aurora design/pricing pull error"}
+
+    design_root = design_response.json()
+    design_json = design_root.get("design", design_root)
+
+    pricing_root = pricing_response.json()
+    pricing_json = pricing_root.get("pricing", pricing_root)
+
+    summary_json = (
+        summary_response.json().get("design", {})
+        if summary_response.status_code == 200
+        else {}
+    )
+
+    timestamp_now = datetime.datetime.now().astimezone().replace(microsecond=0).isoformat()
+    snapshot_name = f"{project_id[:8]} | {design_id[:8]} | INITIAL SOLD | {timestamp_now}"
+    aurora_design_url = f"https://v2.aurorasolar.com/projects/{project_id}/designs/{design_id}/cad"
+    aurora_project_url = f"https://v2.aurorasolar.com/projects/{project_id}/overview/dashboard"
+
+    pricing_fields = extract_pricing_fields(design_json, pricing_json, summary_json)
+
+    snapshot_data = {
+        "Name": snapshot_name,
+        "Aurora_Project_ID": project_id,
+        "Aurora_Design_ID": design_id,
+        "Install": {"id": install_id},
+        "Deal": {"id": deal_id} if deal_id else None,
+        "Snapshot_Is_Active": True,
+        "Processing_Status": "Initial Locked",
+        "Webhook_Received_At": timestamp_now,
+        "Aurora_Design_URL": aurora_design_url,
+        "Aurora_Project_URL": aurora_project_url,
+        **pricing_fields,
+    }
+
+    snapshot_create_response = create_snapshot(snapshot_data, access_token)
+    if snapshot_create_response.status_code not in [200, 201, 202]:
+        return {"status": "failed - snapshot creation error"}
+
+    snapshot_id = snapshot_create_response.json()["data"][0]["details"]["id"]
+
+    # Pull LightReach IDs from Aurora financings on this design.
+    lightreach_fields = extract_lightreach_install_fields(design_id)
+    if lightreach_fields:
+        logger.info(
+            f"create_initial_snapshot: writing LightReach fields | "
+            f"install_id={install_id} keys={list(lightreach_fields.keys())}"
+        )
+
+    # Update Install with Active Snapshot (and LightReach fields, if any)
+    update_payload = {
+        "data": [
+            {
+                "id": install_id,
+                "Active_Snapshot": {"id": snapshot_id},
+                **lightreach_fields,
+            }
+        ]
+    }
+
+    update_url = f"{api_domain}/crm/v2/Installs"
+    update_response = requests.put(update_url, headers=headers, json=update_payload)
+    if update_response.status_code not in [200, 202]:
+        return {"status": "failed - install update error"}
+
+    return {"status": "initial snapshot created", "snapshot_id": snapshot_id}
+
+
 @app.post("/internal/create-initial-snapshot")
 async def create_initial_snapshot(request: Request):
     try:
         body = await request.json()
-        install_id = body.get("install_id")
-        project_id = body.get("project_id")
-        deal_id = body.get("deal_id")
-
-        if not install_id or not project_id:
-            return {"status": "failed - missing install_id or project_id"}
-
-        access_token = get_zoho_access_token()
-        if not access_token:
-            return {"status": "failed - no zoho token"}
-
-        headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
-        api_domain = os.getenv("ZOHO_API_DOMAIN")
-
-        # Pull Install record
-        install_url = f"{api_domain}/crm/v2/Installs/{install_id}"
-        install_response = requests.get(install_url, headers=headers)
-
-        if install_response.status_code != 200:
-            return {"status": "failed - install lookup error"}
-
-        install_data = install_response.json().get("data", [])[0]
-
-        # If Active Snapshot already exists, do nothing
-        if install_data.get("Active_Snapshot"):
-            return {"status": "skipped - active snapshot already exists"}
-
-        # Pull Aurora designs for project
-        tenant_id = os.getenv("AURORA_TENANT_ID")
-        designs_url = f"https://api.aurorasolar.com/tenants/{tenant_id}/projects/{project_id}/designs"
-        designs_response = requests.get(designs_url, headers=aurora_headers())
-
-        if designs_response.status_code != 200:
-            return {"status": "failed - aurora designs pull error"}
-
-        designs = designs_response.json().get("designs", [])
-
-        sold_designs = [
-            d for d in designs
-            if (d.get("milestone") or {}).get("milestone") == "sold"
-        ]
-
-        if len(sold_designs) != 1:
-            return {"status": "failed - sold design count invalid"}
-
-        design_id = sold_designs[0].get("id")
-
-        # Pull full design, pricing, and summary
-        design_response = pull_design(design_id)
-        pricing_response = pull_pricing(design_id)
-        summary_response = pull_design_summary(design_id)
-
-        if design_response.status_code != 200 or pricing_response.status_code != 200:
-            return {"status": "failed - aurora design/pricing pull error"}
-
-        design_root = design_response.json()
-        design_json = design_root.get("design", design_root)
-
-        pricing_root = pricing_response.json()
-        pricing_json = pricing_root.get("pricing", pricing_root)
-
-        summary_json = summary_response.json().get("design", {}) if summary_response.status_code == 200 else {}
-
-        timestamp_now = datetime.datetime.now().astimezone().replace(microsecond=0).isoformat()
-        snapshot_name = f"{project_id[:8]} | {design_id[:8]} | INITIAL SOLD | {timestamp_now}"
-
-        aurora_design_url = f"https://v2.aurorasolar.com/projects/{project_id}/designs/{design_id}/cad"
-        aurora_project_url = f"https://v2.aurorasolar.com/projects/{project_id}/overview/dashboard"
-
-        # Extract all pricing/equipment fields using shared helper
-        pricing_fields = extract_pricing_fields(design_json, pricing_json, summary_json)
-
-        snapshot_data = {
-            "Name": snapshot_name,
-            "Aurora_Project_ID": project_id,
-            "Aurora_Design_ID": design_id,
-            "Install": {"id": install_id},
-            "Deal": {"id": deal_id} if deal_id else None,
-            "Snapshot_Is_Active": True,
-            "Processing_Status": "Initial Locked",
-            "Webhook_Received_At": timestamp_now,
-            "Aurora_Design_URL": aurora_design_url,
-            "Aurora_Project_URL": aurora_project_url,
-            **pricing_fields,
-        }
-
-        snapshot_create_response = create_snapshot(snapshot_data, access_token)
-
-        if snapshot_create_response.status_code not in [200, 201, 202]:
-            return {"status": "failed - snapshot creation error"}
-
-        snapshot_id = snapshot_create_response.json()["data"][0]["details"]["id"]
-
-        # Pull LightReach IDs from Aurora financings (if a palmetto financing exists
-        # on this design). These get merged into the same Install update below so
-        # the LightReach webhook handler can match by LightReach_Account_ID.
-        lightreach_fields = extract_lightreach_install_fields(design_id)
-        if lightreach_fields:
-            logger.info(
-                f"create_initial_snapshot: writing LightReach fields | "
-                f"install_id={install_id} keys={list(lightreach_fields.keys())}"
-            )
-
-        # Update Install with Active Snapshot (and LightReach fields, if any)
-        update_payload = {
-            "data": [
-                {
-                    "id": install_id,
-                    "Active_Snapshot": {"id": snapshot_id},
-                    **lightreach_fields,
-                }
-            ]
-        }
-
-        update_url = f"{api_domain}/crm/v2/Installs"
-        update_response = requests.put(update_url, headers=headers, json=update_payload)
-
-        if update_response.status_code not in [200, 202]:
-            return {"status": "failed - install update error"}
-
-        return {"status": "initial snapshot created"}
-
+        return _create_initial_snapshot_for_install(
+            install_id=body.get("install_id"),
+            project_id=body.get("project_id"),
+            deal_id=body.get("deal_id"),
+        )
     except Exception:
         logger.exception("Unhandled exception in initial snapshot creation")
         return {"status": "failed - exception"}
@@ -651,6 +674,184 @@ def _run_lightreach_backfill_all(force: bool, limit: int, dry_run: bool):
         )
     except Exception:
         logger.exception("Unhandled exception in _run_lightreach_backfill_all")
+
+
+# ------------------------
+# Internal: Bulk-create initial snapshots for installs missing them
+# ------------------------
+# POST /internal/backfill-snapshots-all
+# Body (all optional):
+#   { "limit": 0, "dry_run": false }
+#   - limit=N:   only process up to N candidates (0 = no limit)
+#   - dry_run:   log what would be created without actually doing it
+#
+# Returns immediately with {"status": "started"}; the loop runs in a background
+# task. Watch Render logs for 'snapshot_backfill complete' for the final tally.
+@app.post("/internal/backfill-snapshots-all")
+async def backfill_snapshots_all(request: Request, background_tasks: BackgroundTasks):
+    try:
+        raw = await request.body()
+        body = json.loads(raw) if raw else {}
+        limit = int(body.get("limit") or 0)
+        dry_run = bool(body.get("dry_run"))
+
+        background_tasks.add_task(_run_snapshot_backfill_all, limit=limit, dry_run=dry_run)
+        return {
+            "status": "started",
+            "limit": limit,
+            "dry_run": dry_run,
+            "note": "watch Render logs for progress; final summary logs as 'snapshot_backfill complete'",
+        }
+    except Exception:
+        logger.exception("Unhandled exception in backfill_snapshots_all")
+        return {"status": "failed - exception"}
+
+
+def _run_snapshot_backfill_all(limit: int, dry_run: bool):
+    """
+    Page through every Zoho Install. For each one with Aurora_Project_ID set
+    AND no Active_Snapshot, call _create_initial_snapshot_for_install. Logs
+    progress every 25 successes and a summary at the end.
+
+    Buckets the results:
+      succeeded            – snapshot created cleanly
+      sold_design_invalid  – Aurora returned 0 or 2+ sold designs (the most
+                             common reason an install can't be auto-bootstrapped)
+      failed               – any other failure (Aurora 5xx, Zoho update error,
+                             unhandled exception, etc.)
+      skipped_no_project   – install has no Aurora_Project_ID
+      skipped_already_set  – install already has an Active_Snapshot
+    """
+    try:
+        access_token = get_zoho_access_token()
+        if not access_token:
+            logger.error("snapshot_backfill: failed to obtain Zoho token")
+            return
+
+        api_domain = os.getenv("ZOHO_API_DOMAIN")
+        headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
+
+        page = 1
+        per_page = 200
+        seen = 0
+        skipped_no_project = 0
+        skipped_already_set = 0
+        attempted = 0
+        succeeded = 0
+        sold_design_invalid = 0
+        failed = 0
+
+        logger.info(f"snapshot_backfill: starting | limit={limit} dry_run={dry_run}")
+
+        while True:
+            list_url = (
+                f"{api_domain}/crm/v2/Installs"
+                f"?fields=id,Aurora_Project_ID,Active_Snapshot"
+                f"&page={page}&per_page={per_page}"
+            )
+            list_resp = requests.get(list_url, headers=headers)
+            if list_resp.status_code == 401:
+                access_token = get_zoho_access_token()
+                headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
+                list_resp = requests.get(list_url, headers=headers)
+            if list_resp.status_code != 200:
+                logger.error(
+                    f"snapshot_backfill: install pull failed | "
+                    f"page={page} status={list_resp.status_code} body={list_resp.text[:300]}"
+                )
+                break
+
+            payload = list_resp.json()
+            records = payload.get("data") or []
+            if not records:
+                break
+
+            for record in records:
+                seen += 1
+                if limit and attempted >= limit:
+                    break
+
+                install_id = record.get("id")
+                project_id = record.get("Aurora_Project_ID")
+                existing_snapshot = record.get("Active_Snapshot")
+
+                if not project_id:
+                    skipped_no_project += 1
+                    continue
+                if existing_snapshot:
+                    skipped_already_set += 1
+                    continue
+
+                attempted += 1
+
+                if dry_run:
+                    logger.info(
+                        f"snapshot_backfill [dry-run]: would create snapshot | "
+                        f"install_id={install_id} project_id={project_id}"
+                    )
+                    succeeded += 1
+                    continue
+
+                try:
+                    result = _create_initial_snapshot_for_install(
+                        install_id=install_id,
+                        project_id=project_id,
+                        deal_id=None,
+                        access_token=access_token,
+                        headers=headers,
+                        api_domain=api_domain,
+                    )
+                    status = (result or {}).get("status", "")
+
+                    if "initial snapshot created" in status:
+                        succeeded += 1
+                        if succeeded % 25 == 0:
+                            logger.info(
+                                f"snapshot_backfill: progress | seen={seen} attempted={attempted} "
+                                f"succeeded={succeeded} sold_design_invalid={sold_design_invalid} "
+                                f"failed={failed}"
+                            )
+                    elif "sold design count invalid" in status:
+                        sold_design_invalid += 1
+                        logger.warning(
+                            f"snapshot_backfill: sold count invalid | "
+                            f"install_id={install_id} project_id={project_id} status={status}"
+                        )
+                    elif "skipped - active snapshot already exists" in status:
+                        # Race — list said empty, but a snapshot got created in between.
+                        skipped_already_set += 1
+                    else:
+                        failed += 1
+                        logger.warning(
+                            f"snapshot_backfill: failed | install_id={install_id} "
+                            f"project_id={project_id} status={status}"
+                        )
+                except Exception:
+                    failed += 1
+                    logger.exception(
+                        f"snapshot_backfill: exception | install_id={install_id} "
+                        f"project_id={project_id}"
+                    )
+
+                # Be polite — small delay between Aurora-heavy iterations.
+                time.sleep(0.5)
+
+            if limit and attempted >= limit:
+                break
+
+            info = payload.get("info") or {}
+            if not info.get("more_records"):
+                break
+            page += 1
+
+        logger.info(
+            f"snapshot_backfill complete | seen={seen} attempted={attempted} "
+            f"succeeded={succeeded} sold_design_invalid={sold_design_invalid} "
+            f"failed={failed} skipped_no_project={skipped_no_project} "
+            f"skipped_already_set={skipped_already_set} dry_run={dry_run}"
+        )
+    except Exception:
+        logger.exception("Unhandled exception in _run_snapshot_backfill_all")
 
 
 # ------------------------
