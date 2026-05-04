@@ -633,7 +633,7 @@ def _run_lightreach_backfill_all(force: bool, limit: int, dry_run: bool):
                     )
 
                 # Be polite — small delay between Aurora-heavy iterations.
-                time.sleep(0.1)
+                time.sleep(0.5)
 
             if limit and attempted >= limit:
                 break
@@ -963,6 +963,33 @@ def pull_pricing(design_id):
     return requests.get(url, headers=aurora_headers())
 
 
+def _aurora_get_with_retry(url, max_retries=5):
+    """
+    GET an Aurora URL with retry-on-429 backoff. Aurora's rate limit returns
+    a Retry-After header; we honor it when present, otherwise exponential
+    backoff starting at 1s. Returns the final Response object (which may
+    still be 429 if every retry is exhausted).
+    """
+    backoff = 1.0
+    resp = None
+    for attempt in range(max_retries):
+        resp = requests.get(url, headers=aurora_headers())
+        if resp.status_code != 429:
+            return resp
+        retry_after = resp.headers.get("Retry-After")
+        try:
+            sleep_for = float(retry_after) if retry_after else backoff
+        except (TypeError, ValueError):
+            sleep_for = backoff
+        logger.warning(
+            f"Aurora 429 — sleeping {sleep_for:.1f}s before retry "
+            f"(attempt {attempt + 1}/{max_retries}) | url={url}"
+        )
+        time.sleep(sleep_for)
+        backoff = min(backoff * 2, 30.0)
+    return resp
+
+
 def _normalize_aurora_datetime(s):
     """
     Convert Aurora's 'YYYY-MM-DD HH:MM:SS UTC' string format to ISO 8601 so it
@@ -983,14 +1010,14 @@ def pull_financings(design_id):
     """List all financings for a design (palmetto, sungage, cash, etc.)."""
     tenant_id = os.getenv("AURORA_TENANT_ID")
     url = f"https://api.aurorasolar.com/tenants/{tenant_id}/designs/{design_id}/financings"
-    return requests.get(url, headers=aurora_headers())
+    return _aurora_get_with_retry(url)
 
 
 def pull_financing(design_id, financing_id):
     """Retrieve the full record for one financing by ID."""
     tenant_id = os.getenv("AURORA_TENANT_ID")
     url = f"https://api.aurorasolar.com/tenants/{tenant_id}/designs/{design_id}/financings/{financing_id}"
-    return requests.get(url, headers=aurora_headers())
+    return _aurora_get_with_retry(url)
 
 
 def extract_lightreach_install_fields(design_id):
@@ -1085,7 +1112,7 @@ def extract_lightreach_install_fields_for_project(project_id):
     """
     tenant_id = os.getenv("AURORA_TENANT_ID")
     designs_url = f"https://api.aurorasolar.com/tenants/{tenant_id}/projects/{project_id}/designs"
-    designs_resp = requests.get(designs_url, headers=aurora_headers())
+    designs_resp = _aurora_get_with_retry(designs_url)
     if designs_resp.status_code != 200:
         logger.warning(
             f"extract_lightreach_install_fields_for_project: designs pull failed | "
