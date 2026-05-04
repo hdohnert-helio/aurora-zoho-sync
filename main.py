@@ -1,9 +1,10 @@
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
 from urllib.parse import quote
 import os
 import requests
 import datetime
 import json
+import time
 
 import logging
 import sys
@@ -447,38 +448,16 @@ async def backfill_lightreach(request: Request):
         if not project_id:
             return {"status": "failed - install has no Aurora_Project_ID"}
 
-        # Pull all Aurora designs for this project.
-        tenant_id = os.getenv("AURORA_TENANT_ID")
-        designs_url = f"https://api.aurorasolar.com/tenants/{tenant_id}/projects/{project_id}/designs"
-        designs_resp = requests.get(designs_url, headers=aurora_headers())
-        if designs_resp.status_code != 200:
-            return {"status": f"failed - aurora designs pull error ({designs_resp.status_code})"}
-        designs = designs_resp.json().get("designs", [])
-        if not designs:
-            return {"status": "failed - no aurora designs for project"}
-
-        # Walk every design until we find one with a palmetto financing. Prefer
-        # the sold design if there is one (it's the design the customer actually
-        # contracted), otherwise scan all designs.
-        sold_designs = [d for d in designs if (d.get("milestone") or {}).get("milestone") == "sold"]
-        ordered_designs = sold_designs + [d for d in designs if d not in sold_designs]
-
-        lightreach_fields = {}
-        for d in ordered_designs:
-            d_id = d.get("id")
-            if not d_id:
-                continue
-            fields = extract_lightreach_install_fields(d_id)
-            if fields:
-                lightreach_fields = fields
-                logger.info(
-                    f"backfill_lightreach: matched design {d_id} | "
-                    f"install_id={install_id} keys={list(fields.keys())}"
-                )
-                break
-
+        # Walk every design under the project and pick the most-progressed
+        # palmetto financing across the whole project (not just per-design).
+        lightreach_fields = extract_lightreach_install_fields_for_project(project_id)
         if not lightreach_fields:
             return {"status": "no palmetto financing found on any design"}
+
+        logger.info(
+            f"backfill_lightreach: install_id={install_id} "
+            f"keys={list(lightreach_fields.keys())}"
+        )
 
         update_payload = {"data": [{"id": install_id, **lightreach_fields}]}
         update_resp = requests.put(
@@ -496,6 +475,182 @@ async def backfill_lightreach(request: Request):
     except Exception:
         logger.exception("Unhandled exception in backfill_lightreach")
         return {"status": "failed - exception"}
+
+
+# ------------------------
+# Internal: Bulk backfill LightReach fields across all Installs
+# ------------------------
+# POST /internal/backfill-lightreach-all
+# Body (all optional):
+#   { "force": false, "limit": 0, "dry_run": false }
+#   - force=true: also re-process installs that already have LightReach_Account_ID
+#   - limit=N:   only process up to N candidates (0 = no limit)
+#   - dry_run:   count and log candidates but skip the actual writes
+#
+# Returns immediately with {"status": "started", "candidates": N}; the loop
+# runs in a background task. Watch Render logs for progress and final summary.
+@app.post("/internal/backfill-lightreach-all")
+async def backfill_lightreach_all(request: Request, background_tasks: BackgroundTasks):
+    try:
+        raw = await request.body()
+        body = json.loads(raw) if raw else {}
+        force = bool(body.get("force"))
+        limit = int(body.get("limit") or 0)
+        dry_run = bool(body.get("dry_run"))
+
+        background_tasks.add_task(
+            _run_lightreach_backfill_all, force=force, limit=limit, dry_run=dry_run
+        )
+        return {
+            "status": "started",
+            "force": force,
+            "limit": limit,
+            "dry_run": dry_run,
+            "note": "watch Render logs for progress; final summary logs as 'backfill_all complete'",
+        }
+    except Exception:
+        logger.exception("Unhandled exception in backfill_lightreach_all")
+        return {"status": "failed - exception"}
+
+
+def _run_lightreach_backfill_all(force: bool, limit: int, dry_run: bool):
+    """
+    Background task: page through all Zoho Installs, and for each one with an
+    Aurora_Project_ID (and, unless force, a missing LightReach_Account_ID),
+    pull the LightReach fields from Aurora and write them to the Install.
+    """
+    try:
+        access_token = get_zoho_access_token()
+        if not access_token:
+            logger.error("backfill_all: failed to obtain Zoho token")
+            return
+
+        api_domain = os.getenv("ZOHO_API_DOMAIN")
+        headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
+
+        page = 1
+        per_page = 200
+        seen = 0
+        skipped_no_project = 0
+        skipped_already_set = 0
+        attempted = 0
+        succeeded = 0
+        failed = 0
+        no_match = 0
+
+        logger.info(
+            f"backfill_all: starting | force={force} limit={limit} dry_run={dry_run}"
+        )
+
+        while True:
+            list_url = (
+                f"{api_domain}/crm/v2/Installs"
+                f"?fields=id,Aurora_Project_ID,LightReach_Account_ID"
+                f"&page={page}&per_page={per_page}"
+            )
+            list_resp = requests.get(list_url, headers=headers)
+            if list_resp.status_code == 401:
+                # Token expired mid-run — refresh and retry once.
+                access_token = get_zoho_access_token()
+                headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
+                list_resp = requests.get(list_url, headers=headers)
+            if list_resp.status_code != 200:
+                logger.error(
+                    f"backfill_all: install pull failed | "
+                    f"page={page} status={list_resp.status_code} body={list_resp.text[:300]}"
+                )
+                break
+
+            payload = list_resp.json()
+            records = payload.get("data") or []
+            if not records:
+                break
+
+            for record in records:
+                seen += 1
+
+                if limit and attempted >= limit:
+                    break
+
+                install_id = record.get("id")
+                project_id = record.get("Aurora_Project_ID")
+                existing_account = record.get("LightReach_Account_ID")
+
+                if not project_id:
+                    skipped_no_project += 1
+                    continue
+                if existing_account and not force:
+                    skipped_already_set += 1
+                    continue
+
+                attempted += 1
+                try:
+                    fields = extract_lightreach_install_fields_for_project(project_id)
+                    if not fields:
+                        no_match += 1
+                        continue
+
+                    if dry_run:
+                        logger.info(
+                            f"backfill_all [dry-run]: would update install_id={install_id} "
+                            f"project_id={project_id} keys={list(fields.keys())}"
+                        )
+                        succeeded += 1
+                        continue
+
+                    update_payload = {"data": [{"id": install_id, **fields}]}
+                    update_resp = requests.put(
+                        f"{api_domain}/crm/v2/Installs",
+                        headers=headers,
+                        json=update_payload,
+                    )
+                    if update_resp.status_code == 401:
+                        access_token = get_zoho_access_token()
+                        headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
+                        update_resp = requests.put(
+                            f"{api_domain}/crm/v2/Installs",
+                            headers=headers,
+                            json=update_payload,
+                        )
+                    if update_resp.status_code in [200, 201, 202]:
+                        succeeded += 1
+                        if succeeded % 25 == 0:
+                            logger.info(
+                                f"backfill_all: progress | seen={seen} attempted={attempted} "
+                                f"succeeded={succeeded} no_match={no_match} failed={failed}"
+                            )
+                    else:
+                        failed += 1
+                        logger.warning(
+                            f"backfill_all: update failed | install_id={install_id} "
+                            f"status={update_resp.status_code} body={update_resp.text[:200]}"
+                        )
+                except Exception:
+                    failed += 1
+                    logger.exception(
+                        f"backfill_all: exception on install_id={install_id} "
+                        f"project_id={project_id}"
+                    )
+
+                # Be polite — small delay between Aurora-heavy iterations.
+                time.sleep(0.1)
+
+            if limit and attempted >= limit:
+                break
+
+            info = payload.get("info") or {}
+            if not info.get("more_records"):
+                break
+            page += 1
+
+        logger.info(
+            f"backfill_all complete | seen={seen} attempted={attempted} "
+            f"succeeded={succeeded} no_match={no_match} failed={failed} "
+            f"skipped_no_project={skipped_no_project} skipped_already_set={skipped_already_set} "
+            f"dry_run={dry_run}"
+        )
+    except Exception:
+        logger.exception("Unhandled exception in _run_lightreach_backfill_all")
 
 
 # ------------------------
@@ -898,6 +1053,90 @@ def extract_lightreach_install_fields(design_id):
         )
 
     best = max(palmetto_records, key=_progress_score)
+    external = best["external"]
+    financier = best["financier"]
+
+    fields = {}
+    if external.get("consumer_id"):
+        fields["LightReach_Account_ID"] = external["consumer_id"]
+    if external.get("request_id"):
+        fields["LightReach_Request_ID"] = external["request_id"]
+    if external.get("quote_id"):
+        fields["LightReach_Quote_ID"] = external["quote_id"]
+    if external.get("provider_status"):
+        fields["LightReach_Finance_Status"] = external["provider_status"]
+    if external.get("contract_signed_at"):
+        fields["LightReach_Contract_Signed_At"] = _normalize_aurora_datetime(
+            external["contract_signed_at"]
+        )
+    if financier.get("status"):
+        fields["LightReach_Application_Status"] = financier["status"]
+    return fields
+
+
+def extract_lightreach_install_fields_for_project(project_id):
+    """
+    Walk every design under a project, gather every palmetto financing across
+    all of them, and return the field dict for the most-progressed one. This
+    is strictly better than picking the first design with a palmetto financing
+    since LightReach state evolves on whichever design was the actual contract.
+
+    Returns {} if no palmetto financing exists anywhere on the project.
+    """
+    tenant_id = os.getenv("AURORA_TENANT_ID")
+    designs_url = f"https://api.aurorasolar.com/tenants/{tenant_id}/projects/{project_id}/designs"
+    designs_resp = requests.get(designs_url, headers=aurora_headers())
+    if designs_resp.status_code != 200:
+        logger.warning(
+            f"extract_lightreach_install_fields_for_project: designs pull failed | "
+            f"project_id={project_id} status={designs_resp.status_code}"
+        )
+        return {}
+    designs = designs_resp.json().get("designs", [])
+    if not designs:
+        return {}
+
+    # Gather every palmetto financing across every design.
+    all_palmetto = []
+    for d in designs:
+        d_id = d.get("id")
+        if not d_id:
+            continue
+        list_resp = pull_financings(d_id)
+        if list_resp.status_code != 200:
+            continue
+        listed = list_resp.json()
+        summaries = listed.get("financings") if isinstance(listed, dict) else listed
+        if not summaries:
+            continue
+        for s in summaries:
+            f_id = s.get("id") if isinstance(s, dict) else None
+            if not f_id:
+                continue
+            full_resp = pull_financing(d_id, f_id)
+            if full_resp.status_code != 200:
+                continue
+            full = full_resp.json().get("financing", full_resp.json())
+            financier = full.get("financier") or {}
+            if financier.get("provider") != "palmetto":
+                continue
+            external = financier.get("external") or {}
+            if not external.get("consumer_id"):
+                continue
+            all_palmetto.append({"financier": financier, "external": external})
+
+    if not all_palmetto:
+        return {}
+
+    def _progress_score(rec):
+        ext = rec["external"]
+        return (
+            1 if ext.get("contract_signed_at") else 0,
+            1 if ext.get("request_id") else 0,
+            1 if ext.get("quote_id") else 0,
+        )
+
+    best = max(all_palmetto, key=_progress_score)
     external = best["external"]
     financier = best["financier"]
 
