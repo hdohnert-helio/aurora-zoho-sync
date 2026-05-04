@@ -1862,6 +1862,36 @@ async def aurora_webhook(request: Request):
         opportunity = install_record.get("Opportunity")
         deal_id = opportunity.get("id") if opportunity else None
 
+        # Decide what to do with this milestone snapshot:
+        #   * "advancing" milestones (sold, installed, permission_to_operate)
+        #     should become the install's Active_Snapshot — these reflect
+        #     forward progress in the project lifecycle.
+        #   * everything else (canceled_*, offer, etc.) just appends to the
+        #     install's snapshot related list as historical record without
+        #     touching Active_Snapshot.
+        # On the *very first* sold milestone we additionally pull LightReach
+        # IDs from Aurora's financings (one-time bootstrap). Subsequent
+        # promotions don't refresh LightReach fields — the LightReach webhook
+        # handler is the authoritative source for those after bootstrap.
+        ADVANCING_MILESTONES = {
+            "sold",
+            "installed",
+            "permission_to_operate",
+            "permission to operate",
+            "pto",
+            "permissiontooperate",
+        }
+        milestone_lc = (milestone_name or "").lower().strip()
+        is_advancing = milestone_lc in ADVANCING_MILESTONES
+
+        existing_active_snapshot = install_record.get("Active_Snapshot")
+        is_initial_sold = milestone_lc == "sold" and not existing_active_snapshot
+        previous_active_snapshot_id = (
+            existing_active_snapshot.get("id")
+            if isinstance(existing_active_snapshot, dict)
+            else None
+        )
+
         # ------------------------
         # Pull Sales Org Redline from Install (Formula Field)
         # ------------------------
@@ -1900,7 +1930,8 @@ async def aurora_webhook(request: Request):
             "Aurora_Project_URL": aurora_project_url,
             "Sales_Org_Redline_PPW": sales_org_redline_ppw,
             "Redline_At_Sale": redline_at_sale,
-            "Processing_Status": "Processed",
+            "Processing_Status": "Initial Locked" if is_initial_sold else "Processed",
+            "Snapshot_Is_Active": is_advancing,
             **pricing_fields,
         }
 
@@ -1913,12 +1944,99 @@ async def aurora_webhook(request: Request):
                 f"body={snapshot_create_response.text}"
             )
             return {"status": "failed - snapshot creation error"}
-        else:
-            logger.info(
-                f"[{event_id}] Snapshot created successfully | "
-                f"status={snapshot_create_response.status_code}"
+
+        # Handle Zoho's per-record success/failure code in the body.
+        try:
+            create_resp_json = snapshot_create_response.json()
+        except ValueError:
+            create_resp_json = {}
+        first_record = (create_resp_json.get("data") or [{}])[0]
+        if first_record.get("code") and first_record.get("code") != "SUCCESS":
+            logger.warning(
+                f"[{event_id}] Snapshot creation rejected | "
+                f"code={first_record.get('code')} message={first_record.get('message')} "
+                f"details={json.dumps(first_record.get('details'))}"
             )
-            return {"status": "processed"}
+            return {"status": f"failed - snapshot creation: {first_record.get('code')}"}
+
+        snapshot_id = (first_record.get("details") or {}).get("id")
+
+        logger.info(
+            f"[{event_id}] Snapshot created successfully | "
+            f"status={snapshot_create_response.status_code} snapshot_id={snapshot_id} "
+            f"milestone={milestone_lc} is_advancing={is_advancing} "
+            f"is_initial_sold={is_initial_sold}"
+        )
+
+        # If this milestone advances the project (sold / installed / PTO),
+        # promote the new snapshot to active. Also demote the previously-active
+        # snapshot so Snapshot_Is_Active is mutually exclusive in practice. On
+        # the very first sold, additionally bootstrap LightReach fields.
+        if is_advancing and snapshot_id:
+            api_domain = os.getenv("ZOHO_API_DOMAIN")
+            zoho_headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
+
+            # Demote the previously-active snapshot, if any and if it's not
+            # the one we just created (it isn't — different ID).
+            if previous_active_snapshot_id and previous_active_snapshot_id != snapshot_id:
+                demote_payload = {
+                    "data": [{
+                        "id": previous_active_snapshot_id,
+                        "Snapshot_Is_Active": False,
+                    }]
+                }
+                demote_resp = requests.put(
+                    f"{api_domain}/crm/v2/Aurora_Design_Snapshots",
+                    headers=zoho_headers,
+                    json=demote_payload,
+                )
+                if demote_resp.status_code in [200, 201, 202]:
+                    logger.info(
+                        f"[{event_id}] Previous active snapshot demoted | "
+                        f"snapshot_id={previous_active_snapshot_id}"
+                    )
+                else:
+                    logger.warning(
+                        f"[{event_id}] Previous active snapshot demote failed | "
+                        f"snapshot_id={previous_active_snapshot_id} "
+                        f"status={demote_resp.status_code} body={demote_resp.text[:300]}"
+                    )
+
+            install_update = {
+                "id": install_id,
+                "Active_Snapshot": {"id": snapshot_id},
+            }
+            # LightReach bootstrap only on the very first sold — subsequent
+            # promotions leave LightReach fields alone (they're maintained by
+            # the LightReach webhook handler from then on).
+            if is_initial_sold:
+                lightreach_fields = extract_lightreach_install_fields(design_id)
+                install_update.update(lightreach_fields)
+            else:
+                lightreach_fields = {}
+
+            update_resp = requests.put(
+                f"{api_domain}/crm/v2/Installs",
+                headers=zoho_headers,
+                json={"data": [install_update]},
+            )
+            if update_resp.status_code in [200, 201, 202]:
+                logger.info(
+                    f"[{event_id}] Install promoted with active snapshot | "
+                    f"install_id={install_id} milestone={milestone_lc} "
+                    f"lightreach_keys={list(lightreach_fields.keys())}"
+                )
+            else:
+                logger.warning(
+                    f"[{event_id}] Install promotion update failed | "
+                    f"status={update_resp.status_code} body={update_resp.text[:300]}"
+                )
+
+        return {
+            "status": "processed",
+            "is_advancing": is_advancing,
+            "is_initial_sold": is_initial_sold,
+        }
     except Exception:
         logger.exception("Unhandled exception during webhook processing")
         return {"status": "failed - exception"}
