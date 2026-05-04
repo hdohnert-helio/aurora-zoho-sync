@@ -65,7 +65,7 @@ async def create_initial_snapshot(request: Request):
 
         sold_designs = [
             d for d in designs
-            if d.get("milestone", {}).get("milestone") == "sold"
+            if (d.get("milestone") or {}).get("milestone") == "sold"
         ]
 
         if len(sold_designs) != 1:
@@ -460,7 +460,7 @@ async def backfill_lightreach(request: Request):
         # Walk every design until we find one with a palmetto financing. Prefer
         # the sold design if there is one (it's the design the customer actually
         # contracted), otherwise scan all designs.
-        sold_designs = [d for d in designs if d.get("milestone", {}).get("milestone") == "sold"]
+        sold_designs = [d for d in designs if (d.get("milestone") or {}).get("milestone") == "sold"]
         ordered_designs = sold_designs + [d for d in designs if d not in sold_designs]
 
         lightreach_fields = {}
