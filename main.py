@@ -1,10 +1,15 @@
 from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
 from urllib.parse import quote
 import os
+import re
 import requests
 import datetime
 import json
 import time
+
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 
 import logging
 import sys
@@ -882,6 +887,221 @@ def _run_snapshot_backfill_all(limit: int, dry_run: bool):
         )
     except Exception:
         logger.exception("Unhandled exception in _run_snapshot_backfill_all")
+
+
+# ------------------------
+# Google Calendar helpers (used by Zoho blueprint webhooks)
+# ------------------------
+# Service account JSON lives in env var GOOGLE_SERVICE_ACCOUNT_JSON.
+# Domain-wide delegation is authorized in Workspace admin for the scope
+# https://www.googleapis.com/auth/calendar.events, so the service account can
+# act as any @helio.solar user. We impersonate `installs@helio.solar` (the
+# Install Department mailbox) so events appear with that calendar/account as
+# both creator and organizer.
+GCAL_INSTALL_DEPT = "installs@helio.solar"
+GCAL_DEFAULT_ATTENDEES = [
+    "dhfargnoli@helio.solar",
+    "rgoncalves@helio.solar",
+    "wvargas@helio.solar",
+]
+GCAL_SITE_SURVEY_DURATION_MIN = 60
+GCAL_DEFAULT_TIMEZONE = "America/New_York"
+
+
+def _build_calendar_service(impersonate_email):
+    """
+    Build a Calendar API client that acts on behalf of `impersonate_email`.
+    Returns None if GOOGLE_SERVICE_ACCOUNT_JSON isn't configured.
+    """
+    raw = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
+    if not raw:
+        logger.error("GOOGLE_SERVICE_ACCOUNT_JSON env var is missing")
+        return None
+    try:
+        info = json.loads(raw)
+    except ValueError:
+        logger.exception("GOOGLE_SERVICE_ACCOUNT_JSON is not valid JSON")
+        return None
+    creds = service_account.Credentials.from_service_account_info(
+        info, scopes=["https://www.googleapis.com/auth/calendar.events"]
+    )
+    delegated = creds.with_subject(impersonate_email)
+    return build("calendar", "v3", credentials=delegated, cache_discovery=False)
+
+
+def _format_event_time(dt):
+    """Render a datetime as '11am' / '1pm' / '1:30pm' for the event title."""
+    h = dt.hour
+    m = dt.minute
+    suffix = "am" if h < 12 else "pm"
+    h_12 = h % 12 or 12
+    return f"{h_12}{suffix}" if m == 0 else f"{h_12}:{m:02d}{suffix}"
+
+
+def _extract_city_from_address(address):
+    """
+    Pull the city out of a US-style street address.
+
+    Examples:
+      "66 Wilson St, Stamford, CT 06902, USA"        → "Stamford"
+      "66 Wilson St, Apt 2, Stamford, CT 06902, USA" → "Stamford"
+      "Stamford, CT 06902"                            → "Stamford"
+    """
+    if not address:
+        return ""
+    parts = [p.strip() for p in str(address).split(",") if p.strip()]
+    if not parts:
+        return ""
+    # The city is conventionally the segment immediately before the
+    # state-and-zip segment. Identify state-and-zip by looking for a 5-digit zip.
+    for i, p in enumerate(parts):
+        if re.search(r"\b\d{5}(-\d{4})?\b", p):
+            if i > 0:
+                return parts[i - 1]
+            break
+    if len(parts) >= 3:
+        return parts[-2]
+    return parts[0]
+
+
+# ------------------------
+# Webhook: Zoho Blueprint — Site Survey Scheduled
+# ------------------------
+# Triggered by a Zoho CRM blueprint transition action. Body should contain:
+#   { "install_id": "<zoho install record id>" }
+# Pulls Survey_Scheduled_For, Site_Location, Name, and Primary_Phone from the
+# Install record, then creates a 1-hour Google Calendar event on the
+# installs@helio.solar calendar with the standard attendee list.
+@app.post("/webhook/zoho/site-survey-scheduled")
+async def site_survey_scheduled_webhook(request: Request):
+    try:
+        body = await request.json()
+        install_id = body.get("install_id")
+        if not install_id:
+            return {"status": "failed - missing install_id"}
+
+        access_token = get_zoho_access_token()
+        if not access_token:
+            return {"status": "failed - no zoho token"}
+
+        api_domain = os.getenv("ZOHO_API_DOMAIN")
+        zoho_headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
+
+        install_resp = requests.get(
+            f"{api_domain}/crm/v2/Installs/{install_id}", headers=zoho_headers
+        )
+        if install_resp.status_code != 200:
+            return {
+                "status": f"failed - install lookup error ({install_resp.status_code})"
+            }
+        records = install_resp.json().get("data") or []
+        if not records:
+            return {"status": "failed - install not found"}
+        install = records[0]
+
+        name = install.get("Name") or "Customer"
+        survey_for = install.get("Survey_Scheduled_For")
+        site_location = install.get("Site_Location") or ""
+        phone = install.get("Primary_Phone") or ""
+
+        if not survey_for:
+            logger.warning(
+                f"site-survey-scheduled: no Survey_Scheduled_For | install_id={install_id}"
+            )
+            return {"status": "failed - install has no Survey_Scheduled_For"}
+
+        # Parse Zoho datetime. Zoho returns ISO 8601 — handle both 'Z' and offset forms.
+        try:
+            start_dt = datetime.datetime.fromisoformat(
+                survey_for.replace("Z", "+00:00")
+            )
+        except ValueError:
+            logger.exception(
+                f"site-survey-scheduled: cannot parse Survey_Scheduled_For | "
+                f"install_id={install_id} value={survey_for}"
+            )
+            return {"status": "failed - cannot parse Survey_Scheduled_For"}
+
+        end_dt = start_dt + datetime.timedelta(minutes=GCAL_SITE_SURVEY_DURATION_MIN)
+
+        time_str = _format_event_time(start_dt)
+        city = _extract_city_from_address(site_location)
+
+        title_parts = [f"Helio SS: {name}"]
+        if time_str:
+            title_parts.append(time_str)
+        if city:
+            title_parts.append(city)
+        title = " ".join(title_parts)
+
+        description_lines = [name]
+        if phone:
+            description_lines.append(f"Phone # {phone}")
+        description = "\n".join(description_lines)
+
+        # Use the offset embedded in the parsed datetime when available,
+        # otherwise fall back to the org's default timezone.
+        if start_dt.tzinfo is not None:
+            tz_string = GCAL_DEFAULT_TIMEZONE  # readable label; offset already in dateTime
+            start_iso = start_dt.isoformat()
+            end_iso = end_dt.isoformat()
+        else:
+            tz_string = GCAL_DEFAULT_TIMEZONE
+            start_iso = start_dt.isoformat()
+            end_iso = end_dt.isoformat()
+
+        event = {
+            "summary": title,
+            "location": site_location,
+            "description": description,
+            "start": {"dateTime": start_iso, "timeZone": tz_string},
+            "end": {"dateTime": end_iso, "timeZone": tz_string},
+            "attendees": [{"email": e} for e in GCAL_DEFAULT_ATTENDEES],
+        }
+
+        calendar = _build_calendar_service(GCAL_INSTALL_DEPT)
+        if calendar is None:
+            return {"status": "failed - calendar service unavailable"}
+
+        try:
+            created = calendar.events().insert(
+                calendarId=GCAL_INSTALL_DEPT,
+                body=event,
+                sendUpdates="all",  # emails attendees
+            ).execute()
+        except HttpError as e:
+            logger.exception(
+                f"site-survey-scheduled: calendar insert failed | "
+                f"install_id={install_id} status={e.resp.status} content={e.content[:300]}"
+            )
+            return {
+                "status": f"failed - calendar api error ({e.resp.status})",
+                "detail": e.content.decode("utf-8", errors="replace")[:500],
+            }
+        except Exception:
+            logger.exception(
+                f"site-survey-scheduled: calendar insert exception | "
+                f"install_id={install_id}"
+            )
+            return {"status": "failed - calendar api exception"}
+
+        event_id = created.get("id")
+        event_link = created.get("htmlLink")
+        logger.info(
+            f"site-survey-scheduled: event created | install_id={install_id} "
+            f"event_id={event_id} title={title!r} link={event_link}"
+        )
+
+        return {
+            "status": "ok",
+            "event_id": event_id,
+            "event_link": event_link,
+            "title": title,
+        }
+
+    except Exception:
+        logger.exception("Unhandled exception in site_survey_scheduled_webhook")
+        return {"status": "failed - exception"}
 
 
 # ------------------------
