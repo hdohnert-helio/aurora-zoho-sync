@@ -1083,6 +1083,9 @@ async def site_survey_scheduled_webhook(request: Request):
             "start": {"dateTime": start_iso, "timeZone": tz_string},
             "end": {"dateTime": end_iso, "timeZone": tz_string},
             "attendees": [{"email": e} for e in GCAL_DEFAULT_ATTENDEES],
+            # "2" = Sage (light green) — matches the existing manual events
+            # the team has been creating for Site Surveys.
+            "colorId": "2",
         }
 
         calendar = _build_calendar_service(GCAL_INSTALL_DEPT)
