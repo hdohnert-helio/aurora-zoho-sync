@@ -975,13 +975,31 @@ def _extract_city_from_address(address):
 @app.post("/webhook/zoho/site-survey-scheduled")
 async def site_survey_scheduled_webhook(request: Request):
     try:
-        body = await request.json()
+        try:
+            raw = await request.body()
+        except Exception:
+            raw = b""
+        body_text = raw.decode("utf-8", errors="replace") if raw else ""
+        try:
+            body = json.loads(body_text) if body_text else {}
+        except ValueError:
+            body = {}
+        logger.info(
+            f"site-survey-scheduled: webhook received | "
+            f"content_type={request.headers.get('content-type')!r} "
+            f"raw_body={body_text[:500]!r} parsed_keys={list(body.keys())}"
+        )
+
         install_id = body.get("install_id")
         if not install_id:
-            return {"status": "failed - missing install_id"}
+            logger.warning(
+                f"site-survey-scheduled: missing install_id in body | body={body!r}"
+            )
+            return {"status": "failed - missing install_id", "body": body}
 
         access_token = get_zoho_access_token()
         if not access_token:
+            logger.error("site-survey-scheduled: failed to obtain Zoho token")
             return {"status": "failed - no zoho token"}
 
         api_domain = os.getenv("ZOHO_API_DOMAIN")
@@ -991,11 +1009,19 @@ async def site_survey_scheduled_webhook(request: Request):
             f"{api_domain}/crm/v2/Installs/{install_id}", headers=zoho_headers
         )
         if install_resp.status_code != 200:
+            logger.warning(
+                f"site-survey-scheduled: install lookup failed | "
+                f"install_id={install_id} status={install_resp.status_code} "
+                f"body={install_resp.text[:300]}"
+            )
             return {
                 "status": f"failed - install lookup error ({install_resp.status_code})"
             }
         records = install_resp.json().get("data") or []
         if not records:
+            logger.warning(
+                f"site-survey-scheduled: install not found | install_id={install_id}"
+            )
             return {"status": "failed - install not found"}
         install = records[0]
 
