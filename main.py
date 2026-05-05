@@ -1030,6 +1030,17 @@ async def site_survey_scheduled_webhook(request: Request):
         site_location = install.get("Site_Location") or ""
         phone = install.get("Primary_Phone") or ""
 
+        # Site_Surveyor may be a plain text field or a Zoho user/contact
+        # lookup ({"id": ..., "name": "Walter Vargas"}). Handle both.
+        surveyor_raw = install.get("Site_Surveyor")
+        if isinstance(surveyor_raw, dict):
+            surveyor_full = surveyor_raw.get("name") or ""
+        else:
+            surveyor_full = (surveyor_raw or "").strip()
+        # Title shows just the first name (e.g. "Walter" rather than
+        # "Walter Vargas") to match the existing manual event format.
+        surveyor_first = surveyor_full.split()[0] if surveyor_full else ""
+
         if not survey_for:
             logger.warning(
                 f"site-survey-scheduled: no Survey_Scheduled_For | install_id={install_id}"
@@ -1053,7 +1064,11 @@ async def site_survey_scheduled_webhook(request: Request):
         time_str = _format_event_time(start_dt)
         city = _extract_city_from_address(site_location)
 
-        title_parts = [f"Helio SS: {name}"]
+        # Title format:  "Helio SS: <Name> (<Surveyor>) <time> <city>"
+        customer_with_surveyor = (
+            f"{name} ({surveyor_first})" if surveyor_first else name
+        )
+        title_parts = [f"Helio SS: {customer_with_surveyor}"]
         if time_str:
             title_parts.append(time_str)
         if city:
