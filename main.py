@@ -1991,11 +1991,22 @@ async def lightreach_webhook(request: Request):
                 logger.info(f"LightReach {event_type}: {stip_name}")
 
         elif event_type == "milestoneAchieved":
-            milestone = body.get("milestone") or body.get("milestoneName") or body.get("name") or ""
+            milestone = (
+                body.get("newMilestone")
+                or body.get("milestone")
+                or body.get("milestoneName")
+                or body.get("name")
+                or ""
+            )
             if isinstance(milestone, dict):
                 milestone = milestone.get("name") or milestone.get("type") or ""
             logger.info(f"LightReach milestone achieved: {milestone}")
-            if "ntp" in str(milestone).lower() or "notice to proceed" in str(milestone).lower():
+            milestone_l = str(milestone).lower()
+            if (
+                "ntp" in milestone_l
+                or "noticetoproceed" in milestone_l
+                or "notice to proceed" in milestone_l
+            ):
                 update_fields["LightReach_NTP_Granted_At"] = timestamp_now
                 logger.info(f"LightReach NTP granted for Install id={install_id}")
 
