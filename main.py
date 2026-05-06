@@ -179,12 +179,13 @@ def _create_initial_snapshot_for_install(
             f"install_id={install_id} keys={list(lightreach_fields.keys())}"
         )
 
-    # Update Install with Active Snapshot (and LightReach fields, if any)
+    # Update Install with Active Snapshot, Aurora Details mirror, and LightReach fields
     update_payload = {
         "data": [
             {
                 "id": install_id,
                 "Active_Snapshot": {"id": snapshot_id},
+                **aurora_details_from_pricing(pricing_fields),
                 **lightreach_fields,
             }
         ]
@@ -1695,6 +1696,27 @@ def find_install(project_id, access_token):
 
 
 # ------------------------
+# Aurora Details mirror fields
+# ------------------------
+def aurora_details_from_pricing(pricing_fields):
+    """Return the subset of snapshot pricing_fields to mirror onto the Install record."""
+    keys = [
+        "Final_System_Price",
+        "Price_Per_Watt",
+        "Gross_Price_Per_Watt",
+        "Base_Price",
+        "Adders_Total",
+        "Discounts_Total",
+        "Consultant_Comp_PPW",
+        "Helio_Lead_Fee_PPW",
+    ]
+    result = {k: pricing_fields[k] for k in keys if k in pricing_fields}
+    if "Referral_Payout" in pricing_fields:
+        result["Referral_Payout_PPW"] = pricing_fields["Referral_Payout"]
+    return result
+
+
+# ------------------------
 # Create Snapshot Record
 # ------------------------
 def create_snapshot(snapshot_data, access_token):
@@ -2283,6 +2305,7 @@ async def aurora_webhook(request: Request):
             install_update = {
                 "id": install_id,
                 "Active_Snapshot": {"id": snapshot_id},
+                **aurora_details_from_pricing(pricing_fields),
             }
             # LightReach bootstrap only on the very first sold — subsequent
             # promotions leave LightReach fields alone (they're maintained by
