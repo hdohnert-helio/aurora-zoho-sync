@@ -1581,6 +1581,7 @@ def extract_lightreach_install_fields(design_id):
     fields = {}
     if external.get("consumer_id"):
         fields["LightReach_Account_ID"] = external["consumer_id"]
+        fields["LightReach_Account_URL"] = f"https://palmetto.finance/accounts/{external['consumer_id']}"
     if external.get("request_id"):
         fields["LightReach_Request_ID"] = external["request_id"]
     if external.get("quote_id"):
@@ -1665,6 +1666,7 @@ def extract_lightreach_install_fields_for_project(project_id):
     fields = {}
     if external.get("consumer_id"):
         fields["LightReach_Account_ID"] = external["consumer_id"]
+        fields["LightReach_Account_URL"] = f"https://palmetto.finance/accounts/{external['consumer_id']}"
     if external.get("request_id"):
         fields["LightReach_Request_ID"] = external["request_id"]
     if external.get("quote_id"):
@@ -1943,6 +1945,7 @@ async def lightreach_webhook(request: Request):
             # Persist the link so future webhooks for this install short-circuit
             # to the LightReach_Account_ID branch above.
             update_fields["LightReach_Account_ID"] = account_id
+            update_fields["LightReach_Account_URL"] = f"https://palmetto.finance/accounts/{account_id}"
         if quote_id:
             update_fields["LightReach_Quote_ID"] = quote_id
         if contact_id:
