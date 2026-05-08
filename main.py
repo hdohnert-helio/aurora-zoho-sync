@@ -196,6 +196,14 @@ def _create_initial_snapshot_for_install(
     if update_response.status_code not in [200, 202]:
         return {"status": "failed - install update error"}
 
+    ok, code, msg = _zoho_update_ok(update_response)
+    if not ok:
+        logger.warning(
+            f"create_initial_snapshot: install update rejected by Zoho | "
+            f"install_id={install_id} code={code} message={msg}"
+        )
+        return {"status": f"failed - install update: {code} ({msg})"}
+
     return {"status": "initial snapshot created", "snapshot_id": snapshot_id}
 
 
@@ -710,6 +718,265 @@ def _run_lightreach_backfill_all(force: bool, limit: int, dry_run: bool):
         )
     except Exception:
         logger.exception("Unhandled exception in _run_lightreach_backfill_all")
+
+
+# ------------------------
+# Internal: Sync pricing fields from Active Snapshot → Install
+# ------------------------
+# POST /internal/sync-pricing-from-snapshot { "install_id": "..." }
+#
+# Reads pricing fields directly from the install's Active_Snapshot record
+# and writes them back to the Install. Use this to repair installs where
+# pricing fields are null despite a valid snapshot existing — e.g. when
+# the original install-update was silently rejected by Zoho.
+@app.post("/internal/sync-pricing-from-snapshot")
+async def sync_pricing_from_snapshot(request: Request):
+    try:
+        body = await request.json()
+        install_id = body.get("install_id")
+        if not install_id:
+            return {"status": "failed - missing install_id"}
+
+        result = _sync_pricing_from_snapshot_for_install(install_id)
+        return result
+    except Exception:
+        logger.exception("Unhandled exception in sync_pricing_from_snapshot")
+        return {"status": "failed - exception"}
+
+
+# ------------------------
+# Internal: Bulk sync pricing fields from Active Snapshot → Install
+# ------------------------
+# POST /internal/sync-pricing-from-snapshot-all
+# Body (all optional):
+#   { "force": false, "limit": 0, "dry_run": false }
+#   - force=true:  re-write even installs that already have Final_System_Price
+#   - limit=N:     only process up to N candidates (0 = no limit)
+#   - dry_run:     log candidates but skip actual writes
+#
+# Returns immediately; runs in background. Watch Render logs for
+# 'pricing_sync complete' for the final tally.
+@app.post("/internal/sync-pricing-from-snapshot-all")
+async def sync_pricing_from_snapshot_all(request: Request, background_tasks: BackgroundTasks):
+    try:
+        raw = await request.body()
+        body = json.loads(raw) if raw else {}
+        force = bool(body.get("force"))
+        limit = int(body.get("limit") or 0)
+        dry_run = bool(body.get("dry_run"))
+
+        background_tasks.add_task(_run_pricing_sync_all, force=force, limit=limit, dry_run=dry_run)
+        return {
+            "status": "started",
+            "force": force,
+            "limit": limit,
+            "dry_run": dry_run,
+            "note": "watch Render logs for progress; final summary logs as 'pricing_sync complete'",
+        }
+    except Exception:
+        logger.exception("Unhandled exception in sync_pricing_from_snapshot_all")
+        return {"status": "failed - exception"}
+
+
+# Pricing fields stored on the Snapshot module that mirror onto the Install.
+_SNAPSHOT_PRICING_KEYS = [
+    "Final_System_Price",
+    "Price_Per_Watt",
+    "Gross_Price_Per_Watt",
+    "Base_Price",
+    "Adders_Total",
+    "Discounts_Total",
+    "Consultant_Comp_PPW",
+    "Helio_Lead_Fee_PPW",
+    "Referral_Payout_PPW",
+]
+
+
+def _sync_pricing_from_snapshot_for_install(
+    install_id,
+    force=True,
+    dry_run=False,
+    access_token=None,
+    headers=None,
+    api_domain=None,
+):
+    """
+    Core logic: read pricing from the install's Active_Snapshot and write to Install.
+    Returns a dict with a "status" key.
+    """
+    if not install_id:
+        return {"status": "failed - missing install_id"}
+
+    if not access_token:
+        access_token = get_zoho_access_token()
+    if not access_token:
+        return {"status": "failed - no zoho token"}
+    if not headers:
+        headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
+    if not api_domain:
+        api_domain = os.getenv("ZOHO_API_DOMAIN")
+
+    # Fetch the install to get its Active_Snapshot and current pricing state.
+    install_resp = requests.get(f"{api_domain}/crm/v2/Installs/{install_id}", headers=headers)
+    if install_resp.status_code != 200:
+        return {"status": f"failed - install lookup error ({install_resp.status_code})"}
+    records = install_resp.json().get("data", [])
+    if not records:
+        return {"status": "failed - install not found"}
+    install = records[0]
+
+    active_snapshot = install.get("Active_Snapshot")
+    if not active_snapshot:
+        return {"status": "skipped - no active snapshot"}
+    snapshot_id = active_snapshot.get("id") if isinstance(active_snapshot, dict) else None
+    if not snapshot_id:
+        return {"status": "skipped - active snapshot has no id"}
+
+    # Skip if already populated, unless force=True.
+    if not force and install.get("Final_System_Price") not in (None, 0, 0.0):
+        return {"status": "skipped - pricing already populated"}
+
+    # Fetch the snapshot record to read its pricing fields.
+    snap_resp = requests.get(
+        f"{api_domain}/crm/v2/Aurora_Design_Snapshots/{snapshot_id}", headers=headers
+    )
+    if snap_resp.status_code != 200:
+        return {"status": f"failed - snapshot lookup error ({snap_resp.status_code})"}
+    snap_records = snap_resp.json().get("data", [])
+    if not snap_records:
+        return {"status": "failed - snapshot record not found"}
+    snap = snap_records[0]
+
+    pricing_update = {k: snap[k] for k in _SNAPSHOT_PRICING_KEYS if snap.get(k) is not None}
+
+    if not pricing_update:
+        return {"status": "skipped - snapshot has no pricing data"}
+
+    logger.info(
+        f"sync_pricing: install_id={install_id} snapshot_id={snapshot_id} "
+        f"dry_run={dry_run} fields={list(pricing_update.keys())}"
+    )
+
+    if dry_run:
+        return {"status": "dry-run", "would_write": pricing_update}
+
+    update_resp = requests.put(
+        f"{api_domain}/crm/v2/Installs",
+        headers=headers,
+        json={"data": [{"id": install_id, **pricing_update}]},
+    )
+    if update_resp.status_code not in [200, 201, 202]:
+        return {"status": f"failed - install update error ({update_resp.status_code})"}
+
+    ok, code, msg = _zoho_update_ok(update_resp)
+    if not ok:
+        logger.warning(
+            f"sync_pricing: install update rejected | install_id={install_id} code={code} msg={msg}"
+        )
+        return {"status": f"failed - install update: {code} ({msg})"}
+
+    return {"status": "ok", "fields_written": list(pricing_update.keys())}
+
+
+def _run_pricing_sync_all(force: bool, limit: int, dry_run: bool):
+    """
+    Background task: page through all Installs that have an Active_Snapshot,
+    and for each one with null/zero Final_System_Price (or all if force=True),
+    write pricing fields from the snapshot record onto the Install.
+    """
+    try:
+        access_token = get_zoho_access_token()
+        if not access_token:
+            logger.error("pricing_sync_all: failed to obtain Zoho token")
+            return
+
+        api_domain = os.getenv("ZOHO_API_DOMAIN")
+        headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
+
+        page, per_page = 1, 200
+        seen = attempted = updated = skipped = failed = 0
+
+        logger.info(
+            f"pricing_sync_all: starting | force={force} limit={limit} dry_run={dry_run}"
+        )
+
+        while True:
+            url = (
+                f"{api_domain}/crm/v2/Installs"
+                f"?fields=id,Active_Snapshot,Final_System_Price"
+                f"&page={page}&per_page={per_page}"
+            )
+            resp = requests.get(url, headers=headers)
+            if resp.status_code != 200:
+                logger.error(
+                    f"pricing_sync_all: install page pull failed | "
+                    f"page={page} status={resp.status_code}"
+                )
+                break
+
+            data = resp.json()
+            records = data.get("data") or []
+            if not records:
+                break
+
+            for record in records:
+                seen += 1
+                if limit and seen > limit:
+                    break
+
+                install_id = record.get("id")
+                if not record.get("Active_Snapshot"):
+                    skipped += 1
+                    continue
+                existing_price = record.get("Final_System_Price")
+                if not force and existing_price not in (None, 0, 0.0):
+                    skipped += 1
+                    continue
+
+                attempted += 1
+                try:
+                    result = _sync_pricing_from_snapshot_for_install(
+                        install_id,
+                        force=force,
+                        dry_run=dry_run,
+                        access_token=access_token,
+                        headers=headers,
+                        api_domain=api_domain,
+                    )
+                    status = result.get("status", "")
+                    if status == "ok":
+                        updated += 1
+                    elif status.startswith("skipped"):
+                        skipped += 1
+                    else:
+                        failed += 1
+                        logger.warning(
+                            f"pricing_sync_all: failed | install_id={install_id} result={result}"
+                        )
+
+                    if attempted % 25 == 0:
+                        logger.info(
+                            f"pricing_sync_all: progress | seen={seen} attempted={attempted} "
+                            f"updated={updated} skipped={skipped} failed={failed}"
+                        )
+                except Exception:
+                    failed += 1
+                    logger.exception(
+                        f"pricing_sync_all: exception | install_id={install_id}"
+                    )
+
+            if limit and seen >= limit:
+                break
+            if not data.get("info", {}).get("more_records"):
+                break
+            page += 1
+
+        logger.info(
+            f"pricing_sync complete | seen={seen} attempted={attempted} "
+            f"updated={updated} skipped={skipped} failed={failed} dry_run={dry_run}"
+        )
+    except Exception:
+        logger.exception("Unhandled exception in _run_pricing_sync_all")
 
 
 # ------------------------
@@ -1698,6 +1965,22 @@ def find_install(project_id, access_token):
 # ------------------------
 # Aurora Details mirror fields
 # ------------------------
+def _zoho_update_ok(response) -> tuple:
+    """
+    Inspect a Zoho CRM PUT/POST response body for per-record success.
+    Returns (ok: bool, code: str, message: str).
+    Zoho returns HTTP 200 even for per-record failures (INVALID_DATA, etc.),
+    so checking HTTP status alone is insufficient.
+    """
+    try:
+        first = (response.json().get("data") or [{}])[0]
+        code = first.get("code") or "UNKNOWN"
+        msg = first.get("message") or ""
+        return code == "SUCCESS", code, msg
+    except Exception:
+        return True, "UNKNOWN", ""  # non-JSON body; assume OK if HTTP was 2xx
+
+
 def aurora_details_from_pricing(pricing_fields):
     """Return the subset of snapshot pricing_fields to mirror onto the Install record."""
     keys = [
@@ -2321,17 +2604,24 @@ async def aurora_webhook(request: Request):
                 headers=zoho_headers,
                 json={"data": [install_update]},
             )
-            if update_resp.status_code in [200, 201, 202]:
-                logger.info(
-                    f"[{event_id}] Install promoted with active snapshot | "
-                    f"install_id={install_id} milestone={milestone_lc} "
-                    f"lightreach_keys={list(lightreach_fields.keys())}"
-                )
-            else:
+            if update_resp.status_code not in [200, 201, 202]:
                 logger.warning(
-                    f"[{event_id}] Install promotion update failed | "
+                    f"[{event_id}] Install promotion update failed (HTTP) | "
                     f"status={update_resp.status_code} body={update_resp.text[:300]}"
                 )
+            else:
+                ok, code, msg = _zoho_update_ok(update_resp)
+                if ok:
+                    logger.info(
+                        f"[{event_id}] Install promoted with active snapshot | "
+                        f"install_id={install_id} milestone={milestone_lc} "
+                        f"lightreach_keys={list(lightreach_fields.keys())}"
+                    )
+                else:
+                    logger.warning(
+                        f"[{event_id}] Install promotion update rejected by Zoho | "
+                        f"install_id={install_id} code={code} message={msg}"
+                    )
 
         return {
             "status": "processed",
