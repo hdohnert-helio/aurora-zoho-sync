@@ -204,7 +204,14 @@ def _create_initial_snapshot_for_install(
         )
         return {"status": f"failed - install update: {code} ({msg})"}
 
-    return {"status": "initial snapshot created", "snapshot_id": snapshot_id}
+    repair = _verify_and_repair_pricing(
+        install_id, pricing_fields, headers, api_domain,
+        label="create_initial_snapshot:"
+    )
+    if repair not in ("ok", "no_pricing_data"):
+        logger.info(f"create_initial_snapshot: pricing verify result={repair} install_id={install_id}")
+
+    return {"status": "initial snapshot created", "snapshot_id": snapshot_id, "pricing_verify": repair}
 
 
 @app.post("/internal/create-initial-snapshot")
@@ -1965,6 +1972,59 @@ def find_install(project_id, access_token):
 # ------------------------
 # Aurora Details mirror fields
 # ------------------------
+def _verify_and_repair_pricing(install_id, pricing_fields, headers, api_domain, label=""):
+    """
+    After writing an install update that included aurora_details_from_pricing,
+    re-read the install to confirm Final_System_Price was actually persisted.
+    If it's still null/zero, do a second targeted PUT with only the pricing fields.
+
+    Returns "ok" | "repaired" | "repair_failed" | "no_pricing_data"
+    """
+    pricing_payload = aurora_details_from_pricing(pricing_fields)
+    if not pricing_payload or not any(v for v in pricing_payload.values() if v):
+        return "no_pricing_data"
+
+    try:
+        verify_resp = requests.get(
+            f"{api_domain}/crm/v2/Installs/{install_id}"
+            f"?fields=id,Final_System_Price",
+            headers=headers,
+        )
+        if verify_resp.status_code != 200:
+            logger.warning(f"{label} pricing verify: install re-read failed ({verify_resp.status_code})")
+            return "repair_failed"
+
+        data = verify_resp.json().get("data") or []
+        if not data:
+            return "repair_failed"
+
+        current_price = data[0].get("Final_System_Price")
+        if current_price not in (None, 0, 0.0):
+            return "ok"
+
+        # Price is missing — retry with a dedicated write.
+        logger.warning(f"{label} pricing verify: Final_System_Price missing after write, retrying")
+        repair_resp = requests.put(
+            f"{api_domain}/crm/v2/Installs",
+            headers=headers,
+            json={"data": [{"id": install_id, **pricing_payload}]},
+        )
+        ok, code, msg = _zoho_update_ok(repair_resp)
+        if ok and repair_resp.status_code in [200, 201, 202]:
+            logger.info(f"{label} pricing verify: repair write succeeded | install_id={install_id}")
+            return "repaired"
+        else:
+            logger.warning(
+                f"{label} pricing verify: repair write failed | "
+                f"install_id={install_id} http={repair_resp.status_code} code={code} msg={msg}"
+            )
+            return "repair_failed"
+
+    except Exception:
+        logger.exception(f"{label} pricing verify: exception during verify/repair")
+        return "repair_failed"
+
+
 def _zoho_update_ok(response) -> tuple:
     """
     Inspect a Zoho CRM PUT/POST response body for per-record success.
@@ -2617,10 +2677,25 @@ async def aurora_webhook(request: Request):
                         f"install_id={install_id} milestone={milestone_lc} "
                         f"lightreach_keys={list(lightreach_fields.keys())}"
                     )
+                    repair = _verify_and_repair_pricing(
+                        install_id, pricing_fields, zoho_headers, api_domain,
+                        label=f"[{event_id}] milestone_webhook:"
+                    )
+                    if repair not in ("ok", "no_pricing_data"):
+                        logger.info(
+                            f"[{event_id}] pricing verify result={repair} install_id={install_id}"
+                        )
                 else:
                     logger.warning(
                         f"[{event_id}] Install promotion update rejected by Zoho | "
                         f"install_id={install_id} code={code} message={msg}"
+                    )
+                    repair = _verify_and_repair_pricing(
+                        install_id, pricing_fields, zoho_headers, api_domain,
+                        label=f"[{event_id}] milestone_webhook:"
+                    )
+                    logger.info(
+                        f"[{event_id}] pricing repair after rejected update result={repair} install_id={install_id}"
                     )
 
         return {
