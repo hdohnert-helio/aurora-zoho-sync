@@ -62,14 +62,18 @@ _RULES = [
      "Contingent Approval (As Is)", "medium"),
 
     # Terminal / green states
-    (re.compile(r"permission\s+to\s+operate|pto\s+granted|\bpto\b.*granted", re.I),
+    # Meter Swap must come before PTO — Eversource meter change emails mention
+    # "permission to operate" in the body (once meter is installed), which would
+    # otherwise trigger a false PTO match.
+    (re.compile(r"meter\s+(swap|change|set|install)", re.I),
+     "Meter Swap", "high"),
+    # UI (United Illuminating) uses "Approval to Energize"; Eversource uses "Permission to Operate"
+    (re.compile(r"permission\s+to\s+operate|pto\s+granted|\bpto\b.*granted|approval\s+to\s+energize", re.I),
      "Permission to Operate", "high"),
     (re.compile(r"witness\s+test.*complet|witness\s+test.*pass", re.I),
      "Witness Test Complete", "high"),
     (re.compile(r"witness\s+test.*schedul|schedule.*witness\s+test", re.I),
      "Witness Test Schedule", "high"),
-    (re.compile(r"meter\s+(swap|change|set|install)", re.I),
-     "Meter Swap", "high"),
     (re.compile(r"waiting\s+for\s+town|municipal\s+approv|town\s+approv", re.I),
      "Waiting for Town Approval", "high"),
 
