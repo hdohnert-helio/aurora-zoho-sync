@@ -342,6 +342,7 @@ def run_ic_monitor(get_zoho_token_fn):
                     if "IC_Project_Number" in updates:
                         install["IC_Project_Number"] = updates["IC_Project_Number"]
                     records_updated += 1
+                    logger.info(f"ic_monitor: updated {name} — {updates}")
                 except Exception:
                     logger.exception(f"ic_monitor: field update failed for {name}")
 
