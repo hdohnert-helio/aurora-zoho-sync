@@ -2705,4 +2705,15 @@ async def aurora_webhook(request: Request):
         }
     except Exception:
         logger.exception("Unhandled exception during webhook processing")
+
+
+# ------------------------
+# IC Monitor
+# ------------------------
+
+@app.post("/run-ic-monitor")
+async def run_ic_monitor_endpoint(background_tasks: BackgroundTasks):
+    from ic_monitor import run_ic_monitor
+    background_tasks.add_task(run_ic_monitor, get_zoho_access_token)
+    return {"status": "ic monitor started"}
         return {"status": "failed - exception"}
