@@ -2716,3 +2716,10 @@ async def run_ic_monitor_endpoint(background_tasks: BackgroundTasks):
     from ic_monitor import run_ic_monitor
     background_tasks.add_task(run_ic_monitor, get_zoho_access_token)
     return {"status": "ic monitor started"}
+
+
+@app.post("/clean-ic-notes")
+async def clean_ic_notes_endpoint(background_tasks: BackgroundTasks):
+    from ic_monitor import clean_ic_notes
+    background_tasks.add_task(clean_ic_notes, get_zoho_access_token)
+    return {"status": "ic note cleanup started"}

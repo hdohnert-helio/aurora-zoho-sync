@@ -395,3 +395,77 @@ def run_ic_monitor(get_zoho_token_fn):
     }
     logger.info(f"ic_monitor: complete — {summary}")
     return summary
+
+
+# ── Note cleanup ──────────────────────────────────────────────────────────────
+
+# Patterns in note content that indicate a bad/noisy note to delete
+_CLEANUP_CONTENT_PATTERNS = [
+    re.compile(r"Plan Set Request", re.I),
+    re.compile(r"PE Stamp Request", re.I),
+    re.compile(r"electric bill", re.I),
+    # Misclassified RRES notes that were actually ON HOLD emails
+    re.compile(r"Application Validation ON HOLD", re.I),
+]
+
+
+def clean_ic_notes(get_zoho_token_fn):
+    """
+    Delete IC monitor notes that were created in error:
+    - "IC Email – Needs Review" notes for internal Helio workflow emails
+    - "IC Update – RRES Review" notes that were actually ON HOLD misclassifications
+    """
+    token = get_zoho_token_fn()
+    if not token:
+        return {"status": "failed", "reason": "no zoho token"}
+
+    api_domain = os.getenv("ZOHO_API_DOMAIN", "https://www.zohoapis.com")
+    headers = _zoho_headers(token)
+
+    # Fetch IC-related notes across all Install records, paginated
+    deleted = 0
+    skipped = 0
+    page = 1
+
+    while True:
+        resp = requests.get(
+            f"{api_domain}/crm/v2/Notes",
+            headers=headers,
+            params={
+                "se_module": "Installs",
+                "fields": "id,Note_Title,Note_Content",
+                "criteria": "(Note_Title:starts_with:IC)",
+                "page": page,
+                "per_page": 200,
+            },
+            timeout=30,
+        )
+        if resp.status_code == 204:
+            break
+        resp.raise_for_status()
+        notes = resp.json().get("data", [])
+
+        for note in notes:
+            content = (note.get("Note_Content") or "") + " " + (note.get("Note_Title") or "")
+            if any(p.search(content) for p in _CLEANUP_CONTENT_PATTERNS):
+                try:
+                    del_resp = requests.delete(
+                        f"{api_domain}/crm/v2/Notes/{note['id']}",
+                        headers=headers,
+                        timeout=30,
+                    )
+                    del_resp.raise_for_status()
+                    logger.info(f"ic_cleanup: deleted note {note['id']} — {note.get('Note_Title')!r}")
+                    deleted += 1
+                except Exception:
+                    logger.exception(f"ic_cleanup: failed to delete note {note['id']}")
+            else:
+                skipped += 1
+
+        if not resp.json().get("info", {}).get("more_records"):
+            break
+        page += 1
+
+    summary = {"status": "ok", "deleted": deleted, "kept": skipped}
+    logger.info(f"ic_cleanup: complete — {summary}")
+    return summary
