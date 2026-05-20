@@ -455,7 +455,12 @@ def clean_ic_notes(get_zoho_token_fn):
         notes = resp.json().get("data", [])
 
         for note in notes:
-            content = (note.get("Note_Content") or "") + " " + (note.get("Note_Title") or "")
+            title = note.get("Note_Title") or ""
+            # Only touch notes created by the IC monitor — never manually written notes
+            if not (title.startswith("IC Update –") or title.startswith("IC Email –")):
+                skipped += 1
+                continue
+            content = (note.get("Note_Content") or "") + " " + title
             if any(p.search(content) for p in _CLEANUP_CONTENT_PATTERNS):
                 try:
                     del_resp = requests.delete(
