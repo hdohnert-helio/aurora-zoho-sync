@@ -413,8 +413,6 @@ _CLEANUP_CONTENT_PATTERNS = [
     re.compile(r"electric bill", re.I),
     # Misclassified RRES notes that were actually ON HOLD emails
     re.compile(r"Application Validation ON HOLD", re.I),
-    # Misclassified PTO notes that were actually Contingent Approval emails
-    re.compile(r"Contingent approval to interconnect", re.I),
     # Old Needs Review notes for DocuSign completions (now handled by rule)
     re.compile(r"Document .{0,60}has been completed", re.I),
 ]
