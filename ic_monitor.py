@@ -50,6 +50,17 @@ _IGNORE_PATTERNS = [
 ]
 
 _RULES = [
+    # Contingent approval — must come before PTO because utility emails about
+    # contingent approval often contain "permission to operate" language in the body
+    (re.compile(r"contingent\s+approv.{0,60}upgrade|upgrade.{0,60}contingent\s+approv", re.I),
+     "Contingent Approval (with Upgrade)", "high"),
+    (re.compile(r"contingent\s+approv.{0,60}as.is|as.is.{0,60}contingent\s+approv", re.I),
+     "Contingent Approval (As Is)", "high"),
+    (re.compile(r"contingent\s+approv(al)?\s+to\s+interconnect", re.I),
+     "Contingent Approval (As Is)", "high"),
+    (re.compile(r"contingent\s+approv|contingent\s+interconnect", re.I),
+     "Contingent Approval (As Is)", "medium"),
+
     # Terminal / green states
     (re.compile(r"permission\s+to\s+operate|pto\s+granted|\bpto\b.*granted", re.I),
      "Permission to Operate", "high"),
@@ -61,14 +72,6 @@ _RULES = [
      "Meter Swap", "high"),
     (re.compile(r"waiting\s+for\s+town|municipal\s+approv|town\s+approv", re.I),
      "Waiting for Town Approval", "high"),
-
-    # Contingent approval — check for upgrade qualifier first
-    (re.compile(r"contingent\s+approv.{0,60}upgrade|upgrade.{0,60}contingent\s+approv", re.I),
-     "Contingent Approval (with Upgrade)", "high"),
-    (re.compile(r"contingent\s+approv.{0,60}as.is|as.is.{0,60}contingent\s+approv", re.I),
-     "Contingent Approval (As Is)", "high"),
-    (re.compile(r"contingent\s+approv|contingent\s+interconnect", re.I),
-     "Contingent Approval (As Is)", "medium"),
 
     # Fast track
     (re.compile(r"fast\s*track", re.I),
@@ -406,6 +409,10 @@ _CLEANUP_CONTENT_PATTERNS = [
     re.compile(r"electric bill", re.I),
     # Misclassified RRES notes that were actually ON HOLD emails
     re.compile(r"Application Validation ON HOLD", re.I),
+    # Misclassified PTO notes that were actually Contingent Approval emails
+    re.compile(r"Contingent approval to interconnect", re.I),
+    # Old Needs Review notes for DocuSign completions (now handled by rule)
+    re.compile(r"Document .{0,60}has been completed", re.I),
 ]
 
 
