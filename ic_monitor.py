@@ -240,16 +240,21 @@ def _extract_subject_body(msg):
 
 def fetch_recent_emails_for_install(gmail, install):
     q = _gmail_query_for_install(install)
+    name = install.get("Name", install.get("id"))
     if not q:
+        logger.info(f"ic_monitor: no query built for {name} (missing address and IC number)")
         return []
+    logger.info(f"ic_monitor: searching Gmail for {name!r} | query={q!r}")
     result = (
         gmail.users()
         .messages()
         .list(userId="me", q=q, maxResults=GMAIL_MAX_RESULTS)
         .execute()
     )
+    messages = result.get("messages", [])
+    logger.info(f"ic_monitor: {len(messages)} messages found for {name!r}")
     emails = []
-    for m in result.get("messages", []):
+    for m in messages:
         full = (
             gmail.users()
             .messages()
@@ -283,6 +288,7 @@ def run_ic_monitor(get_zoho_token_fn):
                 "records_updated": 0, "flagged_for_review": 0}
 
     gmail = _build_gmail_service()
+    logger.info(f"ic_monitor: searching Gmail as {GMAIL_IMPERSONATE}")
     emails_processed = 0
     records_updated = 0
     flagged_for_review = 0
