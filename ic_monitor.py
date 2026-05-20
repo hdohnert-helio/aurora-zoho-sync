@@ -141,7 +141,7 @@ def fetch_ic_watchlist(token, api_domain):
     criteria = "or".join(
         f"(Project_Stage:equals:{stage})" for stage in IC_ACTIVE_STAGES
     )
-    fields = "id,Name,Property_Address,IC_Project_Number,Utility_Status,Utility_Provider"
+    fields = "id,Name,Site_Location,IC_Project_Number,Utility_Status,Utility_Provider"
     url = f"{api_domain}/crm/v2/Installs/search"
 
     results = []
@@ -204,7 +204,7 @@ def _gmail_query_for_install(install):
     ic_num = (install.get("IC_Project_Number") or "").strip()
     if ic_num:
         return f'"{ic_num}" newer_than:{GMAIL_LOOKBACK_DAYS}d'
-    address = (install.get("Property_Address") or "").strip()
+    address = (install.get("Site_Location") or "").strip()
     street = address.split(",")[0].strip() if address else ""
     if not street:
         return None
