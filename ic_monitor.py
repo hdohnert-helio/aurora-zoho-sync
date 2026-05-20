@@ -49,17 +49,22 @@ _IGNORE_PATTERNS = [
     re.compile(r"electric bill", re.I),
 ]
 
+# Each rule is (pattern, status, confidence, subject_only).
+# subject_only=True rules are matched against the subject line only — use this
+# when the body commonly contains the same keywords in a different context.
 _RULES = [
     # Contingent approval — must come before PTO because utility emails about
-    # contingent approval often contain "permission to operate" language in the body
+    # contingent approval often contain "permission to operate" language in the body.
+    # Upgrade vs. As-Is is subject-only: the body of As-Is emails mentions "upgrade"
+    # in passing (e.g. "no upgrade required"), which would cause false upgrade matches.
     (re.compile(r"contingent\s+approv.{0,60}upgrade|upgrade.{0,60}contingent\s+approv", re.I),
-     "Contingent Approval (with Upgrade)", "high"),
+     "Contingent Approval (with Upgrade)", "high", True),
     (re.compile(r"contingent\s+approv.{0,60}as.is|as.is.{0,60}contingent\s+approv", re.I),
-     "Contingent Approval (As Is)", "high"),
+     "Contingent Approval (As Is)", "high", True),
     (re.compile(r"contingent\s+approv(al)?\s+to\s+interconnect", re.I),
-     "Contingent Approval (As Is)", "high"),
+     "Contingent Approval (As Is)", "high", True),
     (re.compile(r"contingent\s+approv|contingent\s+interconnect", re.I),
-     "Contingent Approval (As Is)", "medium"),
+     "Contingent Approval (As Is)", "medium", True),
 
     # Terminal / green states
     # Meter Swap must come before PTO — Eversource meter change emails mention
@@ -144,8 +149,10 @@ def classify_email(install, subject, body):
     confidence = "low"
     note = ""
 
-    for pattern, status, conf in _RULES:
-        if pattern.search(text):
+    for rule in _RULES:
+        pattern, status, conf = rule[0], rule[1], rule[2]
+        search_text = subject if (len(rule) > 3 and rule[3]) else text
+        if pattern.search(search_text):
             new_status = status
             confidence = conf
             note = f'Matched rule for "{status}" on subject: {subject!r}'
