@@ -203,12 +203,12 @@ def _build_gmail_service():
 def _gmail_query_for_install(install):
     ic_num = (install.get("IC_Project_Number") or "").strip()
     if ic_num:
-        return f'label:{GMAIL_LABEL} "{ic_num}" newer_than:{GMAIL_LOOKBACK_DAYS}d'
+        return f'"{ic_num}" newer_than:{GMAIL_LOOKBACK_DAYS}d'
     address = (install.get("Property_Address") or "").strip()
     street = address.split(",")[0].strip() if address else ""
     if not street:
         return None
-    return f'label:{GMAIL_LABEL} "{street}" newer_than:{GMAIL_LOOKBACK_DAYS}d'
+    return f'"{street}" newer_than:{GMAIL_LOOKBACK_DAYS}d'
 
 
 def _decode_part(part):
