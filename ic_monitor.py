@@ -36,10 +36,18 @@ GMAIL_MAX_RESULTS = 10
 
 # ── Keyword classification rules ─────────────────────────────────────────────
 # Each rule is (compiled_pattern, status_value, confidence).
-# Rules are evaluated against the lowercased subject + body and checked in order.
+# Rules are evaluated against the subject + body and checked in order.
 # First match wins.
 
 _IC_NUM_RE = re.compile(r"\b((?:INT|DER)-\d{4,8})\b", re.IGNORECASE)
+
+# Emails matching any of these are silently skipped — no note, no update.
+# Used for internal Helio workflow emails that land in the same mailbox.
+_IGNORE_PATTERNS = [
+    re.compile(r"plan set request.*(helio solar|delivered|completed)", re.I),
+    re.compile(r"pe stamp request.*(helio solar|delivered|completed)", re.I),
+    re.compile(r"electric bill", re.I),
+]
 
 _RULES = [
     # Terminal / green states
@@ -59,7 +67,6 @@ _RULES = [
      "Contingent Approval (with Upgrade)", "high"),
     (re.compile(r"contingent\s+approv.{0,60}as.is|as.is.{0,60}contingent\s+approv", re.I),
      "Contingent Approval (As Is)", "high"),
-    # Generic contingent — flag medium so human can confirm which subtype
     (re.compile(r"contingent\s+approv|contingent\s+interconnect", re.I),
      "Contingent Approval (As Is)", "medium"),
 
@@ -67,39 +74,60 @@ _RULES = [
     (re.compile(r"fast\s*track", re.I),
      "Fast Track", "high"),
 
+    # ON HOLD — must come before RRES/validation rules to avoid false matches
+    (re.compile(r"on\s+hold.{0,40}hea|hea.{0,40}on\s+hold", re.I),
+     "Application On Hold - HEA", "high"),
+    (re.compile(r"application\s+validation\s+on\s+hold|validation\s+on\s+hold|on\s+hold.*response\s+required", re.I),
+     "App Signed by Client - IC On Hold", "high"),
+    (re.compile(r"application\s+(validation\s+)?on\s+hold|placed\s+on\s+hold", re.I),
+     "App Signed by Client - IC On Hold", "medium"),
+
+    # Corrections received from customer = back in review after hold
+    (re.compile(r"corrections\s+received", re.I),
+     "Resubmitted - RRES Review", "high"),
+
     # Technical review
     (re.compile(r"resubmit.{0,40}technical\s+review|technical\s+review.{0,40}resubmit", re.I),
      "Resubmitted - Technical Review", "high"),
     (re.compile(r"technical\s+review", re.I),
      "Technical Review", "high"),
 
-    # RRES review
+    # RRES review — specific enough to not match ON HOLD subjects
     (re.compile(r"resubmit.{0,40}rres|rres.{0,40}resubmit", re.I),
      "Resubmitted - RRES Review", "high"),
-    (re.compile(r"rres\s+review|validation\s+complet|application\s+valid", re.I),
+    (re.compile(r"rres\s+review|validation\s+complete|application\s+validation\s+complete", re.I),
      "RRES Review", "high"),
 
-    # On hold
-    (re.compile(r"on\s+hold.{0,40}hea|hea.{0,40}on\s+hold", re.I),
-     "Application On Hold - HEA", "high"),
-    (re.compile(r"application\s+(validation\s+)?on\s+hold|placed\s+on\s+hold", re.I),
-     "App Signed by Client - IC On Hold", "medium"),
-
     # Submission / signature states
-    (re.compile(r"signed\s+app.*submitted|application.*submitted|app.*submitted", re.I),
-     "Signed App Submitted", "high"),
+    (re.compile(r"disclosure\s+form.*interconnection|interconnection.*disclosure\s+form", re.I),
+     "App Sent for Client Signature", "high"),
     (re.compile(r"sent\s+for.*signature|signature\s+request", re.I),
      "App Sent for Client Signature", "high"),
+    (re.compile(r"application\s+receipt\b", re.I),
+     "Signed App Submitted", "high"),
+    (re.compile(r"res\s+customer\s+edu", re.I),
+     "Signed App Submitted", "medium"),
+    # DocuSign completion for IC-related documents
+    (re.compile(r"document\s+.{0,80}(interconnection|renewable energy|tariff application).{0,80}has\s+been\s+completed", re.I),
+     "Signed App Submitted", "high"),
+    (re.compile(r"signed\s+app.*submitted|application.*submitted|app.*submitted", re.I),
+     "Signed App Submitted", "high"),
 ]
 
 
+_IGNORE = object()  # sentinel
+
 def classify_email(install, subject, body):
     """
-    Rule-based classifier. Returns a dict matching the shape previously
-    returned by the Claude classifier:
-      new_status, ic_project_number, confidence, note
+    Rule-based classifier. Returns a dict or the _IGNORE sentinel.
+    Callers should skip the email entirely when _IGNORE is returned.
     """
     text = f"{subject} {body}"
+
+    # Silently skip internal / irrelevant emails
+    for pattern in _IGNORE_PATTERNS:
+        if pattern.search(subject):
+            return _IGNORE
 
     # Always try to extract IC project number
     ic_match = _IC_NUM_RE.search(text)
@@ -308,6 +336,10 @@ def run_ic_monitor(get_zoho_token_fn):
 
         for email in emails:
             result = classify_email(install, email["subject"], email["body"])
+
+            if result is _IGNORE:
+                logger.info(f"ic_monitor: ignored internal email for {name} — {email['subject']!r}")
+                continue
 
             emails_processed += 1
             confidence = result["confidence"]
