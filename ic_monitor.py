@@ -406,15 +406,15 @@ def run_ic_monitor(get_zoho_token_fn):
 
 # ── Note cleanup ──────────────────────────────────────────────────────────────
 
-# Patterns in note content that indicate a bad/noisy note to delete
+# Patterns in note content that indicate a bad/noisy note to delete.
+# Only keep patterns for emails that should NEVER produce a note (internal noise).
+# Do NOT add patterns that match content from correctly classified utility emails —
+# the note content always includes the subject line, so subject-based patterns
+# will delete good notes too.
 _CLEANUP_CONTENT_PATTERNS = [
     re.compile(r"Plan Set Request", re.I),
     re.compile(r"PE Stamp Request", re.I),
     re.compile(r"electric bill", re.I),
-    # Misclassified RRES notes that were actually ON HOLD emails
-    re.compile(r"Application Validation ON HOLD", re.I),
-    # Old Needs Review notes for DocuSign completions (now handled by rule)
-    re.compile(r"Document .{0,60}has been completed", re.I),
 ]
 
 
