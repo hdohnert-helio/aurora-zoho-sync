@@ -244,6 +244,34 @@ def update_install_fields(install_id, fields, token, api_domain):
     resp.raise_for_status()
 
 
+def fetch_existing_note_ids(install_id, token, api_domain):
+    """Return set of Gmail message IDs already recorded in this install's IC notes."""
+    seen = set()
+    page = 1
+    while True:
+        resp = requests.get(
+            f"{api_domain}/crm/v2/Installs/{install_id}/Notes",
+            headers=_zoho_headers(token),
+            params={"fields": "Note_Title,Note_Content", "page": page, "per_page": 200},
+            timeout=30,
+        )
+        if resp.status_code == 204:
+            break
+        resp.raise_for_status()
+        for note in resp.json().get("data", []):
+            title = note.get("Note_Title", "")
+            if not (title.startswith("IC Update –") or title.startswith("IC Email –")):
+                continue
+            content = note.get("Note_Content", "")
+            m = re.search(r"gmail_id:(\S+)", content)
+            if m:
+                seen.add(m.group(1))
+        if not resp.json().get("info", {}).get("more_records"):
+            break
+        page += 1
+    return seen
+
+
 def add_install_note(install_id, title, content, token, api_domain):
     resp = requests.post(
         f"{api_domain}/crm/v2/Installs/{install_id}/Notes",
@@ -375,12 +403,23 @@ def run_ic_monitor(get_zoho_token_fn):
         if not emails:
             continue
 
+        # Fetch existing note Gmail IDs to avoid writing duplicate notes across runs
+        try:
+            seen_gmail_ids = fetch_existing_note_ids(install_id, token, api_domain)
+        except Exception:
+            logger.exception(f"ic_monitor: failed to fetch existing notes for {name}")
+            seen_gmail_ids = set()
+
         # Gmail returns emails newest-first. Lock in the status from the first
         # (most recent) email that produces a classification so that older emails
         # in the same run cannot revert a more-recent status update.
         status_locked = False
 
         for email in emails:
+            if email["id"] in seen_gmail_ids:
+                logger.info(f"ic_monitor: skipping already-noted email for {name} — {email['subject']!r}")
+                continue
+
             result = classify_email(install, email["subject"], email["body"])
 
             if result is _IGNORE:
@@ -391,7 +430,7 @@ def run_ic_monitor(get_zoho_token_fn):
             confidence = result["confidence"]
             new_status = result["new_status"]
             ic_num = result["ic_project_number"]
-            note_text = result["note"]
+            note_text = result["note"] + f"\n\ngmail_id:{email['id']}"
 
             if confidence == "low":
                 try:
