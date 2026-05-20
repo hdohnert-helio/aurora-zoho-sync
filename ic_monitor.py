@@ -137,20 +137,32 @@ def _zoho_headers(token):
 
 
 def fetch_ic_watchlist(token, api_domain):
-    stage_csv = ", ".join(f"'{s}'" for s in IC_ACTIVE_STAGES)
-    query = (
-        "SELECT id, Name, Property_Address, IC_Project_Number, "
-        "Utility_Status, Utility_Provider "
-        f"FROM Installs WHERE Project_Stage in ({stage_csv}) LIMIT 200"
+    # Build OR criteria across all active stages
+    criteria = "or".join(
+        f"(Project_Stage:equals:{stage})" for stage in IC_ACTIVE_STAGES
     )
-    resp = requests.post(
-        f"{api_domain}/crm/v2/coql",
-        headers=_zoho_headers(token),
-        json={"select_query": query},
-        timeout=30,
-    )
-    resp.raise_for_status()
-    return resp.json().get("data", [])
+    fields = "id,Name,Property_Address,IC_Project_Number,Utility_Status,Utility_Provider"
+    url = f"{api_domain}/crm/v2/Installs/search"
+
+    results = []
+    page = 1
+    while True:
+        resp = requests.get(
+            url,
+            headers=_zoho_headers(token),
+            params={"criteria": criteria, "fields": fields, "page": page, "per_page": 200},
+            timeout=30,
+        )
+        if resp.status_code == 204:  # no records
+            break
+        resp.raise_for_status()
+        data = resp.json().get("data", [])
+        results.extend(data)
+        if not resp.json().get("info", {}).get("more_records"):
+            break
+        page += 1
+
+    return results
 
 
 def update_install_fields(install_id, fields, token, api_domain):
