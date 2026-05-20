@@ -341,6 +341,11 @@ def run_ic_monitor(get_zoho_token_fn):
         if not emails:
             continue
 
+        # Gmail returns emails newest-first. Lock in the status from the first
+        # (most recent) email that produces a classification so that older emails
+        # in the same run cannot revert a more-recent status update.
+        status_locked = False
+
         for email in emails:
             result = classify_email(install, email["subject"], email["body"])
 
@@ -368,7 +373,7 @@ def run_ic_monitor(get_zoho_token_fn):
                 continue
 
             updates = {}
-            if new_status and new_status != install.get("Utility_Status"):
+            if new_status and not status_locked and new_status != install.get("Utility_Status"):
                 updates["Utility_Status"] = new_status
             if ic_num and not install.get("IC_Project_Number"):
                 updates["IC_Project_Number"] = ic_num
@@ -378,6 +383,7 @@ def run_ic_monitor(get_zoho_token_fn):
                     update_install_fields(install_id, updates, token, api_domain)
                     if "Utility_Status" in updates:
                         install["Utility_Status"] = updates["Utility_Status"]
+                        status_locked = True
                     if "IC_Project_Number" in updates:
                         install["IC_Project_Number"] = updates["IC_Project_Number"]
                     records_updated += 1
