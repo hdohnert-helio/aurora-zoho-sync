@@ -74,8 +74,10 @@ _RULES = [
     (re.compile(r"meter\s+(swap|change|set|install)", re.I),
      "Meter Swap", "high"),
     # UI (United Illuminating) uses "Approval to Energize"; Eversource uses "Permission to Operate"
+    # subject_only=True: contingent approval emails always mention "permission to operate"
+    # in the body (e.g. "before Permission to Operate can be issued") — subject is unambiguous.
     (re.compile(r"permission\s+to\s+operate|pto\s+granted|\bpto\b.*granted|approval\s+to\s+energize", re.I),
-     "Permission to Operate", "high"),
+     "Permission to Operate", "high", True),
     (re.compile(r"witness\s+test.*complet|witness\s+test.*pass", re.I),
      "Witness Test Complete", "high"),
     (re.compile(r"witness\s+test.*schedul|schedule.*witness\s+test", re.I),
