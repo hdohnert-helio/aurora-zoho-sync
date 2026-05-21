@@ -8,6 +8,7 @@ Three-step loop per run:
 """
 
 import base64
+import datetime
 import json
 import logging
 import os
@@ -274,20 +275,23 @@ def fetch_existing_gmail_ids(install_id, token, api_domain):
     return seen
 
 
-def add_ic_monitor_record(install_id, gmail_id, subject, body, classified_status, confidence, token, api_domain):
+def add_ic_monitor_record(install_id, gmail_id, subject, body, classified_status, confidence, received_dt, token, api_domain):
     gmail_link = f"https://mail.google.com/mail/u/0/#all/{gmail_id}"
+    record = {
+        "Name": gmail_id,
+        "Install": {"id": install_id},
+        "Email_Subject": subject,
+        "Email_Body": body[:32000] if body else "",
+        "Classified_Status": classified_status or "No match",
+        "Confidence": confidence,
+        "Gmail_Link": gmail_link,
+    }
+    if received_dt:
+        record["Email_Received"] = received_dt
     resp = requests.post(
         f"{api_domain}/crm/v2/IC_Monitor_Updates",
         headers=_zoho_headers(token),
-        json={"data": [{
-            "Name": gmail_id,
-            "Install": {"id": install_id},
-            "Email_Subject": subject,
-            "Email_Body": body[:32000] if body else "",
-            "Classified_Status": classified_status or "No match",
-            "Confidence": confidence,
-            "Gmail_Link": gmail_link,
-        }]},
+        json={"data": [record]},
         timeout=30,
     )
     resp.raise_for_status()
@@ -367,7 +371,14 @@ def _extract_subject_body(msg):
     headers = {h["name"]: h["value"] for h in msg.get("payload", {}).get("headers", [])}
     subject = headers.get("Subject", "")
     body = _walk_payload(msg.get("payload", {}))
-    return subject, body
+    # internalDate is Unix timestamp in milliseconds — most reliable received time
+    internal_ms = msg.get("internalDate")
+    received_dt = (
+        datetime.datetime.fromtimestamp(int(internal_ms) / 1000, tz=datetime.timezone.utc)
+        .strftime("%Y-%m-%dT%H:%M:%S+00:00")
+        if internal_ms else None
+    )
+    return subject, body, received_dt
 
 
 def fetch_recent_emails_for_install(gmail, install):
@@ -393,8 +404,8 @@ def fetch_recent_emails_for_install(gmail, install):
             .get(userId="me", id=m["id"], format="full")
             .execute()
         )
-        subject, body = _extract_subject_body(full)
-        emails.append({"id": m["id"], "subject": subject, "body": body})
+        subject, body, received_dt = _extract_subject_body(full)
+        emails.append({"id": m["id"], "subject": subject, "body": body, "received_dt": received_dt})
     return emails
 
 
@@ -470,7 +481,7 @@ def run_ic_monitor(get_zoho_token_fn):
                 try:
                     add_ic_monitor_record(
                         install_id, email["id"], email["subject"], email["body"],
-                        "Needs Review", confidence, token, api_domain,
+                        "Needs Review", confidence, email["received_dt"], token, api_domain,
                     )
                 except Exception:
                     logger.exception(f"ic_monitor: record write failed for {name}")
@@ -512,7 +523,7 @@ def run_ic_monitor(get_zoho_token_fn):
             try:
                 add_ic_monitor_record(
                     install_id, email["id"], email["subject"], email["body"],
-                    new_status, confidence, token, api_domain,
+                    new_status, confidence, email["received_dt"], token, api_domain,
                 )
             except Exception:
                 logger.exception(f"ic_monitor: record write failed for {name}")
