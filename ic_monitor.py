@@ -42,37 +42,6 @@ GMAIL_MAX_RESULTS = 10
 
 _IC_NUM_RE = re.compile(r"\b((?:INT|DER)-\d{4,8})\b", re.IGNORECASE)
 
-# Status progression rank — the monitor will never move a record to a lower rank.
-# Holds and resubmit states are not ranked (they're always applied) because they
-# represent active issues that can occur at any stage.
-_STATUS_RANK = {
-    "App Sent for Client Signature": 1,
-    "Signed App Submitted": 2,
-    "RRES Review": 3,
-    "App Signed by Client - IC On Hold": 3,
-    "Application On Hold - HEA": 3,
-    "Resubmitted - RRES Review": 4,
-    "Technical Review": 4,
-    "Resubmitted - Technical Review": 5,
-    "Fast Track": 4,
-    "Contingent Approval (As Is)": 5,
-    "Contingent Approval (with Upgrade)": 5,
-    "Waiting for Town Approval": 6,
-    "Witness Test Schedule": 7,
-    "Witness Test Complete": 8,
-    "Meter Swap": 9,
-    "Permission to Operate": 10,
-}
-
-# These statuses bypass the rank check — they represent active holds or
-# resubmissions that can occur at any point in the workflow.
-_STATUS_ALWAYS_APPLY = {
-    "App Signed by Client - IC On Hold",
-    "Application On Hold - HEA",
-    "Resubmitted - RRES Review",
-    "Resubmitted - Technical Review",
-}
-
 # Emails matching any of these are silently skipped — no note, no update.
 # Used for internal Helio workflow emails that land in the same mailbox.
 _IGNORE_PATTERNS = [
@@ -494,12 +463,7 @@ def run_ic_monitor(get_zoho_token_fn):
 
             updates = {}
             if new_status and not status_locked and new_status != install.get("Utility_Status"):
-                current_rank = _STATUS_RANK.get(install.get("Utility_Status"), 0)
-                new_rank = _STATUS_RANK.get(new_status, 0)
-                if new_status in _STATUS_ALWAYS_APPLY or new_rank > current_rank:
-                    updates["Utility_Status"] = new_status
-                else:
-                    logger.info(f"ic_monitor: skipping downgrade for {name} — {install.get('Utility_Status')!r} → {new_status!r}")
+                updates["Utility_Status"] = new_status
             if ic_num and not install.get("IC_Project_Number"):
                 updates["IC_Project_Number"] = ic_num
 
