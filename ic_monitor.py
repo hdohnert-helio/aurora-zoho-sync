@@ -120,6 +120,9 @@ _RULES = [
      "App Signed by Client - IC On Hold", "high"),
     (re.compile(r"application\s+(validation\s+)?on\s+hold|placed\s+on\s+hold", re.I),
      "App Signed by Client - IC On Hold", "medium"),
+    # UI (United Illuminating) uses "Response Required:" subject for hold emails
+    (re.compile(r"response\s+required", re.I),
+     "App Signed by Client - IC On Hold", "high", True),
 
     # Corrections received from customer = back in review after hold
     (re.compile(r"corrections\s+received", re.I),
