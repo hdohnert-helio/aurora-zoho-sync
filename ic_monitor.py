@@ -299,7 +299,7 @@ _NOTIFY_USER_ID = "5264387000072521001"  # Harry Dohnert
 def post_status_change_note(install_id, old_status, new_status, subject, token, api_domain):
     """Post a note to the Install record mentioning the IC coordinator on status change."""
     content = (
-        f"$[{_NOTIFY_USER_ID}] IC status updated\n"
+        f"IC status updated\n"
         f"From: {old_status or '(none)'}\n"
         f"To: {new_status}\n"
         f"Email: {subject}"
@@ -307,7 +307,11 @@ def post_status_change_note(install_id, old_status, new_status, subject, token, 
     resp = requests.post(
         f"{api_domain}/crm/v2/Installs/{install_id}/Notes",
         headers=_zoho_headers(token),
-        json={"data": [{"Note_Title": "IC Status Change", "Note_Content": content}]},
+        json={"data": [{
+            "Note_Title": "IC Status Change",
+            "Note_Content": content,
+            "$mentions": [{"id": _NOTIFY_USER_ID}],
+        }]},
         timeout=30,
     )
     resp.raise_for_status()
