@@ -244,39 +244,46 @@ def update_install_fields(install_id, fields, token, api_domain):
     resp.raise_for_status()
 
 
-def fetch_existing_note_ids(install_id, token, api_domain):
-    """Return set of Gmail message IDs already recorded in this install's IC notes."""
+def fetch_existing_gmail_ids(install_id, token, api_domain):
+    """Return set of Gmail message IDs already recorded in IC_Monitor_Updates for this install."""
     seen = set()
     page = 1
     while True:
         resp = requests.get(
-            f"{api_domain}/crm/v2/Installs/{install_id}/Notes",
+            f"{api_domain}/crm/v2/IC_Monitor_Updates/search",
             headers=_zoho_headers(token),
-            params={"fields": "Note_Title,Note_Content", "page": page, "per_page": 200},
+            params={
+                "criteria": f"(Install:equals:{install_id})",
+                "fields": "Name",
+                "page": page,
+                "per_page": 200,
+            },
             timeout=30,
         )
         if resp.status_code == 204:
             break
         resp.raise_for_status()
-        for note in resp.json().get("data", []):
-            title = note.get("Note_Title", "")
-            if not (title.startswith("IC Update –") or title.startswith("IC Email –")):
-                continue
-            content = note.get("Note_Content", "")
-            m = re.search(r"gmail_id:(\S+)", content)
-            if m:
-                seen.add(m.group(1))
+        for record in resp.json().get("data", []):
+            seen.add(record.get("Name", ""))
         if not resp.json().get("info", {}).get("more_records"):
             break
         page += 1
     return seen
 
 
-def add_install_note(install_id, title, content, token, api_domain):
+def add_ic_monitor_record(install_id, gmail_id, subject, classified_status, confidence, token, api_domain):
+    gmail_link = f"https://mail.google.com/mail/u/0/#all/{gmail_id}"
     resp = requests.post(
-        f"{api_domain}/crm/v2/Installs/{install_id}/Notes",
+        f"{api_domain}/crm/v2/IC_Monitor_Updates",
         headers=_zoho_headers(token),
-        json={"data": [{"Note_Title": title, "Note_Content": content}]},
+        json={"data": [{
+            "Name": gmail_id,
+            "Install": {"id": install_id},
+            "Email_Subject": subject,
+            "Classified_Status": classified_status or "No match",
+            "Confidence": confidence,
+            "Gmail_Link": gmail_link,
+        }]},
         timeout=30,
     )
     resp.raise_for_status()
@@ -403,11 +410,11 @@ def run_ic_monitor(get_zoho_token_fn):
         if not emails:
             continue
 
-        # Fetch existing note Gmail IDs to avoid writing duplicate notes across runs
+        # Fetch existing IC Monitor record Gmail IDs to avoid duplicates across runs
         try:
-            seen_gmail_ids = fetch_existing_note_ids(install_id, token, api_domain)
+            seen_gmail_ids = fetch_existing_gmail_ids(install_id, token, api_domain)
         except Exception:
-            logger.exception(f"ic_monitor: failed to fetch existing notes for {name}")
+            logger.exception(f"ic_monitor: failed to fetch existing IC monitor records for {name}")
             seen_gmail_ids = set()
 
         # Gmail returns emails newest-first. Lock in the status from the first
@@ -430,18 +437,15 @@ def run_ic_monitor(get_zoho_token_fn):
             confidence = result["confidence"]
             new_status = result["new_status"]
             ic_num = result["ic_project_number"]
-            note_text = result["note"] + f"\n\ngmail_id:{email['id']}"
 
             if confidence == "low":
                 try:
-                    add_install_note(
-                        install_id,
-                        "IC Email – Needs Review",
-                        f"Subject: {email['subject']}\n\n{note_text}",
-                        token, api_domain,
+                    add_ic_monitor_record(
+                        install_id, email["id"], email["subject"],
+                        "Needs Review", confidence, token, api_domain,
                     )
                 except Exception:
-                    logger.exception(f"ic_monitor: note write failed for {name}")
+                    logger.exception(f"ic_monitor: record write failed for {name}")
                 flagged_for_review += 1
                 continue
 
@@ -469,13 +473,13 @@ def run_ic_monitor(get_zoho_token_fn):
                 except Exception:
                     logger.exception(f"ic_monitor: field update failed for {name}")
 
-            note_title = (
-                f"IC Update – {new_status}" if new_status else "IC Email – No Change"
-            )
             try:
-                add_install_note(install_id, note_title, note_text, token, api_domain)
+                add_ic_monitor_record(
+                    install_id, email["id"], email["subject"],
+                    new_status, confidence, token, api_domain,
+                )
             except Exception:
-                logger.exception(f"ic_monitor: note write failed for {name}")
+                logger.exception(f"ic_monitor: record write failed for {name}")
 
     summary = {
         "status": "ok",
