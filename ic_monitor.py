@@ -290,6 +290,26 @@ def add_ic_monitor_record(install_id, gmail_id, subject, body, classified_status
     resp.raise_for_status()
 
 
+_NOTIFY_USER_ID = "5264387000072521001"  # Harry Dohnert
+
+
+def post_status_change_note(install_id, old_status, new_status, subject, token, api_domain):
+    """Post a note to the Install record mentioning the IC coordinator on status change."""
+    content = (
+        f"$[{_NOTIFY_USER_ID}] IC status updated\n"
+        f"From: {old_status or '(none)'}\n"
+        f"To: {new_status}\n"
+        f"Email: {subject}"
+    )
+    resp = requests.post(
+        f"{api_domain}/crm/v2/Installs/{install_id}/Notes",
+        headers=_zoho_headers(token),
+        json={"data": [{"Note_Title": "IC Status Change", "Note_Content": content}]},
+        timeout=30,
+    )
+    resp.raise_for_status()
+
+
 # ── Gmail helpers ─────────────────────────────────────────────────────────────
 
 def _build_gmail_service():
@@ -465,8 +485,16 @@ def run_ic_monitor(get_zoho_token_fn):
                 try:
                     update_install_fields(install_id, updates, token, api_domain)
                     if "Utility_Status" in updates:
+                        old_status = install.get("Utility_Status")
                         install["Utility_Status"] = updates["Utility_Status"]
                         status_locked = True
+                        try:
+                            post_status_change_note(
+                                install_id, old_status, updates["Utility_Status"],
+                                email["subject"], token, api_domain,
+                            )
+                        except Exception:
+                            logger.exception(f"ic_monitor: mention note failed for {name}")
                     if "IC_Project_Number" in updates:
                         install["IC_Project_Number"] = updates["IC_Project_Number"]
                     records_updated += 1
