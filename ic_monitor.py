@@ -24,8 +24,14 @@ logger = logging.getLogger(__name__)
 
 # Project stages whose installs are in scope for IC monitoring
 IC_ACTIVE_STAGES = [
-    "Interconnection",
+    "Engineering",
+    "Plan Review",
     "Permitting",
+    "Procurement & Scheduling",
+    "Interconnection",
+    "Active Installation",
+    "Inspection",
+    "Witness Test / PTO",
     "Installed",
     "Post-Install",
 ]
