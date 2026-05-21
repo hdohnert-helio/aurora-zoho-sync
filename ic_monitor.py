@@ -271,7 +271,7 @@ def fetch_existing_gmail_ids(install_id, token, api_domain):
     return seen
 
 
-def add_ic_monitor_record(install_id, gmail_id, subject, classified_status, confidence, token, api_domain):
+def add_ic_monitor_record(install_id, gmail_id, subject, body, classified_status, confidence, token, api_domain):
     gmail_link = f"https://mail.google.com/mail/u/0/#all/{gmail_id}"
     resp = requests.post(
         f"{api_domain}/crm/v2/IC_Monitor_Updates",
@@ -280,6 +280,7 @@ def add_ic_monitor_record(install_id, gmail_id, subject, classified_status, conf
             "Name": gmail_id,
             "Install": {"id": install_id},
             "Email_Subject": subject,
+            "Email_Body": body[:32000] if body else "",
             "Classified_Status": classified_status or "No match",
             "Confidence": confidence,
             "Gmail_Link": gmail_link,
@@ -441,7 +442,7 @@ def run_ic_monitor(get_zoho_token_fn):
             if confidence == "low":
                 try:
                     add_ic_monitor_record(
-                        install_id, email["id"], email["subject"],
+                        install_id, email["id"], email["subject"], email["body"],
                         "Needs Review", confidence, token, api_domain,
                     )
                 except Exception:
@@ -475,7 +476,7 @@ def run_ic_monitor(get_zoho_token_fn):
 
             try:
                 add_ic_monitor_record(
-                    install_id, email["id"], email["subject"],
+                    install_id, email["id"], email["subject"], email["body"],
                     new_status, confidence, token, api_domain,
                 )
             except Exception:
