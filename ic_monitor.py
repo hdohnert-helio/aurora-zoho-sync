@@ -71,8 +71,20 @@ STATUS_RANK = {
 
 _IC_NUM_RE = re.compile(r"\b((?:INT|DER)-\d{4,8})\b", re.IGNORECASE)
 
+# Only emails from these sender domains can update Utility_Status.
+# All other emails are silently skipped — utility portals, permit systems,
+# DocuSign, internal Helio emails, etc. do not drive IC status.
+_UTILITY_SENDER_DOMAINS = {
+    "eversource.com",       # Eversource Energy (CT/MA)
+    "uinet.com",            # United Illuminating (CT)
+    "avangrid.com",         # Avangrid (UI parent)
+    "nationalgrid.com",     # National Grid
+    "pseg.com",             # PSEG (NJ/NY/CT)
+    "uipath.com",           # UI automation portal
+}
+
 # Emails matching any of these are silently skipped — no note, no update.
-# Used for internal Helio workflow emails that land in the same mailbox.
+# Used as a secondary filter for edge cases not caught by sender domain.
 _IGNORE_PATTERNS = [
     re.compile(r"plan set request.*(helio solar|delivered|completed)", re.I),
     re.compile(r"pe stamp request.*(helio solar|delivered|completed)", re.I),
@@ -371,9 +383,21 @@ def _walk_payload(payload):
     return ""
 
 
+def _sender_domain(from_header):
+    """Extract lowercase domain from a From header value."""
+    m = re.search(r"@([\w.\-]+)", from_header or "")
+    return m.group(1).lower() if m else ""
+
+
+def _is_utility_sender(from_header):
+    domain = _sender_domain(from_header)
+    return any(domain == d or domain.endswith("." + d) for d in _UTILITY_SENDER_DOMAINS)
+
+
 def _extract_subject_body(msg):
     headers = {h["name"]: h["value"] for h in msg.get("payload", {}).get("headers", [])}
     subject = headers.get("Subject", "")
+    sender = headers.get("From", "")
     body = _walk_payload(msg.get("payload", {}))
     # internalDate is Unix timestamp in milliseconds — most reliable received time
     internal_ms = msg.get("internalDate")
@@ -382,7 +406,7 @@ def _extract_subject_body(msg):
         .strftime("%Y-%m-%dT%H:%M:%S+00:00")
         if internal_ms else None
     )
-    return subject, body, received_dt
+    return subject, body, received_dt, sender
 
 
 def fetch_recent_emails_for_install(gmail, install):
@@ -408,8 +432,8 @@ def fetch_recent_emails_for_install(gmail, install):
             .get(userId="me", id=m["id"], format="full")
             .execute()
         )
-        subject, body, received_dt = _extract_subject_body(full)
-        emails.append({"id": m["id"], "subject": subject, "body": body, "received_dt": received_dt})
+        subject, body, received_dt, sender = _extract_subject_body(full)
+        emails.append({"id": m["id"], "subject": subject, "body": body, "received_dt": received_dt, "sender": sender})
     return emails
 
 
@@ -468,6 +492,13 @@ def run_ic_monitor(get_zoho_token_fn):
         for email in emails:
             if email["id"] in seen_gmail_ids:
                 logger.info(f"ic_monitor: skipping already-noted email for {name} — {email['subject']!r}")
+                continue
+
+            if not _is_utility_sender(email.get("sender", "")):
+                logger.info(
+                    f"ic_monitor: skipping non-utility email for {name} "
+                    f"— sender={email.get('sender')!r} subject={email['subject']!r}"
+                )
                 continue
 
             result = classify_email(install, email["subject"], email["body"])
