@@ -41,6 +41,29 @@ GMAIL_LABEL = "_INTERCONNECTIONS"
 GMAIL_LOOKBACK_DAYS = 45
 GMAIL_MAX_RESULTS = 10
 
+# ── Status rank (forward-only guard) ─────────────────────────────────────────
+# The monitor may only move a status forward (higher rank), never backward.
+# status_locked handles within-run ordering; this guards across runs and
+# prevents newly-scanned installs from regressing when old emails are processed.
+STATUS_RANK = {
+    "App Sent for Client Signature": 1,
+    "Signed App Submitted": 2,
+    "RRES Review": 3,
+    "Resubmitted - RRES Review": 4,
+    "Technical Review": 5,
+    "Resubmitted - Technical Review": 6,
+    "App Signed by Client - IC On Hold": 7,
+    "Application On Hold - HEA": 8,
+    "Fast Track": 9,
+    "Waiting for Town Approval": 10,
+    "Contingent Approval (As Is)": 11,
+    "Contingent Approval (with Upgrade)": 12,
+    "Witness Test Schedule": 13,
+    "Witness Test Complete": 14,
+    "Meter Swap": 15,
+    "Permission to Operate": 16,
+}
+
 # ── Keyword classification rules ─────────────────────────────────────────────
 # Each rule is (compiled_pattern, status_value, confidence).
 # Rules are evaluated against the subject + body and checked in order.
@@ -471,7 +494,16 @@ def run_ic_monitor(get_zoho_token_fn):
 
             updates = {}
             if new_status and not status_locked and new_status != install.get("Utility_Status"):
-                updates["Utility_Status"] = new_status
+                current_rank = STATUS_RANK.get(install.get("Utility_Status"), 0)
+                new_rank = STATUS_RANK.get(new_status, 0)
+                if new_rank >= current_rank:
+                    updates["Utility_Status"] = new_status
+                else:
+                    logger.info(
+                        f"ic_monitor: skipping downgrade for {name}: "
+                        f"{install.get('Utility_Status')!r} → {new_status!r} "
+                        f"(rank {current_rank} → {new_rank})"
+                    )
             if ic_num and not install.get("IC_Project_Number"):
                 updates["IC_Project_Number"] = ic_num
 
