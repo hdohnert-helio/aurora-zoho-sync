@@ -494,11 +494,19 @@ def run_ic_monitor(get_zoho_token_fn):
                 logger.info(f"ic_monitor: skipping already-noted email for {name} — {email['subject']!r}")
                 continue
 
+            # Non-utility emails: log for reference but never update status
             if not _is_utility_sender(email.get("sender", "")):
                 logger.info(
-                    f"ic_monitor: skipping non-utility email for {name} "
+                    f"ic_monitor: logging non-utility email for {name} "
                     f"— sender={email.get('sender')!r} subject={email['subject']!r}"
                 )
+                try:
+                    add_ic_monitor_record(
+                        install_id, email["id"], email["subject"], email["body"],
+                        "Non-utility email", "low", email["received_dt"], token, api_domain,
+                    )
+                except Exception:
+                    logger.exception(f"ic_monitor: record write failed for non-utility email {name}")
                 continue
 
             result = classify_email(install, email["subject"], email["body"])
