@@ -806,9 +806,10 @@ HEA_SHEET_CSV_URL = (
 
 # Forward-only guard: never downgrade HEA status
 _HEA_STATUS_RANK = {
-    "Scheduled with HEA Auditor": 1,
-    "HEA Auditor Confirmed Date": 2,
-    "HEA Completed ( < 3Yrs Old)": 3,
+    "Pending Confirmation": 1,
+    "Scheduled with HEA Auditor": 2,
+    "HEA Auditor Confirmed Date": 3,
+    "HEA Completed ( < 3Yrs Old)": 4,
 }
 
 _HEA_CANCELLED_RE = re.compile(
@@ -1238,7 +1239,7 @@ def _parse_hea_sheet():
         if not any(c.strip() for c in row):
             continue
 
-        normalized = [c.strip().lower() for c in row]
+        normalized = [re.sub(r'\s+', ' ', c).strip().lower() for c in row]
 
         # Detect header rows by presence of name columns
         if "first name" in normalized or ("first" in normalized and "last" in normalized):
@@ -1282,6 +1283,9 @@ def _parse_hea_sheet():
         if section == "completed":
             hea_status = "HEA Completed ( < 3Yrs Old)"
             apt_date_raw = _get("hes date", "hes date/time")
+        elif section == "pending_cancelled":
+            hea_status = "Pending Confirmation"
+            apt_date_raw = _get("apt date", "hes date/time", "hes date")
         elif "info confirmed" in notes.lower():
             hea_status = "HEA Auditor Confirmed Date"
             apt_date_raw = _get("apt date", "hes date/time", "hes date")
@@ -1323,20 +1327,18 @@ async def _run_hea_sync():
     for rec in records:
         phone = rec["phone"]
 
-        # --- Lookup install by phone ---
-        install = None
+        # --- Lookup installs by phone (may return multiple for same customer) ---
+        installs = []
         search_url = (
             f"{api_domain}/crm/v2/Installs/search"
             f"?criteria=(Primary_Phone:equals:{phone})"
         )
         r = requests.get(search_url, headers=headers)
         if r.status_code == 200:
-            data = r.json().get("data", [])
-            if data:
-                install = data[0]
+            installs = r.json().get("data", [])
 
         # --- Fallback: last name + city ---
-        if not install and rec["last_name"] and rec["city"]:
+        if not installs and rec["last_name"] and rec["city"]:
             search_url2 = (
                 f"{api_domain}/crm/v2/Installs/search"
                 f"?criteria=((Name:contains:{rec['last_name']})"
@@ -1344,11 +1346,9 @@ async def _run_hea_sync():
             )
             r2 = requests.get(search_url2, headers=headers)
             if r2.status_code == 200:
-                data2 = r2.json().get("data", [])
-                if len(data2) == 1:
-                    install = data2[0]
+                installs = r2.json().get("data", [])
 
-        if not install:
+        if not installs:
             not_found += 1
             logger.info(
                 f"hea_sync: no install found for "
@@ -1356,47 +1356,49 @@ async def _run_hea_sync():
             )
             continue
 
-        install_id = install["id"]
         new_status = rec["hea_status"]
 
-        # --- Forward-only guard: never downgrade status ---
-        current_status = install.get("Home_Energy_Audit_Status") or ""
-        current_rank = _HEA_STATUS_RANK.get(current_status, 0)
-        new_rank = _HEA_STATUS_RANK.get(new_status, 0)
-        if new_rank > 0 and new_rank < current_rank:
-            logger.info(
-                f"hea_sync: skipping downgrade for {install_id} | "
-                f"{current_status!r} → {new_status!r}"
-            )
-            skipped += 1
-            continue
+        for install in installs:
+            install_id = install["id"]
 
-        # --- Build update payload ---
-        update = {
-            "id": install_id,
-            "Home_Energy_Audit_Status": new_status,
-            "HEA_Audit_Company": "Home Doctor",
-        }
-        if rec["apt_date"]:
-            if new_status == "HEA Completed ( < 3Yrs Old)":
-                update["Energy_Audit_Completed_On"] = rec["apt_date"]
+            # --- Forward-only guard: never downgrade status ---
+            current_status = install.get("Home_Energy_Audit_Status") or ""
+            current_rank = _HEA_STATUS_RANK.get(current_status, 0)
+            new_rank = _HEA_STATUS_RANK.get(new_status, 0)
+            if new_rank > 0 and new_rank < current_rank:
+                logger.info(
+                    f"hea_sync: skipping downgrade for {install_id} | "
+                    f"{current_status!r} → {new_status!r}"
+                )
+                skipped += 1
+                continue
+
+            # --- Build update payload ---
+            update = {
+                "id": install_id,
+                "Home_Energy_Audit_Status": new_status,
+                "HEA_Audit_Company": "Home Doctor",
+            }
+            if rec["apt_date"]:
+                if new_status == "HEA Completed ( < 3Yrs Old)":
+                    update["Energy_Audit_Completed_On"] = rec["apt_date"]
+                else:
+                    update["Energy_Audit_Scheduled_For"] = rec["apt_date"] + "T12:00:00+00:00"
+
+            put_r = requests.put(
+                f"{api_domain}/crm/v2/Installs",
+                headers=headers,
+                json={"data": [update]},
+            )
+            if put_r.status_code in [200, 201, 202]:
+                synced += 1
+                logger.info(f"hea_sync: updated install {install_id} | {new_status}")
             else:
-                update["Energy_Audit_Scheduled_For"] = rec["apt_date"] + "T12:00:00+00:00"
-
-        put_r = requests.put(
-            f"{api_domain}/crm/v2/Installs",
-            headers=headers,
-            json={"data": [update]},
-        )
-        if put_r.status_code in [200, 201, 202]:
-            synced += 1
-            logger.info(f"hea_sync: updated install {install_id} | {new_status}")
-        else:
-            skipped += 1
-            logger.error(
-                f"hea_sync: update failed for {install_id} | "
-                f"{put_r.status_code} | {put_r.text}"
-            )
+                skipped += 1
+                logger.error(
+                    f"hea_sync: update failed for {install_id} | "
+                    f"{put_r.status_code} | {put_r.text}"
+                )
 
     result = {
         "status": "ok",
