@@ -1331,6 +1331,8 @@ async def _run_hea_sync():
     synced = 0
     skipped = 0
     not_found = 0
+    not_found_names = []
+    skipped_names = []
 
     for rec in records:
         phone = rec["phone"]
@@ -1358,10 +1360,9 @@ async def _run_hea_sync():
 
         if not installs:
             not_found += 1
-            logger.info(
-                f"hea_sync: no install found for "
-                f"{rec['first_name']} {rec['last_name']} ({phone})"
-            )
+            label = f"{rec['first_name']} {rec['last_name']} ({phone})"
+            not_found_names.append(label)
+            logger.info(f"hea_sync: no install found for {label}")
             continue
 
         new_status = rec["hea_status"]
@@ -1374,10 +1375,9 @@ async def _run_hea_sync():
             current_rank = _HEA_STATUS_RANK.get(current_status, 0)
             new_rank = _HEA_STATUS_RANK.get(new_status, 0)
             if new_rank > 0 and new_rank < current_rank:
-                logger.info(
-                    f"hea_sync: skipping downgrade for {install_id} | "
-                    f"{current_status!r} → {new_status!r}"
-                )
+                label = f"{rec['first_name']} {rec['last_name']} ({phone}) [{current_status} → {new_status}]"
+                logger.info(f"hea_sync: skipping downgrade for {install_id} | {label}")
+                skipped_names.append(label)
                 skipped += 1
                 continue
 
@@ -1412,7 +1412,9 @@ async def _run_hea_sync():
         "status": "ok",
         "synced": synced,
         "not_found": not_found,
+        "not_found_names": not_found_names,
         "skipped": skipped,
+        "skipped_names": skipped_names,
         "total_parsed": len(records),
     }
     logger.info(f"hea_sync: complete | {result}")
