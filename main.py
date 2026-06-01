@@ -798,6 +798,25 @@ _SNAPSHOT_PRICING_KEYS = [
     "Referral_Payout_PPW",
 ]
 
+HEA_SHEET_CSV_URL = (
+    "https://docs.google.com/spreadsheets/d/"
+    "1BsEFP4rAmRjPJ9_49rjAEFHnoo12jH3oWdiQ6zKUHME"
+    "/export?format=csv&gid=791283662"
+)
+
+# Forward-only guard: never downgrade HEA status
+_HEA_STATUS_RANK = {
+    "Scheduled with HEA Auditor": 1,
+    "HEA Auditor Confirmed Date": 2,
+    "HEA Completed ( < 3Yrs Old)": 3,
+}
+
+_HEA_CANCELLED_RE = re.compile(
+    r"already had|no longer|cancel|barriered|unresponsive|not interested|"
+    r"refused|other vendor|another vendor|wise use|solar cancel|home too new",
+    re.I,
+)
+
 
 def _sync_pricing_from_snapshot_for_install(
     install_id,
@@ -1162,6 +1181,243 @@ def _run_snapshot_backfill_all(limit: int, dry_run: bool):
         )
     except Exception:
         logger.exception("Unhandled exception in _run_snapshot_backfill_all")
+
+
+# ------------------------
+# Internal: Sync HEA status from Home Doctor Google Sheet → Zoho Installs
+# ------------------------
+
+def _normalize_phone(raw):
+    """Strip non-digits, return last 10 digits."""
+    digits = re.sub(r"\D", "", raw or "")
+    return digits[-10:] if len(digits) >= 10 else digits
+
+
+def _parse_hea_date(raw):
+    """Parse date strings like '1/31/2025', '6/7/25'. Returns 'YYYY-MM-DD' or None."""
+    if not raw:
+        return None
+    raw = raw.strip()
+    for fmt in ("%m/%d/%Y", "%m/%d/%y"):
+        try:
+            return datetime.datetime.strptime(raw, fmt).strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+    return None
+
+
+def _parse_hea_sheet():
+    """Download and parse the Home Doctor HEA tracking Google Sheet CSV.
+
+    The sheet has multiple sections with different column layouts, separated by
+    header rows. We detect the current section by examining header content and
+    classify each data row accordingly.
+
+    Returns a list of dicts:
+        {phone, first_name, last_name, city, hea_status, apt_date}
+    Cancelled rows are dropped (not returned).
+    """
+    try:
+        resp = requests.get(HEA_SHEET_CSV_URL, timeout=30)
+        resp.raise_for_status()
+    except Exception as exc:
+        logger.error(f"hea_sync: sheet download failed | {exc}")
+        return []
+
+    import csv
+    import io
+
+    reader = csv.reader(io.StringIO(resp.text))
+    rows = list(reader)
+
+    col = {}          # current column-name → index map
+    section = None    # 'active' | 'pending_cancelled' | 'completed' | 'confirmed'
+    records = []
+
+    for row in rows:
+        if not any(c.strip() for c in row):
+            continue
+
+        normalized = [c.strip().lower() for c in row]
+
+        # Detect header rows by presence of name columns
+        if "first name" in normalized or ("first" in normalized and "last" in normalized):
+            col = {v: i for i, v in enumerate(normalized) if v}
+            if "apt date" in col:
+                section = "active"           # Main schedule (Section 4)
+            elif "hes date" in col and "lead source" in col:
+                section = "pending_cancelled"  # Sections 1 & 5
+            elif "hes date" in col:
+                section = "completed"        # Section 6
+            else:
+                section = "confirmed"        # Section 3 (short-form confirmed)
+            continue
+
+        if not col or not section:
+            continue
+
+        def _get(*keys):
+            for k in keys:
+                idx = col.get(k)
+                if idx is not None and idx < len(row):
+                    v = row[idx].strip()
+                    if v:
+                        return v
+            return ""
+
+        phone = _normalize_phone(_get("phone"))
+        if not phone or len(phone) < 10:
+            continue
+
+        first = _get("first name", "first")
+        last = _get("last name", "last")
+        city = _get("city")
+        notes = _get("notes")
+
+        # Drop cancelled / disqualified rows
+        if _HEA_CANCELLED_RE.search(notes):
+            continue
+
+        # Determine HEA status
+        if section == "completed":
+            hea_status = "HEA Completed ( < 3Yrs Old)"
+            apt_date_raw = _get("hes date", "hes date/time")
+        elif "info confirmed" in notes.lower():
+            hea_status = "HEA Auditor Confirmed Date"
+            apt_date_raw = _get("apt date", "hes date/time", "hes date")
+        else:
+            hea_status = "Scheduled with HEA Auditor"
+            apt_date_raw = _get("apt date", "hes date/time", "hes date")
+
+        records.append({
+            "phone": phone,
+            "first_name": first,
+            "last_name": last,
+            "city": city,
+            "hea_status": hea_status,
+            "apt_date": _parse_hea_date(apt_date_raw),
+        })
+
+    logger.info(f"hea_sync: parsed {len(records)} records from sheet")
+    return records
+
+
+async def _run_hea_sync():
+    """Core HEA sync logic. Reads the Home Doctor sheet and updates Zoho Installs."""
+    access_token = get_zoho_access_token()
+    if not access_token:
+        logger.error("hea_sync: no zoho token")
+        return {"status": "failed", "reason": "no zoho token"}
+
+    headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
+    api_domain = os.getenv("ZOHO_API_DOMAIN")
+
+    records = _parse_hea_sheet()
+    if not records:
+        return {"status": "ok", "synced": 0, "not_found": 0, "skipped": 0, "total_parsed": 0}
+
+    synced = 0
+    skipped = 0
+    not_found = 0
+
+    for rec in records:
+        phone = rec["phone"]
+
+        # --- Lookup install by phone ---
+        install = None
+        search_url = (
+            f"{api_domain}/crm/v2/Installs/search"
+            f"?criteria=(Primary_Phone:equals:{phone})"
+        )
+        r = requests.get(search_url, headers=headers)
+        if r.status_code == 200:
+            data = r.json().get("data", [])
+            if data:
+                install = data[0]
+
+        # --- Fallback: last name + city ---
+        if not install and rec["last_name"] and rec["city"]:
+            search_url2 = (
+                f"{api_domain}/crm/v2/Installs/search"
+                f"?criteria=((Name:contains:{rec['last_name']})"
+                f"AND(Site_Location:contains:{rec['city']}))"
+            )
+            r2 = requests.get(search_url2, headers=headers)
+            if r2.status_code == 200:
+                data2 = r2.json().get("data", [])
+                if len(data2) == 1:
+                    install = data2[0]
+
+        if not install:
+            not_found += 1
+            logger.info(
+                f"hea_sync: no install found for "
+                f"{rec['first_name']} {rec['last_name']} ({phone})"
+            )
+            continue
+
+        install_id = install["id"]
+        new_status = rec["hea_status"]
+
+        # --- Forward-only guard: never downgrade status ---
+        current_status = install.get("Home_Energy_Audit_Status") or ""
+        current_rank = _HEA_STATUS_RANK.get(current_status, 0)
+        new_rank = _HEA_STATUS_RANK.get(new_status, 0)
+        if new_rank > 0 and new_rank < current_rank:
+            logger.info(
+                f"hea_sync: skipping downgrade for {install_id} | "
+                f"{current_status!r} → {new_status!r}"
+            )
+            skipped += 1
+            continue
+
+        # --- Build update payload ---
+        update = {
+            "id": install_id,
+            "Home_Energy_Audit_Status": new_status,
+            "HEA_Audit_Company": "Home Doctor",
+        }
+        if rec["apt_date"]:
+            if new_status == "HEA Completed ( < 3Yrs Old)":
+                update["Energy_Audit_Completed_On"] = rec["apt_date"]
+            else:
+                update["Energy_Audit_Scheduled_For"] = rec["apt_date"] + "T12:00:00+00:00"
+
+        put_r = requests.put(
+            f"{api_domain}/crm/v2/Installs",
+            headers=headers,
+            json={"data": [update]},
+        )
+        if put_r.status_code in [200, 201, 202]:
+            synced += 1
+            logger.info(f"hea_sync: updated install {install_id} | {new_status}")
+        else:
+            skipped += 1
+            logger.error(
+                f"hea_sync: update failed for {install_id} | "
+                f"{put_r.status_code} | {put_r.text}"
+            )
+
+    result = {
+        "status": "ok",
+        "synced": synced,
+        "not_found": not_found,
+        "skipped": skipped,
+        "total_parsed": len(records),
+    }
+    logger.info(f"hea_sync: complete | {result}")
+    return result
+
+
+@app.post("/internal/sync-hea")
+async def sync_hea(request: Request):
+    """Sync HEA status from Home Doctor Google Sheet to Zoho Installs."""
+    try:
+        result = await _run_hea_sync()
+        return result
+    except Exception:
+        logger.exception("Unhandled exception in sync_hea")
+        return {"status": "failed", "reason": "exception"}
 
 
 # ------------------------
