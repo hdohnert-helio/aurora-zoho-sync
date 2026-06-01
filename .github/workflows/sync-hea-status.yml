@@ -1,0 +1,16 @@
+name: Sync HEA Status
+
+on:
+  schedule:
+    # Runs daily at 8am ET (12:00 UTC)
+    - cron: '0 12 * * *'
+  workflow_dispatch:
+
+jobs:
+  sync-hea:
+    name: Sync Home Doctor HEA status to Zoho
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger HEA sync
+        run: |
+          curl -s -f -X POST https://aurora-zoho-sync.onrender.com/internal/sync-hea
