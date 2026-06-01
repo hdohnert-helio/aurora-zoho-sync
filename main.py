@@ -798,11 +798,18 @@ _SNAPSHOT_PRICING_KEYS = [
     "Referral_Payout_PPW",
 ]
 
-HEA_SHEET_CSV_URL = (
+_HEA_SHEET_BASE = (
     "https://docs.google.com/spreadsheets/d/"
     "1BsEFP4rAmRjPJ9_49rjAEFHnoo12jH3oWdiQ6zKUHME"
-    "/export?format=csv&gid=791283662"
+    "/gviz/tq?tqx=out:csv&sheet="
 )
+# Cancelled tab is intentionally excluded — records there have no corresponding
+# Zoho HEA status and should not overwrite any existing status.
+_HEA_SHEET_TABS = [
+    "Pending%20Confirmation",
+    "Confirmed",
+    "HEA%20Completed",
+]
 
 # Forward-only guard: never downgrade HEA status
 _HEA_STATUS_RANK = {
@@ -1207,32 +1214,23 @@ def _parse_hea_date(raw):
     return None
 
 
-def _parse_hea_sheet():
-    """Download and parse the Home Doctor HEA tracking Google Sheet CSV.
-
-    The sheet has multiple sections with different column layouts, separated by
-    header rows. We detect the current section by examining header content and
-    classify each data row accordingly.
-
-    Returns a list of dicts:
-        {phone, first_name, last_name, city, hea_status, apt_date}
-    Cancelled rows are dropped (not returned).
-    """
-    try:
-        resp = requests.get(HEA_SHEET_CSV_URL, timeout=30)
-        resp.raise_for_status()
-    except Exception as exc:
-        logger.error(f"hea_sync: sheet download failed | {exc}")
-        return []
-
+def _parse_hea_tab(url):
+    """Download and parse one HEA sheet tab CSV. Returns a list of record dicts."""
     import csv
     import io
+
+    try:
+        resp = requests.get(url, timeout=30)
+        resp.raise_for_status()
+    except Exception as exc:
+        logger.error(f"hea_sync: tab download failed | {url} | {exc}")
+        return []
 
     reader = csv.reader(io.StringIO(resp.text))
     rows = list(reader)
 
-    col = {}          # current column-name → index map
-    section = None    # 'active' | 'pending_cancelled' | 'completed' | 'confirmed'
+    col = {}
+    section = None
     records = []
 
     for row in rows:
@@ -1245,13 +1243,13 @@ def _parse_hea_sheet():
         if "first name" in normalized or ("first" in normalized and "last" in normalized):
             col = {v: i for i, v in enumerate(normalized) if v}
             if "apt date" in col:
-                section = "active"           # Main schedule (Section 4)
+                section = "active"
             elif "hes date" in col and "lead source" in col:
-                section = "pending_cancelled"  # Sections 1 & 5
+                section = "pending_cancelled"
             elif "hes date" in col:
-                section = "completed"        # Section 6
+                section = "completed"
             else:
-                section = "confirmed"        # Section 3 (short-form confirmed)
+                section = "confirmed"
             continue
 
         if not col or not section:
@@ -1279,7 +1277,7 @@ def _parse_hea_sheet():
         if _HEA_CANCELLED_RE.search(notes):
             continue
 
-        # Determine HEA status
+        # Determine HEA status from section + notes
         if section == "completed":
             hea_status = "HEA Completed ( < 3Yrs Old)"
             apt_date_raw = _get("hes date", "hes date/time")
@@ -1302,8 +1300,18 @@ def _parse_hea_sheet():
             "apt_date": _parse_hea_date(apt_date_raw),
         })
 
-    logger.info(f"hea_sync: parsed {len(records)} records from sheet")
     return records
+
+
+def _parse_hea_sheet():
+    """Read all active HEA tabs and return combined records."""
+    all_records = []
+    for tab in _HEA_SHEET_TABS:
+        tab_records = _parse_hea_tab(_HEA_SHEET_BASE + tab)
+        logger.info(f"hea_sync: {tab} → {len(tab_records)} records")
+        all_records.extend(tab_records)
+    logger.info(f"hea_sync: parsed {len(all_records)} records total from {len(_HEA_SHEET_TABS)} tabs")
+    return all_records
 
 
 async def _run_hea_sync():
