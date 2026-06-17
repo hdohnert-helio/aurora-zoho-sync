@@ -3185,12 +3185,12 @@ def _fetch_all_commission_projects(cutoff_date: str = "2026-01-01") -> list[dict
     page = 1
     while True:
         url = (
-            f"{api_domain}/crm/v2/Installs/search"
+            f"{api_domain}/crm/v7/Installs/search"
             f"?criteria={criteria}&fields={fields}&page={page}&per_page=200"
         )
         resp = requests.get(url, headers=headers)
         if resp.status_code != 200:
-            logger.error(f"_fetch_all_commission_projects: Zoho fetch failed status={resp.status_code}")
+            logger.error(f"_fetch_all_commission_projects: Zoho fetch failed status={resp.status_code} body={resp.text[:200]}")
             break
         data = resp.json().get("data") or []
         for r in data:
@@ -3490,6 +3490,6 @@ async def debug_zoho():
         return {"token": "FAILED"}
     api_domain = os.getenv("ZOHO_API_DOMAIN")
     headers = {"Authorization": f"Zoho-oauthtoken {token}"}
-    url = f"{api_domain}/crm/v2/Installs/search?criteria=(Project_Created_Date:greater_equal:2026-01-01)&fields=Name,Project_ID,Aurora_Project_ID&per_page=3"
+    url = f"{api_domain}/crm/v7/Installs/search?criteria=(Project_Created_Date:greater_equal:2026-01-01)&fields=Name,Project_ID,Aurora_Project_ID&per_page=3"
     resp = requests.get(url, headers=headers)
     return {"token": "ok", "api_domain": api_domain, "status": resp.status_code, "body": resp.json()}
