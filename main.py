@@ -3145,7 +3145,10 @@ COMMISSION_PPW_FLOOR = 2.50
 
 
 def _build_sheets_service():
-    """Build a Sheets API v4 client using the service account with spreadsheets scope."""
+    """
+    Build a Sheets API v4 client using the service account directly (no impersonation).
+    The sheet must be shared with the service account email as Editor.
+    """
     raw = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
     if not raw:
         logger.error("GOOGLE_SERVICE_ACCOUNT_JSON env var is missing")
@@ -3157,13 +3160,9 @@ def _build_sheets_service():
         return None
     creds = service_account.Credentials.from_service_account_info(
         info,
-        scopes=[
-            "https://www.googleapis.com/auth/spreadsheets",
-            "https://www.googleapis.com/auth/calendar.events",
-        ],
+        scopes=["https://www.googleapis.com/auth/spreadsheets"],
     )
-    delegated = creds.with_subject(SHEETS_IMPERSONATE_EMAIL)
-    return build("sheets", "v4", credentials=delegated, cache_discovery=False)
+    return build("sheets", "v4", credentials=creds, cache_discovery=False)
 
 
 def _fetch_all_commission_projects(cutoff_date: str = "2026-01-01") -> list[dict]:
