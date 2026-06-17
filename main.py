@@ -3259,6 +3259,7 @@ def _get_commission_data_for_project(aurora_project_id: str) -> dict:
         adder_details = []
 
     referral_flat = 0.0
+    subcontractor_total = 0.0
     subcontractor_notes = []
     for adder in adder_details:
         name = (adder.get("name") or "").strip()
@@ -3266,6 +3267,7 @@ def _get_commission_data_for_project(aurora_project_id: str) -> dict:
         if name == "A - Referral Payout":
             referral_flat += total
         elif name.startswith("D. MISC:") and total > 0:
+            subcontractor_total += total
             subcontractor_notes.append(f"{name.replace('D. MISC: ', '')} ${total:,.2f}")
 
     return {
@@ -3277,6 +3279,7 @@ def _get_commission_data_for_project(aurora_project_id: str) -> dict:
         "referral_flat": referral_flat,
         "helio_lead_fee_ppw": helio_lead_fee_ppw,
         "adder_name_list": adder_name_list,
+        "subcontractor_total": subcontractor_total,
         "subcontractor_notes": " | ".join(subcontractor_notes) if subcontractor_notes else "",
     }
 
@@ -3286,7 +3289,7 @@ def _write_commission_tab(svc, tab_name: str, rows: list[dict]) -> None:
     Add a new tab to COMMISSION_SHEET_ID and write commission data with
     live Sheets formulas for every calculated field.
 
-    Column layout (A=1 … P=16):
+    Column layout (A=1 … R=18):
       A  Customer
       B  Project ID
       C  Rep
@@ -3302,8 +3305,9 @@ def _write_commission_tab(svc, tab_name: str, rows: list[dict]) -> None:
       M  Consultant Commission    =L{r}*E{r}
       N  Referral Payout ($)      ← raw value (flat)
       O  Total Commission         =K{r}+M{r}
-      P  Subcontractor Notes
-      Q  All Adders
+      P  Subcontractor Total ($)  ← raw value (summable)
+      Q  Subcontractor Detail     ← text breakdown
+      R  All Adders on Deal
     """
     sheets = svc.spreadsheets()
 
@@ -3326,7 +3330,7 @@ def _write_commission_tab(svc, tab_name: str, rows: list[dict]) -> None:
         "Base PPW - Floor", "Base Commission",
         "Consultant Comp PPW ($/W)", "Consultant Commission",
         "Referral Payout ($)", "Total Commission",
-        "Subcontractor Notes", "All Adders on Deal",
+        "Subcontractor Total ($)", "Subcontractor Detail", "All Adders on Deal",
     ]
 
     value_rows = [headers]
@@ -3336,7 +3340,7 @@ def _write_commission_tab(svc, tab_name: str, rows: list[dict]) -> None:
             value_rows.append([
                 row.get("customer", ""), row.get("project_id", ""),
                 row.get("rep", ""), row.get("stage", ""),
-                row.get("error", ""), "", "", "", "", "", "", "", "", "", "", "", "",
+                row.get("error", ""), "", "", "", "", "", "", "", "", "", "", "", "", "", "",
             ])
             continue
 
@@ -3357,8 +3361,9 @@ def _write_commission_tab(svc, tab_name: str, rows: list[dict]) -> None:
             f"=L{r}*E{r}",                             # M — consultant commission
             d["referral_flat"],                        # N — referral flat
             f"=K{r}+M{r}",                             # O — total commission
-            d["subcontractor_notes"],                  # P
-            d["adder_name_list"],                      # Q
+            d["subcontractor_total"],                  # P — subcontractor $ (summable)
+            d["subcontractor_notes"],                  # Q — detail text
+            d["adder_name_list"],                      # R — all adders
         ])
 
     # 3. Write values (formulas go as USER_ENTERED so Sheets evaluates them)
