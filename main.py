@@ -3043,7 +3043,8 @@ async def get_commissions(request: Request):
         design_resp = pull_design(design_id)
         summary_resp = pull_design_summary(design_id)
         design_json = design_resp.json() if design_resp.status_code == 200 else {}
-        pricing_json = pricing_resp.json()
+        pricing_raw = pricing_resp.json()
+        pricing_json = pricing_raw.get("pricing") or pricing_raw
         summary_json = summary_resp.json() if summary_resp.status_code == 200 else {}
 
         fields = extract_pricing_fields(design_json, pricing_json, summary_json)
