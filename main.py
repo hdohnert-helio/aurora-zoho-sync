@@ -3081,3 +3081,37 @@ async def get_commissions(request: Request):
         })
 
     return {"results": results}
+
+
+# ------------------------
+# Debug: Raw Aurora Pricing
+# ------------------------
+
+@app.post("/commissions/debug-pricing")
+async def debug_pricing(request: Request):
+    """Returns raw Aurora pricing JSON for the first design of a project."""
+    body = await request.json()
+    project_id = body.get("project_id")
+    if not project_id:
+        raise HTTPException(status_code=400, detail="project_id required")
+
+    tenant_id = os.getenv("AURORA_TENANT_ID")
+    designs_url = f"https://api.aurorasolar.com/tenants/{tenant_id}/projects/{project_id}/designs"
+    designs_resp = _aurora_get_with_retry(designs_url)
+    if designs_resp.status_code != 200:
+        return {"error": f"designs fetch failed ({designs_resp.status_code})", "body": designs_resp.text}
+
+    designs = designs_resp.json().get("designs", [])
+    if not designs:
+        return {"error": "no designs found", "raw": designs_resp.json()}
+
+    best_design = max(designs, key=lambda d: d.get("updated_at") or d.get("created_at") or "")
+    design_id = best_design.get("id")
+
+    pricing_resp = pull_pricing(design_id)
+    return {
+        "design_id": design_id,
+        "pricing_status": pricing_resp.status_code,
+        "pricing_keys": list(pricing_resp.json().keys()) if pricing_resp.status_code == 200 else None,
+        "pricing_raw": pricing_resp.json() if pricing_resp.status_code == 200 else pricing_resp.text,
+    }
