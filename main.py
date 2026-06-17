@@ -3119,3 +3119,364 @@ async def debug_pricing(request: Request):
         "pricing_keys": list(pricing_resp.json().keys()) if pricing_resp.status_code == 200 else None,
         "pricing_raw": pricing_resp.json() if pricing_resp.status_code == 200 else pricing_resp.text,
     }
+
+
+# ============================================================================
+# Commission Run — Automated Sheet Output
+# ============================================================================
+#
+# POST /commissions/run
+#   Pulls all Zoho Installs with an Aurora_Project_ID created on or after
+#   a cutoff date (default 2026-01-01), fetches fresh pricing from Aurora
+#   for the sold design on each project, calculates commissions, and writes
+#   a new tab to the master commission Google Sheet with live formulas.
+#
+# POST /webhook/zoho/project-intake
+#   Triggered by a Zoho blueprint when a project moves to Project Intake.
+#   Runs the same logic for that single project and appends a tab.
+#
+# Master sheet ID (create once, tabs accumulate per run):
+COMMISSION_SHEET_ID = "1ejKNcE6Zhe8ehGy351fAc9Y7b7yje8UktHPQObOYya8"
+
+# Impersonate this user when writing to Sheets (must be in the same Google Workspace).
+SHEETS_IMPERSONATE_EMAIL = "hdohnert@helio.solar"
+
+COMMISSION_PPW_FLOOR = 2.50
+
+
+def _build_sheets_service():
+    """Build a Sheets API v4 client using the service account with spreadsheets scope."""
+    raw = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
+    if not raw:
+        logger.error("GOOGLE_SERVICE_ACCOUNT_JSON env var is missing")
+        return None
+    try:
+        info = json.loads(raw)
+    except ValueError:
+        logger.exception("GOOGLE_SERVICE_ACCOUNT_JSON is not valid JSON")
+        return None
+    creds = service_account.Credentials.from_service_account_info(
+        info,
+        scopes=[
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/calendar.events",
+        ],
+    )
+    delegated = creds.with_subject(SHEETS_IMPERSONATE_EMAIL)
+    return build("sheets", "v4", credentials=delegated, cache_discovery=False)
+
+
+def _fetch_all_commission_projects(cutoff_date: str = "2026-01-01") -> list[dict]:
+    """
+    Pull all Zoho Installs with an Aurora_Project_ID created on or after
+    cutoff_date. Returns list of dicts with keys: customer, project_id,
+    zoho_record_id, aurora_project_id, rep, stage.
+    """
+    token = get_zoho_access_token()
+    if not token:
+        return []
+    api_domain = os.getenv("ZOHO_API_DOMAIN")
+    headers = {"Authorization": f"Zoho-oauthtoken {token}"}
+
+    fields = "Name,Project_ID,Aurora_Project_ID,Sales_Representative,Project_Stage,Project_Created_Date"
+    criteria = f"(Aurora_Project_ID:is_not_empty:true)AND(Project_Created_Date:greater_equal:{cutoff_date})"
+
+    results = []
+    page = 1
+    while True:
+        url = (
+            f"{api_domain}/crm/v2/Installs/search"
+            f"?criteria={criteria}&fields={fields}&page={page}&per_page=200"
+        )
+        resp = requests.get(url, headers=headers)
+        if resp.status_code != 200:
+            logger.error(f"_fetch_all_commission_projects: Zoho search failed status={resp.status_code}")
+            break
+        data = resp.json().get("data") or []
+        for r in data:
+            aurora_id = (r.get("Aurora_Project_ID") or "").strip()
+            if not aurora_id:
+                continue
+            results.append({
+                "customer": (r.get("Name") or "").strip(),
+                "project_id": (r.get("Project_ID") or "").strip(),
+                "zoho_record_id": r.get("id") or "",
+                "aurora_project_id": aurora_id,
+                "rep": (r.get("Sales_Representative") or "").strip(),
+                "stage": (r.get("Project_Stage") or "").strip(),
+            })
+        info = resp.json().get("info") or {}
+        if not info.get("more_records"):
+            break
+        page += 1
+        if page > 50:
+            break
+    return results
+
+
+def _get_commission_data_for_project(aurora_project_id: str) -> dict:
+    """
+    Pull fresh pricing from Aurora for the sold design on a project.
+    Returns a flat dict of commission fields, or {"error": "..."} on failure.
+    """
+    tenant_id = os.getenv("AURORA_TENANT_ID")
+    designs_url = f"https://api.aurorasolar.com/tenants/{tenant_id}/projects/{aurora_project_id}/designs"
+    designs_resp = _aurora_get_with_retry(designs_url)
+    if designs_resp.status_code != 200:
+        return {"error": f"designs fetch failed ({designs_resp.status_code})"}
+
+    designs = designs_resp.json().get("designs", [])
+    sold_designs = [d for d in designs if (d.get("milestone") or {}).get("milestone") == "sold"]
+    if len(sold_designs) != 1:
+        return {"error": f"expected 1 sold design, found {len(sold_designs)}"}
+
+    design_id = sold_designs[0].get("id")
+    pricing_resp = pull_pricing(design_id)
+    if pricing_resp.status_code != 200:
+        return {"error": f"pricing fetch failed ({pricing_resp.status_code})"}
+
+    design_resp = pull_design(design_id)
+    summary_resp = pull_design_summary(design_id)
+    design_json = design_resp.json() if design_resp.status_code == 200 else {}
+    pricing_raw = pricing_resp.json()
+    pricing_json = pricing_raw.get("pricing") or pricing_raw
+    summary_json = summary_resp.json() if summary_resp.status_code == 200 else {}
+
+    fields = extract_pricing_fields(design_json, pricing_json, summary_json)
+
+    system_size_watts = fields.get("System_Size_STC_Watts") or 0
+    base_price = float(fields.get("Base_Price") or 0)
+    consultant_comp_ppw = float(fields.get("Consultant_Comp_PPW") or 0)
+    referral_payout_ppw = float(fields.get("Referral_Payout_PPW") or 0)
+    helio_lead_fee_ppw = float(fields.get("Helio_Lead_Fee_PPW") or 0)
+    adder_name_list = fields.get("Adder_Name_List") or ""
+
+    # Flat referral/subcontractor amounts from adder_details
+    adder_details_raw = fields.get("Adder_Details_JSON") or "[]"
+    try:
+        adder_details = json.loads(adder_details_raw) if isinstance(adder_details_raw, str) else adder_details_raw
+    except (ValueError, TypeError):
+        adder_details = []
+
+    referral_flat = 0.0
+    subcontractor_notes = []
+    for adder in adder_details:
+        name = (adder.get("name") or "").strip()
+        total = float(adder.get("total") or 0)
+        if name == "A - Referral Payout":
+            referral_flat += total
+        elif name.startswith("D. MISC:") and total > 0:
+            subcontractor_notes.append(f"{name.replace('D. MISC: ', '')} ${total:,.2f}")
+
+    return {
+        "design_id": design_id,
+        "system_size_watts": system_size_watts,
+        "base_price": base_price,
+        "consultant_comp_ppw": consultant_comp_ppw,
+        "referral_payout_ppw": referral_payout_ppw,
+        "referral_flat": referral_flat,
+        "helio_lead_fee_ppw": helio_lead_fee_ppw,
+        "adder_name_list": adder_name_list,
+        "subcontractor_notes": " | ".join(subcontractor_notes) if subcontractor_notes else "",
+    }
+
+
+def _write_commission_tab(svc, tab_name: str, rows: list[dict]) -> None:
+    """
+    Add a new tab to COMMISSION_SHEET_ID and write commission data with
+    live Sheets formulas for every calculated field.
+
+    Column layout (A=1 … P=16):
+      A  Customer
+      B  Project ID
+      C  Rep
+      D  Stage
+      E  System Size (W)          ← raw value
+      F  System Size (kW)         =E{r}/1000
+      G  Base Price ($)           ← raw value
+      H  Base PPW ($/W)           =G{r}/E{r}
+      I  PPW Floor                ← constant $2.50
+      J  Base PPW - Floor         =H{r}-I{r}
+      K  Base Commission          =J{r}*E{r}
+      L  Consultant Comp PPW      ← raw value
+      M  Consultant Commission    =L{r}*E{r}
+      N  Referral Payout ($)      ← raw value (flat)
+      O  Total Commission         =K{r}+M{r}
+      P  Subcontractor Notes
+      Q  All Adders
+    """
+    sheets = svc.spreadsheets()
+
+    # 1. Add new sheet tab
+    add_sheet_body = {
+        "requests": [{
+            "addSheet": {
+                "properties": {"title": tab_name}
+            }
+        }]
+    }
+    resp = sheets.batchUpdate(spreadsheetId=COMMISSION_SHEET_ID, body=add_sheet_body).execute()
+    sheet_id = resp["replies"][0]["addSheet"]["properties"]["sheetId"]
+
+    # 2. Build header + data rows
+    headers = [
+        "Customer", "Project ID", "Rep", "Stage",
+        "System Size (W)", "System Size (kW)",
+        "Base Price ($)", "Base PPW ($/W)", "PPW Floor",
+        "Base PPW - Floor", "Base Commission",
+        "Consultant Comp PPW ($/W)", "Consultant Commission",
+        "Referral Payout ($)", "Total Commission",
+        "Subcontractor Notes", "All Adders on Deal",
+    ]
+
+    value_rows = [headers]
+    for i, row in enumerate(rows, start=2):  # row 1 = header, data starts at 2
+        r = str(i)
+        if "error" in row:
+            value_rows.append([
+                row.get("customer", ""), row.get("project_id", ""),
+                row.get("rep", ""), row.get("stage", ""),
+                row.get("error", ""), "", "", "", "", "", "", "", "", "", "", "", "",
+            ])
+            continue
+
+        d = row["data"]
+        value_rows.append([
+            row.get("customer", ""),
+            row.get("project_id", ""),
+            row.get("rep", ""),
+            row.get("stage", ""),
+            d["system_size_watts"],                    # E — raw
+            f"=E{r}/1000",                             # F — kW
+            d["base_price"],                           # G — raw
+            f"=IFERROR(G{r}/E{r},0)",                  # H — base PPW
+            COMMISSION_PPW_FLOOR,                      # I — floor
+            f"=H{r}-I{r}",                             # J — margin
+            f"=J{r}*E{r}",                             # K — base commission
+            d["consultant_comp_ppw"],                  # L — raw
+            f"=L{r}*E{r}",                             # M — consultant commission
+            d["referral_flat"],                        # N — referral flat
+            f"=K{r}+M{r}",                             # O — total commission
+            d["subcontractor_notes"],                  # P
+            d["adder_name_list"],                      # Q
+        ])
+
+    # 3. Write values (formulas go as USER_ENTERED so Sheets evaluates them)
+    sheets.values().update(
+        spreadsheetId=COMMISSION_SHEET_ID,
+        range=f"'{tab_name}'!A1",
+        valueInputOption="USER_ENTERED",
+        body={"values": value_rows},
+    ).execute()
+
+    # 4. Format header row bold + freeze it
+    requests = [
+        {
+            "repeatCell": {
+                "range": {"sheetId": sheet_id, "startRowIndex": 0, "endRowIndex": 1},
+                "cell": {"userEnteredFormat": {"textFormat": {"bold": True}}},
+                "fields": "userEnteredFormat.textFormat.bold",
+            }
+        },
+        {
+            "updateSheetProperties": {
+                "properties": {"sheetId": sheet_id, "gridProperties": {"frozenRowCount": 1}},
+                "fields": "gridProperties.frozenRowCount",
+            }
+        },
+    ]
+    sheets.batchUpdate(spreadsheetId=COMMISSION_SHEET_ID, body={"requests": requests}).execute()
+    logger.info(f"_write_commission_tab: wrote {len(rows)} rows to tab '{tab_name}'")
+
+
+def _run_commission_batch(projects: list[dict], tab_name: str) -> dict:
+    """Core logic: fetch Aurora data for each project and write to Sheets."""
+    svc = _build_sheets_service()
+    if not svc:
+        return {"status": "failed", "reason": "could not build Sheets service"}
+
+    rows = []
+    for p in projects:
+        logger.info(f"commission_batch: fetching {p['aurora_project_id']} ({p['customer']})")
+        data = _get_commission_data_for_project(p["aurora_project_id"])
+        if "error" in data:
+            rows.append({**p, "error": data["error"]})
+        else:
+            rows.append({**p, "data": data})
+
+    _write_commission_tab(svc, tab_name, rows)
+    succeeded = sum(1 for r in rows if "error" not in r)
+    failed = len(rows) - succeeded
+    return {"status": "ok", "tab": tab_name, "succeeded": succeeded, "failed": failed}
+
+
+@app.post("/commissions/run")
+async def commissions_run(request: Request):
+    """
+    On-demand / backfill. Pulls all active Zoho projects with an Aurora ID
+    created since cutoff_date (default 2026-01-01) and writes a new tab.
+    Body (optional): {"cutoff_date": "2026-01-01"}
+    """
+    body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    cutoff = (body.get("cutoff_date") or "2026-01-01") if isinstance(body, dict) else "2026-01-01"
+
+    projects = _fetch_all_commission_projects(cutoff_date=cutoff)
+    if not projects:
+        return {"status": "no projects found", "cutoff_date": cutoff}
+
+    now_label = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    tab_name = f"Run {now_label}"
+    result = _run_commission_batch(projects, tab_name)
+    result["project_count"] = len(projects)
+    result["cutoff_date"] = cutoff
+    return result
+
+
+@app.post("/webhook/zoho/project-intake")
+async def project_intake_webhook(request: Request):
+    """
+    Triggered by Zoho blueprint when a project moves to Project Intake.
+    Expected body: {"install_id": "...", "project_id": "PROJ-XXXX", "customer": "..."}
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    install_id = body.get("install_id") or ""
+    project_id = body.get("project_id") or ""
+    customer = body.get("customer") or ""
+
+    # Look up Aurora Project ID from Zoho if not provided
+    aurora_project_id = body.get("aurora_project_id") or ""
+    if not aurora_project_id and install_id:
+        token = get_zoho_access_token()
+        api_domain = os.getenv("ZOHO_API_DOMAIN")
+        r = requests.get(
+            f"{api_domain}/crm/v2/Installs/{install_id}?fields=Aurora_Project_ID,Name,Project_ID,Sales_Representative,Project_Stage",
+            headers={"Authorization": f"Zoho-oauthtoken {token}"},
+        )
+        if r.status_code == 200:
+            rec = (r.json().get("data") or [{}])[0]
+            aurora_project_id = (rec.get("Aurora_Project_ID") or "").strip()
+            if not customer:
+                customer = (rec.get("Name") or "").strip()
+            if not project_id:
+                project_id = (rec.get("Project_ID") or "").strip()
+
+    if not aurora_project_id:
+        logger.warning(f"project_intake_webhook: no Aurora Project ID for install_id={install_id}")
+        return {"status": "skipped - no Aurora Project ID"}
+
+    project = {
+        "customer": customer,
+        "project_id": project_id,
+        "zoho_record_id": install_id,
+        "aurora_project_id": aurora_project_id,
+        "rep": body.get("rep") or "",
+        "stage": "Project Intake",
+    }
+
+    tab_name = f"{customer} — Project Intake"
+    result = _run_commission_batch([project], tab_name)
+    return result
