@@ -2991,3 +2991,93 @@ async def clean_ic_notes_endpoint(background_tasks: BackgroundTasks):
     from ic_monitor import clean_ic_notes
     background_tasks.add_task(clean_ic_notes, get_zoho_access_token)
     return {"status": "ic note cleanup started"}
+
+# ------------------------
+# Commissions Data Endpoint
+# ------------------------
+
+@app.post("/commissions")
+async def get_commissions(request: Request):
+    """
+    Accepts: {"project_ids": ["aurora-uuid-1", ...]}
+    Returns commission-relevant pricing pulled fresh from Aurora for each project.
+
+    Commission formula:
+      base_ppw          = base_price / system_size_watts
+      base_commission   = (base_ppw - 2.50) * system_size_watts
+      consultant_comm   = consultant_comp_ppw * system_size_watts
+      total_commission  = base_commission + consultant_commission
+    """
+    body = await request.json()
+    project_ids = body.get("project_ids") or []
+    if not project_ids:
+        raise HTTPException(status_code=400, detail="project_ids required")
+
+    tenant_id = os.getenv("AURORA_TENANT_ID")
+    BASE_PPW_FLOOR = 2.50
+    results = []
+
+    for project_id in project_ids:
+        designs_url = f"https://api.aurorasolar.com/tenants/{tenant_id}/projects/{project_id}/designs"
+        designs_resp = _aurora_get_with_retry(designs_url)
+        if designs_resp.status_code != 200:
+            results.append({"project_id": project_id, "error": f"designs fetch failed ({designs_resp.status_code})"})
+            continue
+
+        designs = designs_resp.json().get("designs", [])
+        if not designs:
+            results.append({"project_id": project_id, "error": "no designs found"})
+            continue
+
+        best_design = max(designs, key=lambda d: d.get("updated_at") or d.get("created_at") or "")
+        design_id = best_design.get("id")
+
+        pricing_resp = pull_pricing(design_id)
+        if pricing_resp.status_code != 200:
+            results.append({"project_id": project_id, "design_id": design_id, "error": f"pricing fetch failed ({pricing_resp.status_code})"})
+            continue
+
+        design_resp = pull_design(design_id)
+        summary_resp = pull_design_summary(design_id)
+        design_json = design_resp.json() if design_resp.status_code == 200 else {}
+        pricing_json = pricing_resp.json()
+        summary_json = summary_resp.json() if summary_resp.status_code == 200 else {}
+
+        fields = extract_pricing_fields(design_json, pricing_json, summary_json)
+
+        system_size_watts = fields.get("System_Size_STC_Watts") or 0
+        base_price = float(fields.get("Base_Price") or 0)
+        consultant_comp_ppw = float(fields.get("Consultant_Comp_PPW") or 0)
+        referral_payout_ppw = float(fields.get("Referral_Payout_PPW") or 0)
+        helio_lead_fee_ppw = float(fields.get("Helio_Lead_Fee_PPW") or 0)
+        adder_name_list = fields.get("Adder_Name_List") or ""
+        adder_details_raw = fields.get("Adder_Details_JSON") or "[]"
+
+        base_ppw = round(base_price / system_size_watts, 6) if system_size_watts else 0.0
+        base_commission = round((base_ppw - BASE_PPW_FLOOR) * system_size_watts, 2) if system_size_watts else 0.0
+        consultant_commission = round(consultant_comp_ppw * system_size_watts, 2)
+        total_commission = round(base_commission + consultant_commission, 2)
+
+        try:
+            adder_details = json.loads(adder_details_raw) if isinstance(adder_details_raw, str) else adder_details_raw
+        except (ValueError, TypeError):
+            adder_details = []
+
+        results.append({
+            "project_id": project_id,
+            "design_id": design_id,
+            "system_size_watts": system_size_watts,
+            "system_size_kw": round(system_size_watts / 1000, 3) if system_size_watts else 0,
+            "base_price": base_price,
+            "base_ppw": base_ppw,
+            "consultant_comp_ppw": consultant_comp_ppw,
+            "referral_payout_ppw": referral_payout_ppw,
+            "helio_lead_fee_ppw": helio_lead_fee_ppw,
+            "adder_name_list": adder_name_list,
+            "adder_details": adder_details,
+            "base_commission": base_commission,
+            "consultant_commission": consultant_commission,
+            "total_commission": total_commission,
+        })
+
+    return {"results": results}
