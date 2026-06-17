@@ -3480,3 +3480,16 @@ async def project_intake_webhook(request: Request):
     tab_name = f"{customer} — Project Intake"
     result = _run_commission_batch([project], tab_name)
     return result
+
+
+@app.get("/commissions/debug-zoho")
+async def debug_zoho():
+    """Quick diagnostic: test Zoho token and list endpoint."""
+    token = get_zoho_access_token()
+    if not token:
+        return {"token": "FAILED"}
+    api_domain = os.getenv("ZOHO_API_DOMAIN")
+    headers = {"Authorization": f"Zoho-oauthtoken {token}"}
+    url = f"{api_domain}/crm/v2/Installs/search?criteria=(Project_Created_Date:greater_equal:2026-01-01)&fields=Name,Project_ID,Aurora_Project_ID&per_page=3"
+    resp = requests.get(url, headers=headers)
+    return {"token": "ok", "api_domain": api_domain, "status": resp.status_code, "body": resp.json()}
