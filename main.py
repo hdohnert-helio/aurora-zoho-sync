@@ -3485,11 +3485,30 @@ async def project_intake_webhook(request: Request):
 @app.get("/commissions/debug-zoho")
 async def debug_zoho():
     """Quick diagnostic: test Zoho token and list endpoint."""
-    token = get_zoho_access_token()
-    if not token:
-        return {"token": "FAILED"}
+    # Show what env vars are present (masked)
+    client_id = os.getenv("ZOHO_CLIENT_ID")
+    client_secret = os.getenv("ZOHO_CLIENT_SECRET")
+    refresh_token = os.getenv("ZOHO_REFRESH_TOKEN")
     api_domain = os.getenv("ZOHO_API_DOMAIN")
-    headers = {"Authorization": f"Zoho-oauthtoken {token}"}
+    env_check = {
+        "ZOHO_CLIENT_ID": "set" if client_id else "MISSING",
+        "ZOHO_CLIENT_SECRET": "set" if client_secret else "MISSING",
+        "ZOHO_REFRESH_TOKEN": "set" if refresh_token else "MISSING",
+        "ZOHO_API_DOMAIN": api_domain or "MISSING",
+    }
+
+    # Try token exchange directly and show raw response
+    token_resp = requests.post("https://accounts.zoho.com/oauth/v2/token", data={
+        "grant_type": "refresh_token",
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "refresh_token": refresh_token,
+    })
+    token_body = token_resp.json()
+    token = token_body.get("access_token")
+    if not token:
+        return {"env": env_check, "token_status": token_resp.status_code, "token_error": token_body}
+
     url = f"{api_domain}/crm/v7/Installs/search?criteria=(Project_Created_Date:greater_equal:2026-01-01)&fields=Name,Project_ID,Aurora_Project_ID&per_page=3"
-    resp = requests.get(url, headers=headers)
-    return {"token": "ok", "api_domain": api_domain, "status": resp.status_code, "body": resp.json()}
+    resp = requests.get(url, headers={"Authorization": f"Zoho-oauthtoken {token}"})
+    return {"env": env_check, "token": "ok", "search_status": resp.status_code, "body": resp.json()}
