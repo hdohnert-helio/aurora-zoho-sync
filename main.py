@@ -3421,13 +3421,16 @@ def _run_commission_batch(projects: list[dict], tab_name: str) -> dict:
 
 def _run_commission_batch_task(cutoff: str, tab_name: str) -> None:
     """Background task body for /commissions/run."""
-    projects = _fetch_all_commission_projects(cutoff_date=cutoff)
-    if not projects:
-        logger.warning(f"commission_run_task: no projects found for cutoff={cutoff}")
-        return
-    logger.info(f"commission_run_task: found {len(projects)} projects, writing tab '{tab_name}'")
-    result = _run_commission_batch(projects, tab_name)
-    logger.info(f"commission_run_task: done | {result}")
+    try:
+        projects = _fetch_all_commission_projects(cutoff_date=cutoff)
+        if not projects:
+            logger.warning(f"commission_run_task: no projects found for cutoff={cutoff}")
+            return
+        logger.info(f"commission_run_task: found {len(projects)} projects, writing tab '{tab_name}'")
+        result = _run_commission_batch(projects, tab_name)
+        logger.info(f"commission_run_task: done | {result}")
+    except Exception:
+        logger.exception(f"commission_run_task: unhandled exception for tab '{tab_name}'")
 
 
 @app.post("/commissions/run")
@@ -3437,14 +3440,27 @@ async def commissions_run(request: Request, background_tasks: BackgroundTasks):
     Pulls all Zoho projects with an Aurora ID created since cutoff_date,
     fetches Aurora pricing, and writes a new tab to the master sheet.
     Body (optional): {"cutoff_date": "2026-01-01"}
+              Add sync=true to run synchronously and return full results (slow).
     """
     try:
         body = await request.json()
     except Exception:
         body = {}
     cutoff = (body.get("cutoff_date") or "2026-01-01") if isinstance(body, dict) else "2026-01-01"
+    sync = body.get("sync", False) if isinstance(body, dict) else False
     now_label = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     tab_name = f"Run {now_label}"
+
+    if sync:
+        # Synchronous mode — runs inline, returns full results. Use for debugging only.
+        projects = _fetch_all_commission_projects(cutoff_date=cutoff)
+        if not projects:
+            return {"status": "no projects found", "cutoff_date": cutoff}
+        result = _run_commission_batch(projects, tab_name)
+        result["project_count"] = len(projects)
+        result["cutoff_date"] = cutoff
+        return result
+
     background_tasks.add_task(_run_commission_batch_task, cutoff, tab_name)
     return {"status": "started", "tab_name": tab_name, "cutoff_date": cutoff}
 
