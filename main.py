@@ -3537,3 +3537,40 @@ async def debug_zoho():
     url = f"{api_domain}/crm/v7/Installs/search?criteria=(Project_Created_Date:greater_equal:2026-01-01)&fields=Name,Project_ID,Aurora_Project_ID&per_page=3"
     resp = requests.get(url, headers={"Authorization": f"Zoho-oauthtoken {token}"})
     return {"env": env_check, "token": "ok", "search_status": resp.status_code, "body": resp.json()}
+
+
+@app.get("/commissions/debug-sheets")
+async def debug_sheets():
+    """Write one test row to the master sheet and return any error."""
+    try:
+        svc = _build_sheets_service()
+        if not svc:
+            return {"error": "could not build sheets service - check GOOGLE_SERVICE_ACCOUNT_JSON"}
+
+        sheets = svc.spreadsheets()
+
+        # Try adding a test tab
+        tab_name = "DEBUG TEST"
+        try:
+            add_resp = sheets.batchUpdate(
+                spreadsheetId=COMMISSION_SHEET_ID,
+                body={"requests": [{"addSheet": {"properties": {"title": tab_name}}}]}
+            ).execute()
+            sheet_id = add_resp["replies"][0]["addSheet"]["properties"]["sheetId"]
+        except Exception as e:
+            return {"error": f"addSheet failed: {e}"}
+
+        # Try writing a test value
+        try:
+            sheets.values().update(
+                spreadsheetId=COMMISSION_SHEET_ID,
+                range=f"'{tab_name}'!A1",
+                valueInputOption="USER_ENTERED",
+                body={"values": [["Hello", "=1+1", "=A1&\" world\""]]},
+            ).execute()
+        except Exception as e:
+            return {"sheet_id": sheet_id, "error": f"values.update failed: {e}"}
+
+        return {"status": "ok", "tab": tab_name, "sheet_id": sheet_id}
+    except Exception as e:
+        return {"error": f"unexpected: {e}"}
