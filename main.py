@@ -3178,7 +3178,7 @@ def _fetch_all_commission_projects(cutoff_date: str = "2026-01-01") -> list[dict
     api_domain = os.getenv("ZOHO_API_DOMAIN")
     headers = {"Authorization": f"Zoho-oauthtoken {token}"}
 
-    fields = "Name,Project_ID,Aurora_Project_ID,Sales_Representative,Project_Stage,Project_Created_Date"
+    fields = "Name,Project_ID,Aurora_Project_ID,Sales_Representative,Owner,Project_Stage,Project_Created_Date"
 
     criteria = f"(Project_Created_Date:greater_equal:{cutoff_date})"
     results = []
@@ -3197,12 +3197,15 @@ def _fetch_all_commission_projects(cutoff_date: str = "2026-01-01") -> list[dict
             aurora_id = (r.get("Aurora_Project_ID") or "").strip()
             if not aurora_id:
                 continue
+            owner_obj = r.get("Owner")
+            owner_name = (owner_obj.get("name") or "").strip() if isinstance(owner_obj, dict) else ""
             results.append({
                 "customer": (r.get("Name") or "").strip(),
                 "project_id": (r.get("Project_ID") or "").strip(),
                 "zoho_record_id": r.get("id") or "",
                 "aurora_project_id": aurora_id,
                 "rep": (r.get("Sales_Representative") or "").strip(),
+                "owner": owner_name,
                 "stage": (r.get("Project_Stage") or "").strip(),
             })
         info = resp.json().get("info") or {}
@@ -3289,25 +3292,26 @@ def _write_commission_tab(svc, tab_name: str, rows: list[dict]) -> None:
     Add a new tab to COMMISSION_SHEET_ID and write commission data with
     live Sheets formulas for every calculated field.
 
-    Column layout (A=1 … R=18):
+    Column layout (A=1 … T=20):
       A  Customer
       B  Project ID
-      C  Rep
-      D  Stage
-      E  System Size (W)          ← raw value
-      F  System Size (kW)         =E{r}/1000
-      G  Base Price ($)           ← raw value
-      H  Base PPW ($/W)           =G{r}/E{r}
-      I  PPW Floor                ← constant $2.50
-      J  Base PPW - Floor         =H{r}-I{r}
-      K  Base Commission          =J{r}*E{r}
-      L  Consultant Comp PPW      ← raw value
-      M  Consultant Commission    =L{r}*E{r}
-      N  Referral Payout ($)      ← raw value (flat)
-      O  Total Commission         =K{r}+M{r}
-      P  Subcontractor Total ($)  ← raw value (summable)
-      Q  Subcontractor Detail     ← text breakdown
-      R  All Adders on Deal
+      C  Owner
+      D  Sales Rep
+      E  Stage
+      F  System Size (W)          ← raw value
+      G  System Size (kW)         =F{r}/1000
+      H  Base Price ($)           ← raw value
+      I  Base PPW ($/W)           =H{r}/F{r}
+      J  PPW Floor                ← constant $2.50
+      K  Base PPW - Floor         =I{r}-J{r}
+      L  Base Commission          =K{r}*F{r}
+      M  Consultant Comp PPW      ← raw value
+      N  Consultant Commission    =M{r}*F{r}
+      O  Referral Payout ($)      ← raw value (flat)
+      P  Total Commission         =L{r}+N{r}
+      Q  Subcontractor Total ($)  ← raw value (summable)
+      R  Subcontractor Detail     ← text breakdown
+      S  All Adders on Deal
     """
     sheets = svc.spreadsheets()
 
@@ -3324,7 +3328,7 @@ def _write_commission_tab(svc, tab_name: str, rows: list[dict]) -> None:
 
     # 2. Build header + data rows
     headers = [
-        "Customer", "Project ID", "Rep", "Stage",
+        "Customer", "Project ID", "Owner", "Sales Rep", "Stage",
         "System Size (W)", "System Size (kW)",
         "Base Price ($)", "Base PPW ($/W)", "PPW Floor",
         "Base PPW - Floor", "Base Commission",
@@ -3339,8 +3343,8 @@ def _write_commission_tab(svc, tab_name: str, rows: list[dict]) -> None:
         if "error" in row:
             value_rows.append([
                 row.get("customer", ""), row.get("project_id", ""),
-                row.get("rep", ""), row.get("stage", ""),
-                row.get("error", ""), "", "", "", "", "", "", "", "", "", "", "", "", "", "",
+                row.get("owner", ""), row.get("rep", ""), row.get("stage", ""),
+                row.get("error", ""), "", "", "", "", "", "", "", "", "", "", "", "", "",
             ])
             continue
 
@@ -3348,22 +3352,23 @@ def _write_commission_tab(svc, tab_name: str, rows: list[dict]) -> None:
         value_rows.append([
             row.get("customer", ""),
             row.get("project_id", ""),
-            row.get("rep", ""),
-            row.get("stage", ""),
-            d["system_size_watts"],                    # E — raw
-            f"=E{r}/1000",                             # F — kW
-            d["base_price"],                           # G — raw
-            f"=IFERROR(G{r}/E{r},0)",                  # H — base PPW
-            COMMISSION_PPW_FLOOR,                      # I — floor
-            f"=H{r}-I{r}",                             # J — margin
-            f"=J{r}*E{r}",                             # K — base commission
-            d["consultant_comp_ppw"],                  # L — raw
-            f"=L{r}*E{r}",                             # M — consultant commission
-            d["referral_flat"],                        # N — referral flat
-            f"=K{r}+M{r}",                             # O — total commission
-            d["subcontractor_total"],                  # P — subcontractor $ (summable)
-            d["subcontractor_notes"],                  # Q — detail text
-            d["adder_name_list"],                      # R — all adders
+            row.get("owner", ""),                      # C — owner
+            row.get("rep", ""),                        # D — sales rep
+            row.get("stage", ""),                      # E — stage
+            d["system_size_watts"],                    # F — raw watts
+            f"=F{r}/1000",                             # G — kW
+            d["base_price"],                           # H — raw base price
+            f"=IFERROR(H{r}/F{r},0)",                  # I — base PPW
+            COMMISSION_PPW_FLOOR,                      # J — floor
+            f"=I{r}-J{r}",                             # K — margin
+            f"=K{r}*F{r}",                             # L — base commission
+            d["consultant_comp_ppw"],                  # M — raw
+            f"=M{r}*F{r}",                             # N — consultant commission
+            d["referral_flat"],                        # O — referral flat
+            f"=L{r}+N{r}",                             # P — total commission
+            d["subcontractor_total"],                  # Q — subcontractor $ (summable)
+            d["subcontractor_notes"],                  # R — detail text
+            d["adder_name_list"],                      # S — all adders
         ])
 
     # 3. Write values (formulas go as USER_ENTERED so Sheets evaluates them)
@@ -3460,22 +3465,29 @@ async def project_intake_webhook(request: Request):
     project_id = body.get("project_id") or ""
     customer = body.get("customer") or ""
 
-    # Look up Aurora Project ID from Zoho if not provided
+    # Look up Aurora Project ID, owner, and rep from Zoho if not provided
     aurora_project_id = body.get("aurora_project_id") or ""
-    if not aurora_project_id and install_id:
+    owner = body.get("owner") or ""
+    rep = body.get("rep") or ""
+    if (not aurora_project_id or not owner) and install_id:
         token = get_zoho_access_token()
         api_domain = os.getenv("ZOHO_API_DOMAIN")
         r = requests.get(
-            f"{api_domain}/crm/v2/Installs/{install_id}?fields=Aurora_Project_ID,Name,Project_ID,Sales_Representative,Project_Stage",
+            f"{api_domain}/crm/v2/Installs/{install_id}?fields=Aurora_Project_ID,Name,Project_ID,Sales_Representative,Owner,Project_Stage",
             headers={"Authorization": f"Zoho-oauthtoken {token}"},
         )
         if r.status_code == 200:
             rec = (r.json().get("data") or [{}])[0]
-            aurora_project_id = (rec.get("Aurora_Project_ID") or "").strip()
+            aurora_project_id = aurora_project_id or (rec.get("Aurora_Project_ID") or "").strip()
             if not customer:
                 customer = (rec.get("Name") or "").strip()
             if not project_id:
                 project_id = (rec.get("Project_ID") or "").strip()
+            if not rep:
+                rep = (rec.get("Sales_Representative") or "").strip()
+            if not owner:
+                owner_obj = rec.get("Owner")
+                owner = (owner_obj.get("name") or "").strip() if isinstance(owner_obj, dict) else ""
 
     if not aurora_project_id:
         logger.warning(f"project_intake_webhook: no Aurora Project ID for install_id={install_id}")
@@ -3486,7 +3498,8 @@ async def project_intake_webhook(request: Request):
         "project_id": project_id,
         "zoho_record_id": install_id,
         "aurora_project_id": aurora_project_id,
-        "rep": body.get("rep") or "",
+        "rep": rep,
+        "owner": owner,
         "stage": "Project Intake",
     }
 
