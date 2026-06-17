@@ -3451,18 +3451,30 @@ async def commissions_run(request: Request, background_tasks: BackgroundTasks):
     now_label = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     tab_name = f"Run {now_label}"
 
-    if sync:
-        # Synchronous mode — runs inline, returns full results. Use for debugging only.
-        projects = _fetch_all_commission_projects(cutoff_date=cutoff)
-        if not projects:
-            return {"status": "no projects found", "cutoff_date": cutoff}
-        result = _run_commission_batch(projects, tab_name)
-        result["project_count"] = len(projects)
-        result["cutoff_date"] = cutoff
-        return result
-
     background_tasks.add_task(_run_commission_batch_task, cutoff, tab_name)
     return {"status": "started", "tab_name": tab_name, "cutoff_date": cutoff}
+
+
+@app.post("/commissions/run-sync")
+async def commissions_run_sync(request: Request):
+    """Synchronous commission run for debugging — returns full result. Slow."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    cutoff = (body.get("cutoff_date") or "2026-06-01") if isinstance(body, dict) else "2026-06-01"
+    now_label = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    tab_name = f"Sync Run {now_label}"
+    projects = _fetch_all_commission_projects(cutoff_date=cutoff)
+    if not projects:
+        return {"status": "no projects found", "cutoff_date": cutoff}
+    try:
+        result = _run_commission_batch(projects, tab_name)
+        result["project_count"] = len(projects)
+        return result
+    except Exception as e:
+        import traceback
+        return {"error": str(e), "traceback": traceback.format_exc(), "project_count": len(projects)}
 
 
 @app.post("/webhook/zoho/project-intake")
