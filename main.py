@@ -3574,3 +3574,36 @@ async def debug_sheets():
         return {"status": "ok", "tab": tab_name, "sheet_id": sheet_id}
     except Exception as e:
         return {"error": f"unexpected: {e}"}
+
+
+@app.get("/commissions/debug-run")
+async def debug_run():
+    """Synchronous single-project commission run — surfaces errors directly."""
+    try:
+        # Use Frank Fazzino as the test project
+        project = {
+            "customer": "Frank Fazzino",
+            "project_id": "PROJ-1606",
+            "zoho_record_id": "",
+            "aurora_project_id": "644ce760-a6d4-43e8-a9e0-04d02400dc76",
+            "rep": "Erik Williams",
+            "owner": "Fred Stevens",
+            "stage": "Test",
+        }
+        data = _get_commission_data_for_project(project["aurora_project_id"])
+        if "error" in data:
+            return {"step": "aurora_fetch", "error": data["error"]}
+
+        svc = _build_sheets_service()
+        if not svc:
+            return {"step": "sheets_service", "error": "could not build service"}
+
+        tab_name = "DEBUG RUN"
+        try:
+            _write_commission_tab(svc, tab_name, [{**project, "data": data}])
+        except Exception as e:
+            return {"step": "write_tab", "error": str(e), "aurora_data": data}
+
+        return {"status": "ok", "tab": tab_name, "aurora_data": data}
+    except Exception as e:
+        return {"error": f"unexpected: {e}"}
