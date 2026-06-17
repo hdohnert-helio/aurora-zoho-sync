@@ -3180,12 +3180,13 @@ def _fetch_all_commission_projects(cutoff_date: str = "2026-01-01") -> list[dict
 
     fields = "Name,Project_ID,Aurora_Project_ID,Sales_Representative,Project_Stage,Project_Created_Date"
 
+    criteria = f"(Project_Created_Date:greater_equal:{cutoff_date})"
     results = []
     page = 1
     while True:
         url = (
-            f"{api_domain}/crm/v2/Installs"
-            f"?fields={fields}&page={page}&per_page=200"
+            f"{api_domain}/crm/v2/Installs/search"
+            f"?criteria={criteria}&fields={fields}&page={page}&per_page=200"
         )
         resp = requests.get(url, headers=headers)
         if resp.status_code != 200:
@@ -3195,9 +3196,6 @@ def _fetch_all_commission_projects(cutoff_date: str = "2026-01-01") -> list[dict
         for r in data:
             aurora_id = (r.get("Aurora_Project_ID") or "").strip()
             if not aurora_id:
-                continue
-            created = (r.get("Project_Created_Date") or "")
-            if created and created < cutoff_date:
                 continue
             results.append({
                 "customer": (r.get("Name") or "").strip(),
