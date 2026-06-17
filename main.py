@@ -3029,8 +3029,11 @@ async def get_commissions(request: Request):
             results.append({"project_id": project_id, "error": "no designs found"})
             continue
 
-        best_design = max(designs, key=lambda d: d.get("updated_at") or d.get("created_at") or "")
-        design_id = best_design.get("id")
+        sold_designs = [d for d in designs if (d.get("milestone") or {}).get("milestone") == "sold"]
+        if len(sold_designs) != 1:
+            results.append({"project_id": project_id, "error": f"expected 1 sold design, found {len(sold_designs)}"})
+            continue
+        design_id = sold_designs[0].get("id")
 
         pricing_resp = pull_pricing(design_id)
         if pricing_resp.status_code != 200:
