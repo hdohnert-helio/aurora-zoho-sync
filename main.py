@@ -3056,6 +3056,9 @@ async def get_commissions(request: Request):
         helio_lead_fee_ppw = float(fields.get("Helio_Lead_Fee_PPW") or 0)
         adder_name_list = fields.get("Adder_Name_List") or ""
         adder_details_raw = fields.get("Adder_Details_JSON") or "[]"
+        discounts_total = float(fields.get("Discounts_Total") or 0)
+        discount_name_list = fields.get("Discount_Name_List") or ""
+        discount_details_raw = fields.get("Discount_Details_JSON") or "[]"
 
         base_ppw = round(base_price / system_size_watts, 6) if system_size_watts else 0.0
         base_commission = round((base_ppw - BASE_PPW_FLOOR) * system_size_watts, 2) if system_size_watts else 0.0
@@ -3066,6 +3069,11 @@ async def get_commissions(request: Request):
             adder_details = json.loads(adder_details_raw) if isinstance(adder_details_raw, str) else adder_details_raw
         except (ValueError, TypeError):
             adder_details = []
+
+        try:
+            discount_details = json.loads(discount_details_raw) if isinstance(discount_details_raw, str) else discount_details_raw
+        except (ValueError, TypeError):
+            discount_details = []
 
         results.append({
             "project_id": project_id,
@@ -3082,6 +3090,9 @@ async def get_commissions(request: Request):
             "base_commission": base_commission,
             "consultant_commission": consultant_commission,
             "total_commission": total_commission,
+            "discounts_total": discounts_total,
+            "discount_name_list": discount_name_list,
+            "discount_details": discount_details,
         })
 
     return {"results": results}
