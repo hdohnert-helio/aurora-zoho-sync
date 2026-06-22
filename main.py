@@ -3302,26 +3302,23 @@ def _write_commission_tab(svc, tab_name: str, rows: list[dict]) -> None:
     Add a new tab to COMMISSION_SHEET_ID and write commission data with
     live Sheets formulas for every calculated field.
 
-    Column layout (A=1 … T=20):
+    Column layout (A:P) — matches "Payroll [date]" format:
       A  Customer
-      B  Project ID
-      C  Owner
-      D  Sales Rep
-      E  Stage
-      F  System Size (W)          ← raw value
-      G  System Size (kW)         =F{r}/1000
-      H  Base Price ($)           ← raw value
-      I  Base PPW ($/W)           =H{r}/F{r}
-      J  PPW Floor                ← constant $2.50
-      K  Base PPW - Floor         =I{r}-J{r}
-      L  Base Commission          =K{r}*F{r}
-      M  Consultant Comp PPW      ← raw value
-      N  Consultant Commission    =M{r}*F{r}
-      O  Referral Payout ($)      ← raw value (flat)
-      P  Total Commission         =L{r}+N{r}
-      Q  Subcontractor Total ($)  ← raw value (summable)
-      R  Subcontractor Detail     ← text breakdown
-      S  All Adders on Deal
+      B  Install Owner (ES)
+      C  Sales Rep
+      D  EVP                      ← always "Fred Stevens"
+      E  Project ID
+      F  Aurora Project ID
+      G  System Size (W)          ← raw value
+      H  System Size (kW)         =G{r}/1000
+      I  Base Price ($)           ← raw value
+      J  Base Price Per Watt      =IFERROR(I{r}/G{r},0)
+      K  PPW Floor                ← constant $2.50
+      L  Base PPW - Floor         =J{r}-K{r}
+      M  Base Commission          =L{r}*G{r}
+      N  Consultant Comp PPW      ← raw value
+      O  Consultant Commission    =N{r}*G{r}
+      P  Total Comp on Deal       =M{r}+O{r}
     """
     sheets = svc.spreadsheets()
 
@@ -3338,13 +3335,13 @@ def _write_commission_tab(svc, tab_name: str, rows: list[dict]) -> None:
 
     # 2. Build header + data rows
     headers = [
-        "Customer", "Project ID", "Owner", "Sales Rep", "Stage",
+        "Customer", "Install Owner (ES)", "Sales Rep", "EVP",
+        "Project ID", "Aurora Project ID",
         "System Size (W)", "System Size (kW)",
-        "Base Price ($)", "Base PPW ($/W)", "PPW Floor",
+        "Base Price ($)", "Base Price Per Watt ($/W)", "PPW Floor",
         "Base PPW - Floor", "Base Commission",
         "Consultant Comp PPW ($/W)", "Consultant Commission",
-        "Referral Payout ($)", "Total Commission",
-        "Subcontractor Total ($)", "Subcontractor Detail", "All Adders on Deal",
+        "Total Comp on Deal",
     ]
 
     value_rows = [headers]
@@ -3352,33 +3349,31 @@ def _write_commission_tab(svc, tab_name: str, rows: list[dict]) -> None:
         r = str(i)
         if "error" in row:
             value_rows.append([
-                row.get("customer", ""), row.get("project_id", ""),
-                row.get("owner", ""), row.get("rep", ""), row.get("stage", ""),
-                row.get("error", ""), "", "", "", "", "", "", "", "", "", "", "", "", "",
+                row.get("customer", ""), row.get("owner", ""), row.get("rep", ""),
+                "Fred Stevens",
+                row.get("project_id", ""), row.get("aurora_project_id", ""),
+                row.get("error", ""), "", "", "", "", "", "", "", "", "",
             ])
             continue
 
         d = row["data"]
         value_rows.append([
-            row.get("customer", ""),
-            row.get("project_id", ""),
-            row.get("owner", ""),                      # C — owner
-            row.get("rep", ""),                        # D — sales rep
-            row.get("stage", ""),                      # E — stage
-            d["system_size_watts"],                    # F — raw watts
-            f"=F{r}/1000",                             # G — kW
-            d["base_price"],                           # H — raw base price
-            f"=IFERROR(H{r}/F{r},0)",                  # I — base PPW
-            COMMISSION_PPW_FLOOR,                      # J — floor
-            f"=I{r}-J{r}",                             # K — margin
-            f"=K{r}*F{r}",                             # L — base commission
-            d["consultant_comp_ppw"],                  # M — raw
-            f"=M{r}*F{r}",                             # N — consultant commission
-            d["referral_flat"],                        # O — referral flat
-            f"=L{r}+N{r}",                             # P — total commission
-            d["subcontractor_total"],                  # Q — subcontractor $ (summable)
-            d["subcontractor_notes"],                  # R — detail text
-            d["adder_name_list"],                      # S — all adders
+            row.get("customer", ""),                   # A — customer
+            row.get("owner", ""),                      # B — install owner (ES)
+            row.get("rep", ""),                        # C — sales rep
+            "Fred Stevens",                            # D — EVP
+            row.get("project_id", ""),                 # E — project ID
+            row.get("aurora_project_id", ""),          # F — aurora project ID
+            d["system_size_watts"],                    # G — raw watts
+            f"=G{r}/1000",                             # H — kW
+            d["base_price"],                           # I — raw base price
+            f"=IFERROR(I{r}/G{r},0)",                  # J — base PPW
+            COMMISSION_PPW_FLOOR,                      # K — floor
+            f"=J{r}-K{r}",                             # L — margin
+            f"=L{r}*G{r}",                             # M — base commission
+            d["consultant_comp_ppw"],                  # N — raw consultant PPW
+            f"=N{r}*G{r}",                             # O — consultant commission
+            f"=M{r}+O{r}",                             # P — total comp on deal
         ])
 
     # 3. Write values (formulas go as USER_ENTERED so Sheets evaluates them)
@@ -3457,8 +3452,8 @@ async def commissions_run(request: Request):
     except Exception:
         body = {}
     cutoff = (body.get("cutoff_date") or "2026-01-01") if isinstance(body, dict) else "2026-01-01"
-    now_label = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    tab_name = f"Run {now_label}"
+    now_label = datetime.datetime.now(datetime.timezone.utc).strftime("%-m-%-d-%Y")
+    tab_name = f"Payroll {now_label}"
     projects = _fetch_all_commission_projects(cutoff_date=cutoff)
     if not projects:
         return {"status": "no projects found", "cutoff_date": cutoff}
@@ -3480,8 +3475,8 @@ async def commissions_run_sync(request: Request):
     except Exception:
         body = {}
     cutoff = (body.get("cutoff_date") or "2026-06-01") if isinstance(body, dict) else "2026-06-01"
-    now_label = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    tab_name = f"Sync Run {now_label}"
+    now_label = datetime.datetime.now(datetime.timezone.utc).strftime("%-m-%-d-%Y")
+    tab_name = f"Payroll {now_label}"
     projects = _fetch_all_commission_projects(cutoff_date=cutoff)
     if not projects:
         return {"status": "no projects found", "cutoff_date": cutoff}
