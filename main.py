@@ -3342,7 +3342,11 @@ def _write_commission_tab(svc, tab_name: str, rows: list[dict]) -> None:
         "Base PPW - Floor", "Base Commission",
         "Consultant Comp PPW ($/W)", "Consultant Commission",
         "Total Comp on Deal",
+        "Zoho Link", "Aurora Link",
     ]
+
+    zoho_base = "https://crm.zoho.com/crm/heliosolar/tab/CustomModule6/"
+    aurora_base = "https://v2.aurorasolar.com/projects/"
 
     value_rows = [headers]
     for i, row in enumerate(rows, start=2):  # row 1 = header, data starts at 2
@@ -3352,18 +3356,23 @@ def _write_commission_tab(svc, tab_name: str, rows: list[dict]) -> None:
                 row.get("customer", ""), row.get("owner", ""), row.get("rep", ""),
                 "Fred Stevens",
                 row.get("project_id", ""), row.get("aurora_project_id", ""),
-                row.get("error", ""), "", "", "", "", "", "", "", "", "",
+                row.get("error", ""), "", "", "", "", "", "", "", "", "", "", "",
             ])
             continue
 
         d = row["data"]
+        zoho_id = row.get("zoho_record_id", "")
+        aurora_id = row.get("aurora_project_id", "")
+        zoho_link = f'=HYPERLINK("{zoho_base}{zoho_id}","Zoho")' if zoho_id else ""
+        aurora_link = f'=HYPERLINK("{aurora_base}{aurora_id}","Aurora")' if aurora_id else ""
+
         value_rows.append([
             row.get("customer", ""),                   # A — customer
             row.get("owner", ""),                      # B — install owner (ES)
             row.get("rep", ""),                        # C — sales rep
             "Fred Stevens",                            # D — EVP
             row.get("project_id", ""),                 # E — project ID
-            row.get("aurora_project_id", ""),          # F — aurora project ID
+            aurora_id,                                 # F — aurora project ID
             d["system_size_watts"],                    # G — raw watts
             f"=G{r}/1000",                             # H — kW
             d["base_price"],                           # I — raw base price
@@ -3374,6 +3383,8 @@ def _write_commission_tab(svc, tab_name: str, rows: list[dict]) -> None:
             d["consultant_comp_ppw"],                  # N — raw consultant PPW
             f"=N{r}*G{r}",                             # O — consultant commission
             f"=M{r}+O{r}",                             # P — total comp on deal
+            zoho_link,                                 # Q — Zoho link
+            aurora_link,                               # R — Aurora link
         ])
 
     # 3. Write values (formulas go as USER_ENTERED so Sheets evaluates them)
@@ -3419,10 +3430,11 @@ def _run_commission_batch(projects: list[dict], tab_name: str) -> dict:
         else:
             rows.append({**p, "data": data})
 
-    _write_commission_tab(svc, tab_name, rows)
-    succeeded = sum(1 for r in rows if "error" not in r)
-    failed = len(rows) - succeeded
-    return {"status": "ok", "tab": tab_name, "succeeded": succeeded, "failed": failed}
+    succeeded = [r for r in rows if "error" not in r]
+    failed = [r for r in rows if "error" in r]
+    _write_commission_tab(svc, tab_name, succeeded)
+    return {"status": "ok", "tab": tab_name, "succeeded": len(succeeded), "failed": len(failed),
+            "failed_projects": [{"project_id": r.get("project_id"), "error": r.get("error")} for r in failed]}
 
 
 def _run_commission_batch_task(cutoff: str, tab_name: str) -> None:
