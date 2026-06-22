@@ -3736,7 +3736,13 @@ CASHFLOW_MATERIALS_PPW = 1.26  # LR materials estimate $/W
 CASHFLOW_LR_WARRANTY = 250.00  # LR warranty deduction from 20% final
 
 CASHFLOW_INSTALLED_STAGES = {
-    "Energized", "PTO", "Inspection", "Project Closeout"
+    "Energized", "PTO", "Inspection", "Project Closeout", "Witness Test / PTO"
+}
+
+CASHFLOW_PIPELINE_STAGES = {
+    "Project Intake", "Site Survey", "Engineering", "Plan Review",
+    "Interconnection", "Permitting", "Procurement & Scheduling",
+    "Active Installation",
 }
 
 
@@ -3801,7 +3807,8 @@ def _fetch_all_cashflow_projects(cutoff_date: str = "2026-01-01") -> list[dict]:
             stage = (r.get("Project_Stage") or "").strip()
             substantial_completion = (r.get("Substantial_Completion") or "").strip()
             is_installed = bool(substantial_completion) or stage in CASHFLOW_INSTALLED_STAGES
-            if not is_installed:
+            is_pipeline = stage in CASHFLOW_PIPELINE_STAGES
+            if not is_installed and not is_pipeline:
                 continue
             owner_obj = r.get("Owner")
             owner_name = (
