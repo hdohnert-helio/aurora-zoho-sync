@@ -3736,13 +3736,33 @@ CASHFLOW_MATERIALS_PPW = 1.26  # LR materials estimate $/W
 CASHFLOW_LR_WARRANTY = 250.00  # LR warranty deduction from 20% final
 
 CASHFLOW_INSTALLED_STAGES = {
-    "Energized", "PTO", "Inspection", "Project Closeout", "Witness Test / PTO"
+    "Energized", "PTO", "Inspection", "Witness Test / PTO"
+}
+
+# Lending statuses that indicate all payments have been received — exclude from cash flow
+CASHFLOW_FULLY_PAID_STATUSES = {
+    "LR - Activation Package Paid",
+    "Cash - paid in full",
+    "CF - Phase 2 Funded",
 }
 
 CASHFLOW_PIPELINE_STAGES = {
     "Sales Ops Review", "Project Intake", "Site Survey", "Engineering", "Plan Review",
     "Interconnection", "Permitting", "Procurement & Scheduling",
     "Active Installation",
+}
+
+# Days remaining to Substantial Completion from each pipeline stage (sequential model)
+CASHFLOW_STAGE_DAYS_TO_SC = {
+    "Sales Ops Review": 47,
+    "Project Intake": 45,
+    "Site Survey": 43,
+    "Engineering": 40,
+    "Plan Review": 38,
+    "Interconnection": 38,
+    "Permitting": 22,
+    "Procurement & Scheduling": 12,
+    "Active Installation": 5,
 }
 
 
@@ -3810,12 +3830,11 @@ def _fetch_all_cashflow_projects(cutoff_date: str = "2026-01-01") -> list[dict]:
             is_pipeline = stage in CASHFLOW_PIPELINE_STAGES
             if not is_installed and not is_pipeline:
                 continue
-            owner_obj = r.get("Owner")
-            owner_name = (
-                (owner_obj.get("name") or "").strip()
-                if isinstance(owner_obj, dict) else ""
-            )
             lending_status = (r.get("Lending_Status") or "").strip()
+            # Skip fully paid projects — all payments received, nothing pending
+            if lending_status in CASHFLOW_FULLY_PAID_STATUSES:
+                continue
+            owner_obj = r.get("Owner")
             results.append({
                 "customer": (r.get("Name") or "").strip(),
                 "project_id": (r.get("Project_ID") or "").strip(),
@@ -3847,31 +3866,37 @@ def _write_cashflow_tab(svc, tab_name: str, rows: list[dict]) -> None:
     Write a Pipeline tab to CASHFLOW_SHEET_ID with per-project payment dates,
     amounts, materials, subcontractor costs, and commission payouts.
 
-    Column layout (A:V):
+    Column layout (A:AA):
       A  Customer
       B  Project ID
       C  Finance Type
       D  Stage
-      E  Substantial Completion
+      E  SC / Projected SC        (prefixed with ~ when projected from stage timing)
       F  kW
       G  Rev $/W
       H  Total Revenue            $
-      I  1st Payment Date         (LR: draw; loans/cash: full payment)
-      J  1st Payment Amount       $
-      K  2nd Payment Date         (LR: final; loans/cash: blank)
-      L  2nd Payment Amount       $
-      M  Materials (est)          $ (LR only, at $1.26/W)
-      N  Subcontractor Cost       $
-      O  Subcontractor Notes
-      P  Total Commission         $
-      Q  Comm Payout 1 Date
-      R  Comm Payout 1 Amt        $
-      S  Comm Payout 2 Date
-      T  Comm Payout 2 Amt        $
-      U  Zoho Link
-      V  Aurora Link
+      I  Payment 1 Date           LR: 80% draw; Cash: 20% deposit; Loans: full
+      J  Payment 1 Amt            $
+      K  Payment 2 Date           LR: 20% final; Cash: 60% progress
+      L  Payment 2 Amt            $
+      M  Payment 3 Date           Cash: 20% final at Energized
+      N  Payment 3 Amt            $
+      O  Materials (est)          $ (LR only, at $1.26/W)
+      P  Subcontractor Cost       $
+      Q  Subcontractor Notes
+      R  Referral Payout          $
+      S  Total Commission         $
+      T  Comm Payout 1 Date
+      U  Comm Payout 1 Amt        $
+      V  Comm Payout 2 Date
+      W  Comm Payout 2 Amt        $
+      X  Comm Payout 3 Date       (Cash only)
+      Y  Comm Payout 3 Amt        $
+      Z  Zoho Link
+      AA Aurora Link
     """
     sheets = svc.spreadsheets()
+    today = datetime.date.today()
 
     # Delete existing tab with same name
     existing = sheets.get(spreadsheetId=CASHFLOW_SHEET_ID).execute()
@@ -3891,13 +3916,15 @@ def _write_cashflow_tab(svc, tab_name: str, rows: list[dict]) -> None:
 
     headers = [
         "Customer", "Project ID", "Finance Type", "Stage",
-        "Substantial Completion", "kW", "Rev $/W", "Total Revenue",
-        "1st Payment Date", "1st Payment Amount",
-        "2nd Payment Date", "2nd Payment Amount",
+        "SC / Projected SC", "kW", "Rev $/W", "Total Revenue",
+        "Payment 1 Date", "Payment 1 Amt",
+        "Payment 2 Date", "Payment 2 Amt",
+        "Payment 3 Date", "Payment 3 Amt",
         "Materials (est)", "Subcontractor Cost", "Subcontractor Notes",
         "Referral Payout", "Total Commission",
         "Comm Payout 1 Date", "Comm Payout 1 Amt",
         "Comm Payout 2 Date", "Comm Payout 2 Amt",
+        "Comm Payout 3 Date", "Comm Payout 3 Amt",
         "Zoho Link", "Aurora Link",
     ]
 
@@ -3912,8 +3939,9 @@ def _write_cashflow_tab(svc, tab_name: str, rows: list[dict]) -> None:
         aurora_link = f'=HYPERLINK("{aurora_base}{aurora_id}","Aurora")' if aurora_id else ""
 
         finance_type = row.get("finance_type", "")
+        stage = row.get("stage", "")
         sc_date_str = row.get("substantial_completion", "")
-        pto_date_str = row.get("pto_date", "")
+        created_date_str = row.get("created_date", "")
         d = row.get("data", {})
 
         # System size and pricing — prefer Aurora data, fall back to Zoho
@@ -3924,7 +3952,6 @@ def _write_cashflow_tab(svc, tab_name: str, rows: list[dict]) -> None:
             round(base_price / system_watts, 4)
             if system_watts else row.get("price_per_watt_zoho", 0)
         )
-        # Calculate total commission from components (function returns raw fields, not the sum)
         base_ppw = base_price / system_watts if system_watts else 0
         base_commission = max(0, (base_ppw - COMMISSION_PPW_FLOOR) * system_watts) if system_watts else 0
         consultant_comp_ppw = float(d.get("consultant_comp_ppw") or 0)
@@ -3936,55 +3963,93 @@ def _write_cashflow_tab(svc, tab_name: str, rows: list[dict]) -> None:
             round(system_watts * CASHFLOW_MATERIALS_PPW, 2)
             if system_watts and finance_type == "LR" else ""
         )
+        # Determine effective SC date — actual if available, else project from stage timing
+        is_projected_sc = False
+        effective_sc_str = sc_date_str
+        if not sc_date_str and stage in CASHFLOW_STAGE_DAYS_TO_SC:
+            days_to_sc = CASHFLOW_STAGE_DAYS_TO_SC[stage]
+            effective_sc_str = (today + datetime.timedelta(days=days_to_sc)).isoformat()
+            is_projected_sc = True
 
-        aurora_warning = row.get("aurora_warning", "")
+        sc_display = f"~{effective_sc_str}" if is_projected_sc else (sc_date_str or "(no SC)")
 
         payment1_date = payment1_amt = ""
         payment2_date = payment2_amt = ""
+        payment3_date = payment3_amt = ""
         comm_payout1_date = comm_payout1_amt = ""
         comm_payout2_date = comm_payout2_amt = ""
+        comm_payout3_date = comm_payout3_amt = ""
 
-        if finance_type == "LR" and sc_date_str:
+        if finance_type == "LR" and effective_sc_str:
             try:
-                sc = datetime.date.fromisoformat(sc_date_str)
+                sc = datetime.date.fromisoformat(effective_sc_str)
+                # 80% draw: SC + 14 → next Monday
                 draw_date = _next_monday_on_or_after(sc + datetime.timedelta(days=14))
-                final_date = draw_date + datetime.timedelta(days=21)
-                draw_amt = round(
-                    base_price * 0.8 - (materials_est if materials_est != "" else 0), 2
-                )
+                # 20% final: SC + 33 → next Monday (Inspection 5 + Witness Test 14 + 14)
+                final_date = _next_monday_on_or_after(sc + datetime.timedelta(days=33))
+                mat = materials_est if isinstance(materials_est, (int, float)) else 0
+                draw_amt = round(base_price * 0.8 - mat, 2)
                 final_amt = round(base_price * 0.2 - CASHFLOW_LR_WARRANTY, 2)
                 payment1_date = draw_date.isoformat()
                 payment1_amt = draw_amt
                 payment2_date = final_date.isoformat()
                 payment2_amt = final_amt
+                # Commissions: 80% of comp + 100% referral at draw; 20% of comp at final
                 comm_payout1_date = draw_date.isoformat()
-                comm_payout1_amt = round(total_commission * 0.75, 2) if total_commission else ""
+                comm_payout1_amt = round(total_commission * 0.8 + referral_flat, 2)
                 comm_payout2_date = final_date.isoformat()
-                comm_payout2_amt = round(total_commission * 0.25, 2) if total_commission else ""
+                comm_payout2_amt = round(total_commission * 0.2, 2)
             except (ValueError, TypeError):
                 pass
-        elif finance_type != "LR":
-            payment_date_str = sc_date_str or pto_date_str
-            if payment_date_str:
-                try:
-                    pd_date = datetime.date.fromisoformat(payment_date_str)
-                    payment1_date = pd_date.isoformat()
-                    payment1_amt = base_price
-                    comm_payout1_date = pd_date.isoformat()
-                    comm_payout1_amt = total_commission if total_commission else ""
-                except (ValueError, TypeError):
-                    pass
+
+        elif finance_type == "CASH" and effective_sc_str:
+            try:
+                sc = datetime.date.fromisoformat(effective_sc_str)
+                # Payment 1: 20% deposit received ~11 days after project creation
+                if created_date_str:
+                    created = datetime.date.fromisoformat(created_date_str)
+                    deposit_received = created + datetime.timedelta(days=11)
+                else:
+                    deposit_received = today
+                # Payment 2: 60% progress at Procurement & Scheduling (SC - 12 days) + 7
+                progress_received = sc - datetime.timedelta(days=5)  # SC - 12 + 7
+                # Payment 3: 20% final at Energized (SC + 19) + 7 = SC + 26
+                final_received = sc + datetime.timedelta(days=26)
+                payment1_date = deposit_received.isoformat()
+                payment1_amt = round(base_price * 0.2, 2)
+                payment2_date = progress_received.isoformat()
+                payment2_amt = round(base_price * 0.6, 2)
+                payment3_date = final_received.isoformat()
+                payment3_amt = round(base_price * 0.2, 2)
+                # Commissions proportional; referral at final payment
+                comm_payout1_date = deposit_received.isoformat()
+                comm_payout1_amt = round(total_commission * 0.2, 2)
+                comm_payout2_date = progress_received.isoformat()
+                comm_payout2_amt = round(total_commission * 0.6, 2)
+                comm_payout3_date = final_received.isoformat()
+                comm_payout3_amt = round(total_commission * 0.2 + referral_flat, 2)
+            except (ValueError, TypeError):
+                pass
+
+        elif effective_sc_str:
+            # CF, SG, SE, etc. — single payment at SC
+            try:
+                sc = datetime.date.fromisoformat(effective_sc_str)
+                payment1_date = sc.isoformat()
+                payment1_amt = base_price
+                comm_payout1_date = sc.isoformat()
+                comm_payout1_amt = round(total_commission + referral_flat, 2)
+            except (ValueError, TypeError):
+                pass
 
         notes_col = subcontractor_notes
-        if aurora_warning:
-            notes_col = f"[Aurora: {aurora_warning}] {notes_col}".strip()
 
         value_rows.append([
             row.get("customer", ""),
             row.get("project_id", ""),
             finance_type,
-            row.get("stage", ""),
-            sc_date_str or "(no SC date)",
+            stage,
+            sc_display,
             system_kw,
             rev_ppw,
             base_price,
@@ -3992,6 +4057,8 @@ def _write_cashflow_tab(svc, tab_name: str, rows: list[dict]) -> None:
             payment1_amt,
             payment2_date,
             payment2_amt,
+            payment3_date,
+            payment3_amt,
             materials_est,
             subcontractor_total if subcontractor_total else "",
             notes_col,
@@ -4001,6 +4068,8 @@ def _write_cashflow_tab(svc, tab_name: str, rows: list[dict]) -> None:
             comm_payout1_amt,
             comm_payout2_date,
             comm_payout2_amt,
+            comm_payout3_date,
+            comm_payout3_amt,
             zoho_link,
             aurora_link,
         ])
@@ -4012,7 +4081,8 @@ def _write_cashflow_tab(svc, tab_name: str, rows: list[dict]) -> None:
         body={"values": value_rows},
     ).execute()
 
-    # Currency formatting: H(7), J(9), L(11), M(12), N(13), P(15), Q(16), S(18), U(20)
+    # Currency formatting (0-based col indices):
+    # H=7, J=9, L=11, N=13, O=14, P=15, R=17, S=18, U=20, W=22, Y=24
     dollar_fmt = {"numberFormat": {"type": "CURRENCY", "pattern": '"$"#,##0.00'}}
     dollar_requests = [
         {
@@ -4027,7 +4097,7 @@ def _write_cashflow_tab(svc, tab_name: str, rows: list[dict]) -> None:
                 "fields": "userEnteredFormat.numberFormat",
             }
         }
-        for col in [7, 9, 11, 12, 13, 15, 16, 18, 20]
+        for col in [7, 9, 11, 13, 14, 15, 17, 18, 20, 22, 24]
     ]
     format_requests = [
         {
@@ -4066,41 +4136,17 @@ def _run_cashflow_batch(projects: list[dict], tab_name: str) -> dict:
         logger.info(f"cashflow_batch: fetching {p['aurora_project_id']} ({p['customer']})")
         aurora_data = _get_commission_data_for_project(p["aurora_project_id"])
         if "error" in aurora_data:
-            # Fall back to Zoho-only data for cash flow basics
-            system_watts = int(p.get("system_kw_zoho", 0) * 1000)
-            base_price = p.get("base_price_zoho", 0)
-            base_ppw = p.get("price_per_watt_zoho", 0)
-            base_commission = (
-                max(0, (base_ppw - COMMISSION_PPW_FLOOR) * system_watts)
-                if system_watts else 0
-            )
-            rows.append({
-                **p,
-                "data": {
-                    "system_size_watts": system_watts,
-                    "base_price": base_price,
-                    "consultant_comp_ppw": 0,
-                    "total_commission": round(base_commission, 2),
-                    "subcontractor_total": 0,
-                    "subcontractor_notes": "",
-                },
-                "aurora_warning": aurora_data["error"],
-            })
+            # No sold design — skip entirely
+            logger.info(f"cashflow_batch: skipping {p['customer']} — {aurora_data['error']}")
+            continue
         else:
             rows.append({**p, "data": aurora_data})
 
     _write_cashflow_tab(svc, tab_name, rows)
-    warnings = [
-        {"project_id": r.get("project_id"), "customer": r.get("customer"),
-         "warning": r.get("aurora_warning")}
-        for r in rows if r.get("aurora_warning")
-    ]
     return {
         "status": "ok",
         "tab": tab_name,
         "total": len(rows),
-        "aurora_warnings": len(warnings),
-        "warnings": warnings,
     }
 
 
