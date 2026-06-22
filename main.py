@@ -3188,7 +3188,7 @@ def _fetch_all_commission_projects(cutoff_date: str = "2026-01-01") -> list[dict
     api_domain = os.getenv("ZOHO_API_DOMAIN")
     headers = {"Authorization": f"Zoho-oauthtoken {token}"}
 
-    fields = "Name,Project_ID,Aurora_Project_ID,Sales_Representative,Owner,Project_Stage,Project_Created_Date"
+    fields = "Name,Project_ID,Aurora_Project_ID,Sales_Representative,Owner,Project_Stage,Project_Created_Date,Commissions_Paid,Commissions_Fully_Paid"
 
     criteria = f"(Project_Created_Date:greater_equal:{cutoff_date})"
     results = []
@@ -3207,6 +3207,9 @@ def _fetch_all_commission_projects(cutoff_date: str = "2026-01-01") -> list[dict
             aurora_id = (r.get("Aurora_Project_ID") or "").strip()
             if not aurora_id:
                 continue
+            # Skip projects that are fully paid off
+            if r.get("Commissions_Fully_Paid"):
+                continue
             owner_obj = r.get("Owner")
             owner_name = (owner_obj.get("name") or "").strip() if isinstance(owner_obj, dict) else ""
             results.append({
@@ -3218,6 +3221,7 @@ def _fetch_all_commission_projects(cutoff_date: str = "2026-01-01") -> list[dict
                 "owner": owner_name,
                 "stage": (r.get("Project_Stage") or "").strip(),
                 "created_date": (r.get("Project_Created_Date") or "").strip(),
+                "commissions_paid": r.get("Commissions_Paid") or "",
             })
         info = resp.json().get("info") or {}
         if not info.get("more_records"):
@@ -3353,7 +3357,7 @@ def _write_commission_tab(svc, tab_name: str, rows: list[dict]) -> None:
         "Base PPW - Floor", "Base Commission",
         "Consultant Comp PPW ($/W)", "Consultant Commission",
         "Total Comp on Deal",
-        "Zoho Link", "Aurora Link", "Project Created Date",
+        "Zoho Link", "Aurora Link", "Project Created Date", "Commissions Paid (%)",
     ]
 
     zoho_base = "https://crm.zoho.com/crm/heliosolar/tab/CustomModule6/"
@@ -3397,6 +3401,7 @@ def _write_commission_tab(svc, tab_name: str, rows: list[dict]) -> None:
             zoho_link,                                 # Q — Zoho link
             aurora_link,                               # R — Aurora link
             row.get("created_date", ""),               # S — project created date
+            row.get("commissions_paid", ""),           # T — commissions paid %
         ])
 
     # 3. Write values (formulas go as USER_ENTERED so Sheets evaluates them)
