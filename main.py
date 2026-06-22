@@ -3888,7 +3888,7 @@ def _write_cashflow_tab(svc, tab_name: str, rows: list[dict]) -> None:
         "1st Payment Date", "1st Payment Amount",
         "2nd Payment Date", "2nd Payment Amount",
         "Materials (est)", "Subcontractor Cost", "Subcontractor Notes",
-        "Total Commission",
+        "Referral Payout", "Total Commission",
         "Comm Payout 1 Date", "Comm Payout 1 Amt",
         "Comm Payout 2 Date", "Comm Payout 2 Amt",
         "Zoho Link", "Aurora Link",
@@ -3917,7 +3917,12 @@ def _write_cashflow_tab(svc, tab_name: str, rows: list[dict]) -> None:
             round(base_price / system_watts, 4)
             if system_watts else row.get("price_per_watt_zoho", 0)
         )
-        total_commission = d.get("total_commission", 0)
+        # Calculate total commission from components (function returns raw fields, not the sum)
+        base_ppw = base_price / system_watts if system_watts else 0
+        base_commission = max(0, (base_ppw - COMMISSION_PPW_FLOOR) * system_watts) if system_watts else 0
+        consultant_comp_ppw = float(d.get("consultant_comp_ppw") or 0)
+        total_commission = round(base_commission + consultant_comp_ppw * system_watts, 2)
+        referral_flat = float(d.get("referral_flat") or 0)
         subcontractor_total = d.get("subcontractor_total", 0)
         subcontractor_notes = d.get("subcontractor_notes", "")
         materials_est = (
@@ -3983,6 +3988,7 @@ def _write_cashflow_tab(svc, tab_name: str, rows: list[dict]) -> None:
             materials_est,
             subcontractor_total if subcontractor_total else "",
             notes_col,
+            referral_flat if referral_flat else "",
             total_commission,
             comm_payout1_date,
             comm_payout1_amt,
@@ -3999,7 +4005,7 @@ def _write_cashflow_tab(svc, tab_name: str, rows: list[dict]) -> None:
         body={"values": value_rows},
     ).execute()
 
-    # Currency formatting: H(7), J(9), L(11), M(12), N(13), P(15), R(17), T(19)
+    # Currency formatting: H(7), J(9), L(11), M(12), N(13), P(15), Q(16), S(18), U(20)
     dollar_fmt = {"numberFormat": {"type": "CURRENCY", "pattern": '"$"#,##0.00'}}
     dollar_requests = [
         {
@@ -4014,7 +4020,7 @@ def _write_cashflow_tab(svc, tab_name: str, rows: list[dict]) -> None:
                 "fields": "userEnteredFormat.numberFormat",
             }
         }
-        for col in [7, 9, 11, 12, 13, 15, 17, 19]
+        for col in [7, 9, 11, 12, 13, 15, 16, 18, 20]
     ]
     format_requests = [
         {
