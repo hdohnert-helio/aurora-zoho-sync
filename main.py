@@ -3379,7 +3379,7 @@ def _write_commission_tab(svc, tab_name: str, rows: list[dict]) -> None:
         "Base PPW - Floor", "Base Commission",
         "Consultant Comp PPW ($/W)", "Consultant Commission",
         "Total Comp on Deal",
-        "Zoho Link", "Aurora Link", "Commissions Paid (%)", "Remaining Commission",
+        "Commissions Paid (%)", "Remaining Commission", "Zoho Link", "Aurora Link",
     ]
 
     zoho_base = "https://crm.zoho.com/crm/heliosolar/tab/CustomModule6/"
@@ -3421,10 +3421,10 @@ def _write_commission_tab(svc, tab_name: str, rows: list[dict]) -> None:
             d["consultant_comp_ppw"],                  # O — raw consultant PPW
             f"=O{r}*H{r}",                             # P — consultant commission
             f"=N{r}+P{r}",                             # Q — total comp on deal
-            zoho_link,                                 # R — Zoho link
-            aurora_link,                               # S — Aurora link
-            row.get("commissions_paid", ""),           # T — commissions paid %
-            f"=Q{r}*(1-IFERROR(T{r}/100,0))",         # U — remaining commission
+            row.get("commissions_paid", ""),           # R — commissions paid %
+            f"=Q{r}*(1-IFERROR(R{r}/100,0))",         # S — remaining commission
+            zoho_link,                                 # T — Zoho link
+            aurora_link,                               # U — Aurora link
         ])
 
     # 3. Write values (formulas go as USER_ENTERED so Sheets evaluates them)
@@ -3450,7 +3450,7 @@ def _write_commission_tab(svc, tab_name: str, rows: list[dict]) -> None:
                 "fields": "userEnteredFormat.numberFormat",
             }
         }
-        for col in [9, 10, 11, 12, 13, 14, 15, 16, 20]  # J through Q, plus U (Remaining)
+        for col in [9, 10, 11, 12, 13, 14, 15, 16, 18]  # J through Q, plus S (Remaining)
     ]
 
     # 4. Format header bold, freeze row, apply dollar formats
