@@ -3323,6 +3323,16 @@ def _write_commission_tab(svc, tab_name: str, rows: list[dict]) -> None:
     sheets = svc.spreadsheets()
 
     # 1. Add new sheet tab
+    # Delete existing tab with same name if present
+    existing = sheets.get(spreadsheetId=COMMISSION_SHEET_ID).execute()
+    for s in existing.get("sheets", []):
+        if s["properties"]["title"] == tab_name:
+            sheets.batchUpdate(
+                spreadsheetId=COMMISSION_SHEET_ID,
+                body={"requests": [{"deleteSheet": {"sheetId": s["properties"]["sheetId"]}}]}
+            ).execute()
+            break
+
     add_sheet_body = {
         "requests": [{
             "addSheet": {
