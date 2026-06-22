@@ -3349,7 +3349,29 @@ def _write_commission_tab(svc, tab_name: str, rows: list[dict]) -> None:
     sheet_id = resp["replies"][0]["addSheet"]["properties"]["sheetId"]
 
     # 2. Build header + data rows
+    # Column layout (A=0 … T=19):
+    #  A  Project Created Date
+    #  B  Customer
+    #  C  Install Owner (ES)
+    #  D  Sales Rep
+    #  E  EVP
+    #  F  Project ID
+    #  G  Aurora Project ID
+    #  H  System Size (W)
+    #  I  System Size (kW)      =H/1000
+    #  J  Base Price ($)        $
+    #  K  Base PPW ($/W)        $ =J/H
+    #  L  PPW Floor             $ constant
+    #  M  Base PPW - Floor      $ =K-L
+    #  N  Base Commission       $ =M*H
+    #  O  Consultant PPW        $
+    #  P  Consultant Commission $ =O*H
+    #  Q  Total Comp on Deal    $ =N+P
+    #  R  Zoho Link
+    #  S  Aurora Link
+    #  T  Commissions Paid (%)
     headers = [
+        "Project Created Date",
         "Customer", "Install Owner (ES)", "Sales Rep", "EVP",
         "Project ID", "Aurora Project ID",
         "System Size (W)", "System Size (kW)",
@@ -3357,7 +3379,7 @@ def _write_commission_tab(svc, tab_name: str, rows: list[dict]) -> None:
         "Base PPW - Floor", "Base Commission",
         "Consultant Comp PPW ($/W)", "Consultant Commission",
         "Total Comp on Deal",
-        "Zoho Link", "Aurora Link", "Project Created Date", "Commissions Paid (%)",
+        "Zoho Link", "Aurora Link", "Commissions Paid (%)",
     ]
 
     zoho_base = "https://crm.zoho.com/crm/heliosolar/tab/CustomModule6/"
@@ -3368,10 +3390,10 @@ def _write_commission_tab(svc, tab_name: str, rows: list[dict]) -> None:
         r = str(i)
         if "error" in row:
             value_rows.append([
-                row.get("customer", ""), row.get("owner", ""), row.get("rep", ""),
-                "Fred Stevens",
+                row.get("created_date", ""), row.get("customer", ""),
+                row.get("owner", ""), row.get("rep", ""), "Fred Stevens",
                 row.get("project_id", ""), row.get("aurora_project_id", ""),
-                row.get("error", ""), "", "", "", "", "", "", "", "", "", "", "",
+                row.get("error", ""), "", "", "", "", "", "", "", "", "", "", "", "",
             ])
             continue
 
@@ -3382,25 +3404,25 @@ def _write_commission_tab(svc, tab_name: str, rows: list[dict]) -> None:
         aurora_link = f'=HYPERLINK("{aurora_base}{aurora_id}","Aurora")' if aurora_id else ""
 
         value_rows.append([
-            row.get("customer", ""),                   # A — customer
-            row.get("owner", ""),                      # B — install owner (ES)
-            row.get("rep", ""),                        # C — sales rep
-            "Fred Stevens",                            # D — EVP
-            row.get("project_id", ""),                 # E — project ID
-            aurora_id,                                 # F — aurora project ID
-            d["system_size_watts"],                    # G — raw watts
-            f"=G{r}/1000",                             # H — kW
-            d["base_price"],                           # I — raw base price
-            f"=IFERROR(I{r}/G{r},0)",                  # J — base PPW
-            COMMISSION_PPW_FLOOR,                      # K — floor
-            f"=J{r}-K{r}",                             # L — margin
-            f"=L{r}*G{r}",                             # M — base commission
-            d["consultant_comp_ppw"],                  # N — raw consultant PPW
-            f"=N{r}*G{r}",                             # O — consultant commission
-            f"=M{r}+O{r}",                             # P — total comp on deal
-            zoho_link,                                 # Q — Zoho link
-            aurora_link,                               # R — Aurora link
-            row.get("created_date", ""),               # S — project created date
+            row.get("created_date", ""),               # A — project created date
+            row.get("customer", ""),                   # B — customer
+            row.get("owner", ""),                      # C — install owner (ES)
+            row.get("rep", ""),                        # D — sales rep
+            "Fred Stevens",                            # E — EVP
+            row.get("project_id", ""),                 # F — project ID
+            aurora_id,                                 # G — aurora project ID
+            d["system_size_watts"],                    # H — raw watts
+            f"=H{r}/1000",                             # I — kW
+            d["base_price"],                           # J — raw base price
+            f"=IFERROR(J{r}/H{r},0)",                  # K — base PPW
+            COMMISSION_PPW_FLOOR,                      # L — floor
+            f"=K{r}-L{r}",                             # M — margin
+            f"=M{r}*H{r}",                             # N — base commission
+            d["consultant_comp_ppw"],                  # O — raw consultant PPW
+            f"=O{r}*H{r}",                             # P — consultant commission
+            f"=N{r}+P{r}",                             # Q — total comp on deal
+            zoho_link,                                 # R — Zoho link
+            aurora_link,                               # S — Aurora link
             row.get("commissions_paid", ""),           # T — commissions paid %
         ])
 
@@ -3412,8 +3434,26 @@ def _write_commission_tab(svc, tab_name: str, rows: list[dict]) -> None:
         body={"values": value_rows},
     ).execute()
 
-    # 4. Format header row bold + freeze it
-    requests = [
+    # Dollar format columns: J(9), K(10), L(11), M(12), N(13), O(14), P(15), Q(16)
+    dollar_fmt = {"numberFormat": {"type": "CURRENCY", "pattern": '"$"#,##0.00'}}
+    dollar_requests = [
+        {
+            "repeatCell": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "startRowIndex": 1,
+                    "startColumnIndex": col,
+                    "endColumnIndex": col + 1,
+                },
+                "cell": {"userEnteredFormat": dollar_fmt},
+                "fields": "userEnteredFormat.numberFormat",
+            }
+        }
+        for col in [9, 10, 11, 12, 13, 14, 15, 16]  # J through Q
+    ]
+
+    # 4. Format header bold, freeze row, apply dollar formats
+    format_requests = [
         {
             "repeatCell": {
                 "range": {"sheetId": sheet_id, "startRowIndex": 0, "endRowIndex": 1},
@@ -3427,8 +3467,9 @@ def _write_commission_tab(svc, tab_name: str, rows: list[dict]) -> None:
                 "fields": "gridProperties.frozenRowCount",
             }
         },
+        *dollar_requests,
     ]
-    sheets.batchUpdate(spreadsheetId=COMMISSION_SHEET_ID, body={"requests": requests}).execute()
+    sheets.batchUpdate(spreadsheetId=COMMISSION_SHEET_ID, body={"requests": format_requests}).execute()
     logger.info(f"_write_commission_tab: wrote {len(rows)} rows to tab '{tab_name}'")
 
 
