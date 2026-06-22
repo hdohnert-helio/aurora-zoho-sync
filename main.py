@@ -3217,6 +3217,7 @@ def _fetch_all_commission_projects(cutoff_date: str = "2026-01-01") -> list[dict
                 "rep": (r.get("Sales_Representative") or "").strip(),
                 "owner": owner_name,
                 "stage": (r.get("Project_Stage") or "").strip(),
+                "created_date": (r.get("Project_Created_Date") or "").strip(),
             })
         info = resp.json().get("info") or {}
         if not info.get("more_records"):
@@ -3352,7 +3353,7 @@ def _write_commission_tab(svc, tab_name: str, rows: list[dict]) -> None:
         "Base PPW - Floor", "Base Commission",
         "Consultant Comp PPW ($/W)", "Consultant Commission",
         "Total Comp on Deal",
-        "Zoho Link", "Aurora Link",
+        "Zoho Link", "Aurora Link", "Project Created Date",
     ]
 
     zoho_base = "https://crm.zoho.com/crm/heliosolar/tab/CustomModule6/"
@@ -3395,6 +3396,7 @@ def _write_commission_tab(svc, tab_name: str, rows: list[dict]) -> None:
             f"=M{r}+O{r}",                             # P — total comp on deal
             zoho_link,                                 # Q — Zoho link
             aurora_link,                               # R — Aurora link
+            row.get("created_date", ""),               # S — project created date
         ])
 
     # 3. Write values (formulas go as USER_ENTERED so Sheets evaluates them)
