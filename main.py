@@ -3147,7 +3147,7 @@ async def debug_pricing(request: Request):
 #   Runs the same logic for that single project and appends a tab.
 #
 # Master sheet ID (create once, tabs accumulate per run):
-COMMISSION_SHEET_ID = "1ejKNcE6Zhe8ehGy351fAc9Y7b7yje8UktHPQObOYya8"
+COMMISSION_SHEET_ID = "1JUXFXJJFOpbzNAnl-UH1bN_HIoYvFQtbnuwSFYA8L5I"
 
 # Impersonate this user when writing to Sheets (must be in the same Google Workspace).
 SHEETS_IMPERSONATE_EMAIL = "hdohnert@helio.solar"
