@@ -3740,7 +3740,7 @@ CASHFLOW_INSTALLED_STAGES = {
 }
 
 CASHFLOW_PIPELINE_STAGES = {
-    "Project Intake", "Site Survey", "Engineering", "Plan Review",
+    "Sales Ops Review", "Project Intake", "Site Survey", "Engineering", "Plan Review",
     "Interconnection", "Permitting", "Procurement & Scheduling",
     "Active Installation",
 }
