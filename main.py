@@ -3787,7 +3787,7 @@ def _classify_finance_type(lending_status: str) -> str:
         return "CF"
     if s in ("SG", "SO") or s.startswith("SG"):
         return "SG"
-    if s in ("SE", "SMART E LOAN", "SMART E") or s.startswith("SE"):
+    if s in ("SE", "SMART E LOAN", "SMART E", "SMART E-LOAN") or s.startswith("SE"):
         return "SE"
     return s or "UNKNOWN"
 
@@ -4562,6 +4562,30 @@ def _compute_cashflow_row(row: dict, today: datetime.date, zoho_base: str, auror
         except (ValueError, TypeError):
             pass
 
+    elif finance_type == "SE" and effective_sc_str:
+        try:
+            sc = datetime.date.fromisoformat(effective_sc_str)
+            payment1_date = _next_monday_on_or_after(sc + datetime.timedelta(days=14)).isoformat()
+            payment1_amt = round(base_price * 0.33, 2)
+            payment2_date = _next_monday_on_or_after(sc + datetime.timedelta(days=33)).isoformat()
+            payment2_amt = round(base_price * 0.33, 2)
+            comm_payout1_date = payment1_date
+            comm_payout1_amt = round(total_commission * 0.33 + referral_flat, 2)
+            comm_payout2_date = payment2_date
+            comm_payout2_amt = round(total_commission * 0.33, 2)
+            # Payment 3: PTO + 14 days → next Monday; fall back to SC + 60 if no PTO
+            pto_date_str = row.get("pto_date", "")
+            if pto_date_str:
+                pto = datetime.date.fromisoformat(pto_date_str)
+                payment3_date = _next_monday_on_or_after(pto + datetime.timedelta(days=14)).isoformat()
+            else:
+                payment3_date = _next_monday_on_or_after(sc + datetime.timedelta(days=60)).isoformat()
+            payment3_amt = round(base_price * 0.34, 2)
+            comm_payout3_date = payment3_date
+            comm_payout3_amt = round(total_commission * 0.34, 2)
+        except (ValueError, TypeError):
+            pass
+
     elif effective_sc_str:
         try:
             sc = datetime.date.fromisoformat(effective_sc_str)
@@ -4946,15 +4970,17 @@ def _update_cashflow_formulas(svc, pipeline_tab_name: str) -> dict:
     for w in range(num_weeks):
         c = col_letter(start_col + w)
 
-        # Payment 1 (LR draw / loan) + Cash Payment 2 (60% progress)
+        # Payment 1 (LR 80% draw / SE 33% / loan) + Cash Payment 2 (60% progress)
         f_draws = (
             f"=SUMPRODUCT(ISNUMBER({p}!$I$2:$I$200)*({p}!$I$2:$I$200>={c}$2)*({p}!$I$2:$I$200<{c}$2+7)*ISNUMBER({p}!$J$2:$J$200)*({p}!$J$2:$J$200))"
             f"+SUMPRODUCT(ISNUMBER({p}!$K$2:$K$200)*({p}!$K$2:$K$200>={c}$2)*({p}!$K$2:$K$200<{c}$2+7)*(LEFT({p}!$C$2:$C$200,4)=\"CASH\")*ISNUMBER({p}!$L$2:$L$200)*({p}!$L$2:$L$200))"
         )
-        # LR Payment 2 (20% final) + Cash Payment 3 (20% final)
+        # LR 20% final + Cash 20% final + SE Payment 2 (33%) + SE Payment 3 (34%)
         f_finals = (
             f"=SUMPRODUCT(ISNUMBER({p}!$K$2:$K$200)*({p}!$K$2:$K$200>={c}$2)*({p}!$K$2:$K$200<{c}$2+7)*({p}!$C$2:$C$200=\"LR\")*ISNUMBER({p}!$L$2:$L$200)*({p}!$L$2:$L$200))"
             f"+SUMPRODUCT(ISNUMBER({p}!$M$2:$M$200)*({p}!$M$2:$M$200>={c}$2)*({p}!$M$2:$M$200<{c}$2+7)*(LEFT({p}!$C$2:$C$200,4)=\"CASH\")*ISNUMBER({p}!$N$2:$N$200)*({p}!$N$2:$N$200))"
+            f"+SUMPRODUCT(ISNUMBER({p}!$K$2:$K$200)*({p}!$K$2:$K$200>={c}$2)*({p}!$K$2:$K$200<{c}$2+7)*({p}!$C$2:$C$200=\"SE\")*ISNUMBER({p}!$L$2:$L$200)*({p}!$L$2:$L$200))"
+            f"+SUMPRODUCT(ISNUMBER({p}!$M$2:$M$200)*({p}!$M$2:$M$200>={c}$2)*({p}!$M$2:$M$200<{c}$2+7)*({p}!$C$2:$C$200=\"SE\")*ISNUMBER({p}!$N$2:$N$200)*({p}!$N$2:$N$200))"
         )
         # Comm Payout 1
         f_comm1 = (
