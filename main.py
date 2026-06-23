@@ -4628,3 +4628,244 @@ async def cashflow_run(request: Request):
             "project_count": len(projects),
         }
 
+
+def _find_current_pipeline_tab(svc) -> str | None:
+    """Return the most recently created Pipeline tab name, or None."""
+    sheets = svc.spreadsheets()
+    meta = sheets.get(spreadsheetId=CASHFLOW_SHEET_ID).execute()
+    pipeline_tabs = [
+        s["properties"]["title"]
+        for s in meta.get("sheets", [])
+        if s["properties"]["title"].startswith("Pipeline ")
+    ]
+    if not pipeline_tabs:
+        return None
+    # Sort by sheet index (order in workbook) — most recent is last added
+    tab_order = {
+        s["properties"]["title"]: s["properties"]["index"]
+        for s in meta.get("sheets", [])
+    }
+    return max(pipeline_tabs, key=lambda t: tab_order.get(t, 0))
+
+
+def _apply_overrides_to_pipeline_tab(svc, tab_name: str, overrides: dict) -> dict:
+    """
+    Patch payment date and commission date cells in an existing Pipeline tab
+    for any project listed in overrides.
+
+    Pipeline columns (1-indexed):
+      B=2  Project ID
+      I=9  Payment 1 Date   T=20 Comm Payout 1 Date
+      K=11 Payment 2 Date   V=22 Comm Payout 2 Date
+      M=13 Payment 3 Date   X=24 Comm Payout 3 Date
+    """
+    sheets = svc.spreadsheets()
+
+    # Read project IDs (col B) to find row numbers
+    col_b = sheets.values().get(
+        spreadsheetId=CASHFLOW_SHEET_ID,
+        range=f"'{tab_name}'!B1:B200",
+        valueRenderOption="FORMATTED_VALUE",
+    ).execute().get("values", [])
+
+    # Build {project_id: sheet_row_number (1-indexed)}
+    proj_row = {}
+    for i, cell in enumerate(col_b):
+        val = cell[0].strip() if cell else ""
+        if val and val != "Project ID":
+            proj_row[val] = i + 1
+
+    # payment key → (date col letter, comm col letter)
+    PAY_COLS = {
+        "payment1": ("I", "T"),
+        "payment2": ("K", "V"),
+        "payment3": ("M", "X"),
+    }
+
+    updates = []
+    patched = []
+    for proj_id, pov in overrides.items():
+        row_num = proj_row.get(proj_id)
+        if not row_num:
+            logger.warning(f"apply_overrides: {proj_id} not found in {tab_name}")
+            continue
+        for key, (pay_col, comm_col) in PAY_COLS.items():
+            if pov.get(key):
+                date_val = pov[key]
+                updates.append({"range": f"'{tab_name}'!{pay_col}{row_num}",  "values": [[date_val]]})
+                updates.append({"range": f"'{tab_name}'!{comm_col}{row_num}", "values": [[date_val]]})
+        patched.append(proj_id)
+
+    if updates:
+        sheets.values().batchUpdate(
+            spreadsheetId=CASHFLOW_SHEET_ID,
+            body={"valueInputOption": "USER_ENTERED", "data": updates},
+        ).execute()
+
+    logger.info(f"_apply_overrides_to_pipeline_tab: patched {len(patched)} project(s)")
+    return {"patched": patched, "cells_updated": len(updates)}
+
+
+@app.post("/cashflow/apply-overrides")
+async def cashflow_apply_overrides():
+    """
+    Re-read the Overrides tab and patch payment dates in the current Pipeline tab,
+    then regenerate Weekly Payments and refresh Cash Flow formulas.
+    Does NOT re-pull from Zoho or Aurora — runs in a few seconds.
+    """
+    try:
+        svc = _build_sheets_service()
+        if not svc:
+            return {"status": "failed", "reason": "could not build Sheets service"}
+
+        tab_name = _find_current_pipeline_tab(svc)
+        if not tab_name:
+            return {"status": "failed", "reason": "no Pipeline tab found — run /cashflow/run first"}
+
+        overrides = _read_payment_overrides(svc)
+        if not overrides:
+            return {"status": "ok", "tab": tab_name, "message": "no overrides found in Overrides tab"}
+
+        patch_result = _apply_overrides_to_pipeline_tab(svc, tab_name, overrides)
+
+        # Rebuild Weekly Payments from the now-patched Pipeline tab data
+        # Read the full pipeline tab and reconstruct row dicts for _write_weekly_payments_tab
+        sheets = svc.spreadsheets()
+        raw = sheets.values().get(
+            spreadsheetId=CASHFLOW_SHEET_ID,
+            range=f"'{tab_name}'!A1:AA200",
+            valueRenderOption="FORMATTED_VALUE",
+        ).execute().get("values", [])
+
+        if len(raw) < 2:
+            return {"status": "ok", "tab": tab_name, "patch": patch_result, "weekly_payments": "no data"}
+
+        headers = raw[0]
+        def col(name):
+            try:
+                return headers.index(name)
+            except ValueError:
+                return None
+
+        ci = {
+            "customer":     col("Customer"),
+            "project_id":   col("Project ID"),
+            "finance_type": col("Finance Type"),
+            "stage":        col("Stage"),
+            "sc":           col("SC / Projected SC"),
+            "pay1_date":    col("Payment 1 Date"),
+            "pay1_amt":     col("Payment 1 Amt"),
+            "pay2_date":    col("Payment 2 Date"),
+            "pay2_amt":     col("Payment 2 Amt"),
+            "pay3_date":    col("Payment 3 Date"),
+            "pay3_amt":     col("Payment 3 Amt"),
+            "comm1_date":   col("Comm Payout 1 Date"),
+            "comm1_amt":    col("Comm Payout 1 Amt"),
+            "comm2_date":   col("Comm Payout 2 Date"),
+            "comm2_amt":    col("Comm Payout 2 Amt"),
+            "comm3_date":   col("Comm Payout 3 Date"),
+            "comm3_amt":    col("Comm Payout 3 Amt"),
+            "zoho_link":    col("Zoho Link"),
+        }
+
+        def cell(row, key):
+            idx = ci.get(key)
+            if idx is None or idx >= len(row):
+                return ""
+            return row[idx]
+
+        def week_of(date_str):
+            try:
+                d = datetime.date.fromisoformat(date_str)
+                return (d - datetime.timedelta(days=d.weekday())).isoformat()
+            except (ValueError, TypeError):
+                return ""
+
+        PAYMENT_TYPE_MAP = {
+            ("LR",   "pay1"): "LR 80% Draw",
+            ("LR",   "pay2"): "LR 20% Final",
+            ("CASH", "pay1"): "Cash 20% Deposit",
+            ("CASH", "pay2"): "Cash 60% Progress",
+            ("CASH", "pay3"): "Cash 20% Final",
+        }
+
+        event_rows = []
+        for row in raw[1:]:
+            if not any(row):
+                continue
+            ft = cell(row, "finance_type")
+            customer = cell(row, "customer")
+            stage = cell(row, "stage")
+            sc_display = cell(row, "sc")
+            proj_id = cell(row, "project_id")
+            zoho_link = cell(row, "zoho_link")
+
+            for slot, pay_key, comm_key in [
+                ("pay1", "pay1_date", "comm1_date"),
+                ("pay2", "pay2_date", "comm2_date"),
+                ("pay3", "pay3_date", "comm3_date"),
+            ]:
+                pay_date = cell(row, pay_key)
+                pay_amt_raw = cell(row, pay_key.replace("_date", "_amt"))
+                comm_date = cell(row, comm_key)
+                comm_amt_raw = cell(row, comm_key.replace("_date", "_amt"))
+                if not pay_date:
+                    continue
+                pay_type = PAYMENT_TYPE_MAP.get((ft, slot), "Loan / Full Payment")
+                try:
+                    pay_amt = float(str(pay_amt_raw).replace("$", "").replace(",", "")) if pay_amt_raw else ""
+                except ValueError:
+                    pay_amt = pay_amt_raw
+                try:
+                    comm_amt = float(str(comm_amt_raw).replace("$", "").replace(",", "")) if comm_amt_raw else ""
+                except ValueError:
+                    comm_amt = comm_amt_raw
+
+                event_rows.append([
+                    week_of(pay_date), pay_date, customer, ft, pay_type,
+                    pay_amt, comm_date, comm_amt, stage, sc_display, proj_id, zoho_link,
+                ])
+
+        event_rows.sort(key=lambda r: r[1] if r[1] else "9999")
+
+        weekly_tab = CASHFLOW_WEEKLY_TAB
+        existing = sheets.get(spreadsheetId=CASHFLOW_SHEET_ID).execute()
+        weekly_sheet_id = None
+        for s in existing.get("sheets", []):
+            if s["properties"]["title"] == weekly_tab:
+                weekly_sheet_id = s["properties"]["sheetId"]
+                break
+
+        if weekly_sheet_id is None:
+            resp = sheets.batchUpdate(
+                spreadsheetId=CASHFLOW_SHEET_ID,
+                body={"requests": [{"addSheet": {"properties": {"title": weekly_tab}}}]}
+            ).execute()
+            weekly_sheet_id = resp["replies"][0]["addSheet"]["properties"]["sheetId"]
+
+        weekly_headers = [
+            "Week Of", "Payment Date", "Customer", "Finance Type", "Payment Type",
+            "Amount", "Commission Date", "Commission Amt",
+            "Stage", "SC / Projected SC", "Project ID", "Zoho Link",
+        ]
+        sheets.values().update(
+            spreadsheetId=CASHFLOW_SHEET_ID,
+            range=f"'{weekly_tab}'!A1",
+            valueInputOption="USER_ENTERED",
+            body={"values": [weekly_headers] + event_rows},
+        ).execute()
+
+        formula_result = _update_cashflow_formulas(svc, tab_name)
+
+        return {
+            "status": "ok",
+            "tab": tab_name,
+            "overrides_applied": len(patch_result["patched"]),
+            "projects_patched": patch_result["patched"],
+            "weekly_payment_rows": len(event_rows),
+            "formulas": formula_result,
+        }
+    except Exception as e:
+        import traceback
+        return {"error": str(e), "traceback": traceback.format_exc()}
+
