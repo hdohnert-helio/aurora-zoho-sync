@@ -4727,7 +4727,7 @@ def _run_cashflow_batch(projects: list[dict], tab_name: str) -> dict:
             break
     resp = sheets.batchUpdate(
         spreadsheetId=CASHFLOW_SHEET_ID,
-        body={"requests": [{"addSheet": {"properties": {"title": tab_name}}}]}
+        body={"requests": [{"addSheet": {"properties": {"title": tab_name, "gridProperties": {"columnCount": 30}}}}]}
     ).execute()
     sheet_id = resp["replies"][0]["addSheet"]["properties"]["sheetId"]
 
