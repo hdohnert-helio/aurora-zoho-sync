@@ -3288,10 +3288,13 @@ def _get_commission_data_for_project(aurora_project_id: str) -> dict:
             subcontractor_total += total
             subcontractor_notes.append(f"{name.replace('D. MISC: ', '')} ${total:,.2f}")
 
+    final_system_price = float(fields.get("Final_System_Price") or 0)
+
     return {
         "design_id": design_id,
         "system_size_watts": system_size_watts,
         "base_price": base_price,
+        "final_system_price": final_system_price,
         "consultant_comp_ppw": consultant_comp_ppw,
         "referral_payout_ppw": referral_payout_ppw,
         "referral_flat": referral_flat,
@@ -3967,8 +3970,9 @@ def _write_cashflow_tab(svc, tab_name: str, rows: list[dict]) -> None:
         system_watts = d.get("system_size_watts") or int(row.get("system_kw_zoho", 0) * 1000)
         system_kw = round(system_watts / 1000, 3) if system_watts else row.get("system_kw_zoho", 0)
         base_price = d.get("base_price") or row.get("base_price_zoho", 0)
+        contract_price = d.get("final_system_price") or base_price
         rev_ppw = (
-            round(base_price / system_watts, 4)
+            round(contract_price / system_watts, 4)
             if system_watts else row.get("price_per_watt_zoho", 0)
         )
         base_ppw = base_price / system_watts if system_watts else 0
@@ -4007,8 +4011,8 @@ def _write_cashflow_tab(svc, tab_name: str, rows: list[dict]) -> None:
                 # 20% final: SC + 33 → next Monday (Inspection 5 + Witness Test 14 + 14)
                 final_date = _next_monday_on_or_after(sc + datetime.timedelta(days=33))
                 mat = materials_est if isinstance(materials_est, (int, float)) else 0
-                draw_amt = round(base_price * 0.8 - mat, 2)
-                final_amt = round(base_price * 0.2 - CASHFLOW_LR_WARRANTY, 2)
+                draw_amt = round(contract_price * 0.8 - mat, 2)
+                final_amt = round(contract_price * 0.2 - CASHFLOW_LR_WARRANTY, 2)
                 payment1_date = draw_date.isoformat()
                 payment1_amt = draw_amt
                 payment2_date = final_date.isoformat()
@@ -4040,11 +4044,11 @@ def _write_cashflow_tab(svc, tab_name: str, rows: list[dict]) -> None:
                 # Payment 3: 20% final at Energized (SC + 19) + 7 = SC + 26
                 final_received = sc + datetime.timedelta(days=26)
                 payment1_date = deposit_received.isoformat()
-                payment1_amt = round(base_price * 0.2, 2)
+                payment1_amt = round(contract_price * 0.2, 2)
                 payment2_date = progress_received.isoformat()
-                payment2_amt = round(base_price * 0.6, 2)
+                payment2_amt = round(contract_price * 0.6, 2)
                 payment3_date = final_received.isoformat()
-                payment3_amt = round(base_price * 0.2, 2)
+                payment3_amt = round(contract_price * 0.2, 2)
                 # Commissions proportional; referral at final payment
                 comm_payout1_date = deposit_received.isoformat()
                 comm_payout1_amt = round(total_commission * 0.2, 2)
@@ -4070,7 +4074,7 @@ def _write_cashflow_tab(svc, tab_name: str, rows: list[dict]) -> None:
             try:
                 sc = datetime.date.fromisoformat(effective_sc_str)
                 payment1_date = sc.isoformat()
-                payment1_amt = base_price
+                payment1_amt = contract_price
                 comm_payout1_date = sc.isoformat()
                 comm_payout1_amt = round(total_commission + referral_flat, 2)
             except (ValueError, TypeError):
@@ -4098,7 +4102,7 @@ def _write_cashflow_tab(svc, tab_name: str, rows: list[dict]) -> None:
             sc_display,
             system_kw,
             rev_ppw,
-            base_price,
+            contract_price,
             payment1_date,
             payment1_amt,
             payment2_date,
@@ -4335,6 +4339,7 @@ def _write_weekly_payments_tab(svc, rows: list[dict]) -> None:
 
         system_watts = d.get("system_size_watts") or int(row.get("system_kw_zoho", 0) * 1000)
         base_price = d.get("base_price") or row.get("base_price_zoho", 0)
+        contract_price = d.get("final_system_price") or base_price
         base_ppw = base_price / system_watts if system_watts else 0
         base_commission = max(0, (base_ppw - COMMISSION_PPW_FLOOR) * system_watts) if system_watts else 0
         consultant_comp_ppw = float(d.get("consultant_comp_ppw") or 0)
@@ -4377,8 +4382,8 @@ def _write_weekly_payments_tab(svc, rows: list[dict]) -> None:
                 draw_date_str = pov.get("payment1") or _next_monday_on_or_after(sc + datetime.timedelta(days=14)).isoformat()
                 final_date_str = pov.get("payment2") or _next_monday_on_or_after(sc + datetime.timedelta(days=33)).isoformat()
                 mat = materials_est if isinstance(materials_est, (int, float)) else 0
-                draw_amt = round(base_price * 0.8 - mat, 2)
-                final_amt = round(base_price * 0.2 - CASHFLOW_LR_WARRANTY, 2)
+                draw_amt = round(contract_price * 0.8 - mat, 2)
+                final_amt = round(contract_price * 0.2 - CASHFLOW_LR_WARRANTY, 2)
                 comm1_amt = round(total_commission * 0.8 + referral_flat, 2)
                 comm2_amt = round(total_commission * 0.2, 2)
 
@@ -4401,14 +4406,14 @@ def _write_weekly_payments_tab(svc, rows: list[dict]) -> None:
 
                 if lending_status not in CASHFLOW_LR_DRAW_PAID_STATUSES and lending_status not in CASHFLOW_CASH_PROGRESS_PAID_STATUSES:
                     add_event(deposit_date_str, "Cash 20% Deposit",
-                              round(base_price * 0.2, 2),
+                              round(contract_price * 0.2, 2),
                               deposit_date_str, round(total_commission * 0.2, 2))
                 if lending_status not in CASHFLOW_CASH_PROGRESS_PAID_STATUSES:
                     add_event(progress_date_str, "Cash 60% Progress",
-                              round(base_price * 0.6, 2),
+                              round(contract_price * 0.6, 2),
                               progress_date_str, round(total_commission * 0.6, 2))
                 add_event(final_date_str, "Cash 20% Final",
-                          round(base_price * 0.2, 2),
+                          round(contract_price * 0.2, 2),
                           final_date_str, round(total_commission * 0.2 + referral_flat, 2))
             except (ValueError, TypeError):
                 pass
@@ -4417,7 +4422,7 @@ def _write_weekly_payments_tab(svc, rows: list[dict]) -> None:
             try:
                 sc = datetime.date.fromisoformat(effective_sc_str)
                 pay_date_str = pov.get("payment1") or sc.isoformat()
-                add_event(pay_date_str, "Loan / Full Payment", base_price,
+                add_event(pay_date_str, "Loan / Full Payment", contract_price,
                           pay_date_str, round(total_commission + referral_flat, 2))
             except (ValueError, TypeError):
                 pass
@@ -4510,7 +4515,9 @@ def _compute_cashflow_row(row: dict, today: datetime.date, zoho_base: str, auror
     system_watts = d.get("system_size_watts") or int(row.get("system_kw_zoho", 0) * 1000)
     system_kw = round(system_watts / 1000, 3) if system_watts else row.get("system_kw_zoho", 0)
     base_price = d.get("base_price") or row.get("base_price_zoho", 0)
-    rev_ppw = round(base_price / system_watts, 4) if system_watts else row.get("price_per_watt_zoho", 0)
+    # Use final system price (base + adders - discounts) for payment amounts; fall back to base_price
+    contract_price = d.get("final_system_price") or base_price
+    rev_ppw = round(contract_price / system_watts, 4) if system_watts else row.get("price_per_watt_zoho", 0)
     base_ppw = base_price / system_watts if system_watts else 0
     base_commission = max(0, (base_ppw - COMMISSION_PPW_FLOOR) * system_watts) if system_watts else 0
     consultant_comp_ppw = float(d.get("consultant_comp_ppw") or 0)
@@ -4539,9 +4546,9 @@ def _compute_cashflow_row(row: dict, today: datetime.date, zoho_base: str, auror
             sc = datetime.date.fromisoformat(effective_sc_str)
             mat = materials_est if isinstance(materials_est, (int, float)) else 0
             payment1_date = _next_monday_on_or_after(sc + datetime.timedelta(days=14)).isoformat()
-            payment1_amt = round(base_price * 0.8 - mat, 2)
+            payment1_amt = round(contract_price * 0.8 - mat, 2)
             payment2_date = _next_monday_on_or_after(sc + datetime.timedelta(days=33)).isoformat()
-            payment2_amt = round(base_price * 0.2 - CASHFLOW_LR_WARRANTY, 2)
+            payment2_amt = round(contract_price * 0.2 - CASHFLOW_LR_WARRANTY, 2)
             comm_payout1_date = payment1_date
             comm_payout1_amt = round(total_commission * 0.8 + referral_flat, 2)
             comm_payout2_date = payment2_date
@@ -4562,9 +4569,9 @@ def _compute_cashflow_row(row: dict, today: datetime.date, zoho_base: str, auror
                 payment1_date = today.isoformat()
             payment2_date = (sc - datetime.timedelta(days=5)).isoformat()
             payment3_date = (sc + datetime.timedelta(days=26)).isoformat()
-            payment1_amt = round(base_price * 0.2, 2)
-            payment2_amt = round(base_price * 0.6, 2)
-            payment3_amt = round(base_price * 0.2, 2)
+            payment1_amt = round(contract_price * 0.2, 2)
+            payment2_amt = round(contract_price * 0.6, 2)
+            payment3_amt = round(contract_price * 0.2, 2)
             comm_payout1_date = payment1_date
             comm_payout1_amt = round(total_commission * 0.2, 2)
             comm_payout2_date = payment2_date
@@ -4588,9 +4595,9 @@ def _compute_cashflow_row(row: dict, today: datetime.date, zoho_base: str, auror
         try:
             sc = datetime.date.fromisoformat(effective_sc_str)
             payment1_date = _next_monday_on_or_after(sc + datetime.timedelta(days=14)).isoformat()
-            payment1_amt = round(base_price * 0.33, 2)
+            payment1_amt = round(contract_price * 0.33, 2)
             payment2_date = _next_monday_on_or_after(sc + datetime.timedelta(days=33)).isoformat()
-            payment2_amt = round(base_price * 0.33, 2)
+            payment2_amt = round(contract_price * 0.33, 2)
             comm_payout1_date = payment1_date
             comm_payout1_amt = round(total_commission * 0.33 + referral_flat, 2)
             comm_payout2_date = payment2_date
@@ -4602,7 +4609,7 @@ def _compute_cashflow_row(row: dict, today: datetime.date, zoho_base: str, auror
                 payment3_date = _next_monday_on_or_after(pto + datetime.timedelta(days=14)).isoformat()
             else:
                 payment3_date = _next_monday_on_or_after(sc + datetime.timedelta(days=60)).isoformat()
-            payment3_amt = round(base_price * 0.34, 2)
+            payment3_amt = round(contract_price * 0.34, 2)
             comm_payout3_date = payment3_date
             comm_payout3_amt = round(total_commission * 0.34, 2)
         except (ValueError, TypeError):
@@ -4612,7 +4619,7 @@ def _compute_cashflow_row(row: dict, today: datetime.date, zoho_base: str, auror
         try:
             sc = datetime.date.fromisoformat(effective_sc_str)
             payment1_date = sc.isoformat()
-            payment1_amt = base_price
+            payment1_amt = contract_price
             comm_payout1_date = sc.isoformat()
             comm_payout1_amt = round(total_commission + referral_flat, 2)
         except (ValueError, TypeError):
@@ -4652,7 +4659,7 @@ def _compute_cashflow_row(row: dict, today: datetime.date, zoho_base: str, auror
 
     pipeline_row = [
         customer, project_id, finance_type, stage, sc_display,
-        system_kw, rev_ppw, base_price,
+        system_kw, rev_ppw, contract_price,
         payment1_date, payment1_amt,
         payment2_date, payment2_amt,
         payment3_date, payment3_amt,
