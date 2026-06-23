@@ -4907,11 +4907,16 @@ def _update_cashflow_formulas(svc, pipeline_tab_name: str) -> dict:
         ct_row_data = sheets.values().get(
             spreadsheetId=CASHFLOW_SHEET_ID,
             range=f"'{CASHFLOW_MAIN_TAB}'!{row_ct_green}:{row_ct_green}",
-            valueRenderOption="FORMATTED_VALUE",
+            valueRenderOption="UNFORMATTED_VALUE",
         ).execute().get("values", [[]])[0]
         for i, val in enumerate(ct_row_data):
-            if val and str(val).strip() and i >= start_col:
-                ct_green_existing.add(i)
+            # Only protect cells with actual numeric values (e.g. the $8,500)
+            # Error cells (#REF!, etc.) return empty with UNFORMATTED_VALUE
+            try:
+                if val and float(val) != 0 and i >= start_col:
+                    ct_green_existing.add(i)
+            except (ValueError, TypeError):
+                pass
 
     def col_letter(idx):
         if idx < 26:
