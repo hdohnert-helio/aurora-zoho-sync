@@ -3757,6 +3757,10 @@ CASHFLOW_LR_DRAW_PAID_STATUSES = {
     "Cash - 20PCT deposit paid",
 }
 
+CASHFLOW_CASH_PROGRESS_PAID_STATUSES = {
+    "Cash - 60PCT paid",
+}
+
 CASHFLOW_PIPELINE_STAGES = {
     "Sales Ops Review", "Project Intake", "Site Survey", "Engineering", "Plan Review",
     "Interconnection", "Permitting", "Procurement & Scheduling",
@@ -4050,6 +4054,16 @@ def _write_cashflow_tab(svc, tab_name: str, rows: list[dict]) -> None:
                 comm_payout3_amt = round(total_commission * 0.2 + referral_flat, 2)
             except (ValueError, TypeError):
                 pass
+            # 20% deposit already collected — clear Payment 1
+            if lending_status in CASHFLOW_LR_DRAW_PAID_STATUSES:
+                payment1_date = payment1_amt = ""
+                comm_payout1_date = comm_payout1_amt = ""
+            # 60% progress already collected — clear Payment 1 and Payment 2
+            if lending_status in CASHFLOW_CASH_PROGRESS_PAID_STATUSES:
+                payment1_date = payment1_amt = ""
+                comm_payout1_date = comm_payout1_amt = ""
+                payment2_date = payment2_amt = ""
+                comm_payout2_date = comm_payout2_amt = ""
 
         elif effective_sc_str:
             # CF, SG, SE, etc. — single payment at SC
@@ -4385,12 +4399,14 @@ def _write_weekly_payments_tab(svc, rows: list[dict]) -> None:
                 progress_date_str = pov.get("payment2") or (sc - datetime.timedelta(days=5)).isoformat()
                 final_date_str = pov.get("payment3") or (sc + datetime.timedelta(days=26)).isoformat()
 
-                add_event(deposit_date_str, "Cash 20% Deposit",
-                          round(base_price * 0.2, 2),
-                          deposit_date_str, round(total_commission * 0.2, 2))
-                add_event(progress_date_str, "Cash 60% Progress",
-                          round(base_price * 0.6, 2),
-                          progress_date_str, round(total_commission * 0.6, 2))
+                if lending_status not in CASHFLOW_LR_DRAW_PAID_STATUSES and lending_status not in CASHFLOW_CASH_PROGRESS_PAID_STATUSES:
+                    add_event(deposit_date_str, "Cash 20% Deposit",
+                              round(base_price * 0.2, 2),
+                              deposit_date_str, round(total_commission * 0.2, 2))
+                if lending_status not in CASHFLOW_CASH_PROGRESS_PAID_STATUSES:
+                    add_event(progress_date_str, "Cash 60% Progress",
+                              round(base_price * 0.6, 2),
+                              progress_date_str, round(total_commission * 0.6, 2))
                 add_event(final_date_str, "Cash 20% Final",
                           round(base_price * 0.2, 2),
                           final_date_str, round(total_commission * 0.2 + referral_flat, 2))
@@ -4559,6 +4575,12 @@ def _compute_cashflow_row(row: dict, today: datetime.date, zoho_base: str, auror
             if lending_status in CASHFLOW_LR_DRAW_PAID_STATUSES:
                 payment1_date = payment1_amt = ""
                 comm_payout1_date = comm_payout1_amt = ""
+            # 60% progress already collected — clear Payment 1 and Payment 2
+            if lending_status in CASHFLOW_CASH_PROGRESS_PAID_STATUSES:
+                payment1_date = payment1_amt = ""
+                comm_payout1_date = comm_payout1_amt = ""
+                payment2_date = payment2_amt = ""
+                comm_payout2_date = comm_payout2_amt = ""
         except (ValueError, TypeError):
             pass
 
