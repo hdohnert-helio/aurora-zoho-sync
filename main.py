@@ -3746,6 +3746,12 @@ CASHFLOW_FULLY_PAID_STATUSES = {
     "CF - Phase 2 Funded",
 }
 
+# LR statuses where the 80% draw has already been received — show only 20% final
+CASHFLOW_LR_DRAW_PAID_STATUSES = {
+    "LR - Install Package Paid",
+    "LR - Activation Package Submitted",
+}
+
 CASHFLOW_PIPELINE_STAGES = {
     "Sales Ops Review", "Project Intake", "Site Survey", "Engineering", "Plan Review",
     "Interconnection", "Permitting", "Procurement & Scheduling",
@@ -3940,6 +3946,7 @@ def _write_cashflow_tab(svc, tab_name: str, rows: list[dict]) -> None:
         aurora_link = f'=HYPERLINK("{aurora_base}{aurora_id}","Aurora")' if aurora_id else ""
 
         finance_type = row.get("finance_type", "")
+        lending_status = row.get("lending_status", "")
         stage = row.get("stage", "")
         sc_date_str = row.get("substantial_completion", "")
         created_date_str = row.get("created_date", "")
@@ -4002,6 +4009,11 @@ def _write_cashflow_tab(svc, tab_name: str, rows: list[dict]) -> None:
                 comm_payout2_amt = round(total_commission * 0.2, 2)
             except (ValueError, TypeError):
                 pass
+
+            # 80% draw already received — clear Payment 1 and Comm Payout 1
+            if lending_status in CASHFLOW_LR_DRAW_PAID_STATUSES:
+                payment1_date = payment1_amt = ""
+                comm_payout1_date = comm_payout1_amt = ""
 
         elif finance_type == "CASH" and effective_sc_str:
             try:
