@@ -4603,13 +4603,13 @@ async def cashflow_run(request: Request):
     CF/SG/SE/Smart E (loans): single payment = contract price on SC date.
     Cash: single payment = contract price on SC/PTO date.
 
-    Body (optional): {"cutoff_date": "2026-01-01"}
+    Body (optional): {"cutoff_date": "2025-06-01"}
     """
     try:
         body = await request.json()
     except Exception:
         body = {}
-    cutoff = (body.get("cutoff_date") or "2026-01-01") if isinstance(body, dict) else "2026-01-01"
+    cutoff = (body.get("cutoff_date") or "2025-06-01") if isinstance(body, dict) else "2025-06-01"
     now_label = datetime.datetime.now(datetime.timezone.utc).strftime("%-m-%-d-%Y")
     tab_name = f"Pipeline {now_label}"
     projects = _fetch_all_cashflow_projects(cutoff_date=cutoff)
