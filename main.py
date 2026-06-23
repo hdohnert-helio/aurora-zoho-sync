@@ -4139,6 +4139,90 @@ def _write_cashflow_tab(svc, tab_name: str, rows: list[dict]) -> None:
 
 
 CASHFLOW_WEEKLY_TAB = "Weekly Payments"
+CASHFLOW_OVERRIDES_TAB = "Overrides"
+
+
+def _ensure_overrides_tab(svc) -> None:
+    """Create the Overrides tab with headers if it doesn't already exist."""
+    sheets = svc.spreadsheets()
+    existing = sheets.get(spreadsheetId=CASHFLOW_SHEET_ID).execute()
+    for s in existing.get("sheets", []):
+        if s["properties"]["title"] == CASHFLOW_OVERRIDES_TAB:
+            return  # already exists
+
+    resp = sheets.batchUpdate(
+        spreadsheetId=CASHFLOW_SHEET_ID,
+        body={"requests": [{"addSheet": {"properties": {"title": CASHFLOW_OVERRIDES_TAB}}}]}
+    ).execute()
+    sheet_id = resp["replies"][0]["addSheet"]["properties"]["sheetId"]
+
+    # Write headers + example row
+    sheets.values().update(
+        spreadsheetId=CASHFLOW_SHEET_ID,
+        range=f"'{CASHFLOW_OVERRIDES_TAB}'!A1",
+        valueInputOption="USER_ENTERED",
+        body={"values": [
+            ["Project ID", "Override SC Date", "Notes"],
+            ["# Example: PROJ-1234", "2026-08-01", "Customer delayed permit"],
+        ]},
+    ).execute()
+
+    # Bold header, freeze row 1
+    sheets.batchUpdate(
+        spreadsheetId=CASHFLOW_SHEET_ID,
+        body={"requests": [
+            {
+                "repeatCell": {
+                    "range": {"sheetId": sheet_id, "startRowIndex": 0, "endRowIndex": 1},
+                    "cell": {"userEnteredFormat": {"textFormat": {"bold": True}}},
+                    "fields": "userEnteredFormat.textFormat.bold",
+                }
+            },
+            {
+                "updateSheetProperties": {
+                    "properties": {
+                        "sheetId": sheet_id,
+                        "gridProperties": {"frozenRowCount": 1},
+                    },
+                    "fields": "gridProperties.frozenRowCount",
+                }
+            },
+        ]},
+    ).execute()
+    logger.info("_ensure_overrides_tab: created Overrides tab")
+
+
+def _read_sc_overrides(svc) -> dict:
+    """
+    Read the Overrides tab and return a dict of {project_id: override_sc_date_str}.
+    Rows where Project ID starts with '#' are treated as comments and skipped.
+    """
+    sheets = svc.spreadsheets()
+    try:
+        data = sheets.values().get(
+            spreadsheetId=CASHFLOW_SHEET_ID,
+            range=f"'{CASHFLOW_OVERRIDES_TAB}'!A2:B200",
+            valueRenderOption="FORMATTED_VALUE",
+        ).execute().get("values", [])
+    except Exception:
+        return {}
+
+    overrides = {}
+    for row in data:
+        if len(row) < 2:
+            continue
+        proj_id = row[0].strip()
+        sc_date = row[1].strip()
+        if not proj_id or proj_id.startswith("#"):
+            continue
+        # Validate date format
+        try:
+            datetime.date.fromisoformat(sc_date)
+            overrides[proj_id] = sc_date
+        except ValueError:
+            logger.warning(f"_read_sc_overrides: invalid date '{sc_date}' for {proj_id}, skipping")
+    logger.info(f"_read_sc_overrides: loaded {len(overrides)} override(s)")
+    return overrides
 
 
 def _write_weekly_payments_tab(svc, rows: list[dict]) -> None:
@@ -4357,16 +4441,23 @@ def _run_cashflow_batch(projects: list[dict], tab_name: str) -> dict:
     if not svc:
         return {"status": "failed", "reason": "could not build Sheets service"}
 
+    _ensure_overrides_tab(svc)
+    overrides = _read_sc_overrides(svc)
+
     rows = []
     for p in projects:
         logger.info(f"cashflow_batch: fetching {p['aurora_project_id']} ({p['customer']})")
         aurora_data = _get_commission_data_for_project(p["aurora_project_id"])
         if "error" in aurora_data:
-            # No sold design — skip entirely
             logger.info(f"cashflow_batch: skipping {p['customer']} — {aurora_data['error']}")
             continue
-        else:
-            rows.append({**p, "data": aurora_data})
+        row = {**p, "data": aurora_data}
+        proj_id = p.get("project_id", "")
+        if proj_id in overrides:
+            row["substantial_completion"] = overrides[proj_id]
+            row["sc_overridden"] = True
+            logger.info(f"cashflow_batch: SC override applied to {proj_id} → {overrides[proj_id]}")
+        rows.append(row)
 
     _write_cashflow_tab(svc, tab_name, rows)
     _write_weekly_payments_tab(svc, rows)
@@ -4375,6 +4466,7 @@ def _run_cashflow_batch(projects: list[dict], tab_name: str) -> dict:
         "status": "ok",
         "tab": tab_name,
         "total": len(rows),
+        "overrides_applied": sum(1 for r in rows if r.get("sc_overridden")),
         "formulas": formula_result,
     }
 
