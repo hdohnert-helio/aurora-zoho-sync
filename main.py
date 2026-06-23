@@ -4138,6 +4138,219 @@ def _write_cashflow_tab(svc, tab_name: str, rows: list[dict]) -> None:
     logger.info(f"_write_cashflow_tab: wrote {len(rows)} rows to tab '{tab_name}'")
 
 
+CASHFLOW_WEEKLY_TAB = "Weekly Payments"
+
+
+def _write_weekly_payments_tab(svc, rows: list[dict]) -> None:
+    """
+    Write (or overwrite) a 'Weekly Payments' tab that shows one row per
+    payment event, sorted by payment date, so it's easy to see what's
+    expected each week.
+
+    Columns:
+      A  Week Of          (Monday of the payment week, YYYY-MM-DD)
+      B  Payment Date
+      C  Customer
+      D  Finance Type
+      E  Payment Type     (e.g. "LR 80% Draw", "LR 20% Final", "Cash Progress 60%", …)
+      F  Amount
+      G  Commission Date
+      H  Commission Amt
+      I  Stage
+      J  SC / Projected SC
+      K  Project ID
+      L  Zoho Link
+    """
+    sheets = svc.spreadsheets()
+    today = datetime.date.today()
+
+    tab_name = CASHFLOW_WEEKLY_TAB
+
+    # Delete and recreate tab
+    existing = sheets.get(spreadsheetId=CASHFLOW_SHEET_ID).execute()
+    for s in existing.get("sheets", []):
+        if s["properties"]["title"] == tab_name:
+            sheets.batchUpdate(
+                spreadsheetId=CASHFLOW_SHEET_ID,
+                body={"requests": [{"deleteSheet": {"sheetId": s["properties"]["sheetId"]}}]}
+            ).execute()
+            break
+
+    resp = sheets.batchUpdate(
+        spreadsheetId=CASHFLOW_SHEET_ID,
+        body={"requests": [{"addSheet": {"properties": {"title": tab_name}}}]}
+    ).execute()
+    sheet_id = resp["replies"][0]["addSheet"]["properties"]["sheetId"]
+
+    zoho_base = "https://crm.zoho.com/crm/heliosolar/tab/CustomModule6/"
+
+    def week_of(date_str):
+        """Return the Monday of the week containing date_str."""
+        try:
+            d = datetime.date.fromisoformat(date_str)
+            return (d - datetime.timedelta(days=d.weekday())).isoformat()
+        except (ValueError, TypeError):
+            return ""
+
+    event_rows = []
+
+    for row in rows:
+        finance_type = row.get("finance_type", "")
+        lending_status = row.get("lending_status", "")
+        stage = row.get("stage", "")
+        sc_date_str = row.get("substantial_completion", "")
+        created_date_str = row.get("created_date", "")
+        d = row.get("data", {})
+        customer = row.get("customer", "")
+        project_id = row.get("project_id", "")
+        zoho_id = row.get("zoho_record_id", "")
+        zoho_link = f'=HYPERLINK("{zoho_base}{zoho_id}","Zoho")' if zoho_id else ""
+
+        system_watts = d.get("system_size_watts") or int(row.get("system_kw_zoho", 0) * 1000)
+        base_price = d.get("base_price") or row.get("base_price_zoho", 0)
+        base_ppw = base_price / system_watts if system_watts else 0
+        base_commission = max(0, (base_ppw - COMMISSION_PPW_FLOOR) * system_watts) if system_watts else 0
+        consultant_comp_ppw = float(d.get("consultant_comp_ppw") or 0)
+        total_commission = round(base_commission + consultant_comp_ppw * system_watts, 2)
+        referral_flat = float(d.get("referral_flat") or 0)
+        materials_est = round(system_watts * CASHFLOW_MATERIALS_PPW, 2) if system_watts and finance_type == "LR" else 0
+
+        is_projected_sc = False
+        effective_sc_str = sc_date_str
+        if not sc_date_str and stage in CASHFLOW_STAGE_DAYS_TO_SC:
+            days_to_sc = CASHFLOW_STAGE_DAYS_TO_SC[stage]
+            effective_sc_str = (today + datetime.timedelta(days=days_to_sc)).isoformat()
+            is_projected_sc = True
+
+        sc_display = f"~{effective_sc_str}" if is_projected_sc else (sc_date_str or "(no SC)")
+
+        def add_event(pay_date, pay_type, pay_amt, comm_date="", comm_amt=""):
+            if not pay_date:
+                return
+            event_rows.append([
+                week_of(pay_date),
+                pay_date,
+                customer,
+                finance_type,
+                pay_type,
+                pay_amt,
+                comm_date,
+                comm_amt,
+                stage,
+                sc_display,
+                project_id,
+                zoho_link,
+            ])
+
+        if finance_type == "LR" and effective_sc_str:
+            try:
+                sc = datetime.date.fromisoformat(effective_sc_str)
+                draw_date = _next_monday_on_or_after(sc + datetime.timedelta(days=14))
+                final_date = _next_monday_on_or_after(sc + datetime.timedelta(days=33))
+                mat = materials_est if isinstance(materials_est, (int, float)) else 0
+                draw_amt = round(base_price * 0.8 - mat, 2)
+                final_amt = round(base_price * 0.2 - CASHFLOW_LR_WARRANTY, 2)
+                comm1_amt = round(total_commission * 0.8 + referral_flat, 2)
+                comm2_amt = round(total_commission * 0.2, 2)
+
+                if lending_status not in CASHFLOW_LR_DRAW_PAID_STATUSES:
+                    add_event(draw_date.isoformat(), "LR 80% Draw", draw_amt,
+                              draw_date.isoformat(), comm1_amt)
+                add_event(final_date.isoformat(), "LR 20% Final", final_amt,
+                          final_date.isoformat(), comm2_amt)
+            except (ValueError, TypeError):
+                pass
+
+        elif finance_type == "CASH" and effective_sc_str:
+            try:
+                sc = datetime.date.fromisoformat(effective_sc_str)
+                if created_date_str:
+                    created = datetime.date.fromisoformat(created_date_str)
+                    deposit_date = created + datetime.timedelta(days=11)
+                else:
+                    deposit_date = today
+                progress_date = sc - datetime.timedelta(days=5)
+                final_date = sc + datetime.timedelta(days=26)
+
+                add_event(deposit_date.isoformat(), "Cash 20% Deposit",
+                          round(base_price * 0.2, 2),
+                          deposit_date.isoformat(), round(total_commission * 0.2, 2))
+                add_event(progress_date.isoformat(), "Cash 60% Progress",
+                          round(base_price * 0.6, 2),
+                          progress_date.isoformat(), round(total_commission * 0.6, 2))
+                add_event(final_date.isoformat(), "Cash 20% Final",
+                          round(base_price * 0.2, 2),
+                          final_date.isoformat(), round(total_commission * 0.2 + referral_flat, 2))
+            except (ValueError, TypeError):
+                pass
+
+        elif effective_sc_str:
+            try:
+                sc = datetime.date.fromisoformat(effective_sc_str)
+                add_event(sc.isoformat(), "Loan / Full Payment", base_price,
+                          sc.isoformat(), round(total_commission + referral_flat, 2))
+            except (ValueError, TypeError):
+                pass
+
+    # Sort by payment date
+    event_rows.sort(key=lambda r: r[1] if r[1] else "9999")
+
+    headers = [
+        "Week Of", "Payment Date", "Customer", "Finance Type", "Payment Type",
+        "Amount", "Commission Date", "Commission Amt",
+        "Stage", "SC / Projected SC", "Project ID", "Zoho Link",
+    ]
+    value_rows = [headers] + event_rows
+
+    sheets.values().update(
+        spreadsheetId=CASHFLOW_SHEET_ID,
+        range=f"'{tab_name}'!A1",
+        valueInputOption="USER_ENTERED",
+        body={"values": value_rows},
+    ).execute()
+
+    dollar_cols = [5, 7]  # 0-indexed: F=5, H=7
+    dollar_fmt = {"numberFormat": {"type": "CURRENCY", "pattern": '"$"#,##0.00'}}
+    format_requests = [
+        {
+            "repeatCell": {
+                "range": {"sheetId": sheet_id, "startRowIndex": 0, "endRowIndex": 1},
+                "cell": {"userEnteredFormat": {"textFormat": {"bold": True}}},
+                "fields": "userEnteredFormat.textFormat.bold",
+            }
+        },
+        {
+            "updateSheetProperties": {
+                "properties": {
+                    "sheetId": sheet_id,
+                    "gridProperties": {"frozenRowCount": 1},
+                },
+                "fields": "gridProperties.frozenRowCount",
+            }
+        },
+        *[
+            {
+                "repeatCell": {
+                    "range": {
+                        "sheetId": sheet_id,
+                        "startRowIndex": 1,
+                        "startColumnIndex": col,
+                        "endColumnIndex": col + 1,
+                    },
+                    "cell": {"userEnteredFormat": dollar_fmt},
+                    "fields": "userEnteredFormat.numberFormat",
+                }
+            }
+            for col in dollar_cols
+        ],
+    ]
+    sheets.batchUpdate(
+        spreadsheetId=CASHFLOW_SHEET_ID,
+        body={"requests": format_requests}
+    ).execute()
+    logger.info(f"_write_weekly_payments_tab: wrote {len(event_rows)} payment events")
+
+
 def _run_cashflow_batch(projects: list[dict], tab_name: str) -> dict:
     """Fetch Aurora data for each project and write the cash flow tab."""
     svc = _build_sheets_service()
@@ -4156,6 +4369,7 @@ def _run_cashflow_batch(projects: list[dict], tab_name: str) -> dict:
             rows.append({**p, "data": aurora_data})
 
     _write_cashflow_tab(svc, tab_name, rows)
+    _write_weekly_payments_tab(svc, rows)
     formula_result = _update_cashflow_formulas(svc, tab_name)
     return {
         "status": "ok",
