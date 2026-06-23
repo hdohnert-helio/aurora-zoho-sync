@@ -4679,6 +4679,9 @@ def _compute_cashflow_row(row: dict, today: datetime.date, zoho_base: str, auror
         ("CASH", 0): "Cash 20% Deposit",
         ("CASH", 1): "Cash 60% Progress",
         ("CASH", 2): "Cash 20% Final",
+        ("SE",   0): "SE Payment 1 (33%)",
+        ("SE",   1): "SE Payment 2 (33%)",
+        ("SE",   2): "SE Payment 3 (34%)",
     }
     pay_slots = [
         (payment1_date, payment1_amt, comm_payout1_date, comm_payout1_amt),
@@ -5249,6 +5252,9 @@ async def cashflow_apply_overrides():
             ("CASH", "pay1"): "Cash 20% Deposit",
             ("CASH", "pay2"): "Cash 60% Progress",
             ("CASH", "pay3"): "Cash 20% Final",
+            ("SE",   "pay1"): "SE Payment 1 (33%)",
+            ("SE",   "pay2"): "SE Payment 2 (33%)",
+            ("SE",   "pay3"): "SE Payment 3 (34%)",
         }
 
         event_rows = []
