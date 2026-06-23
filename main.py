@@ -4156,11 +4156,111 @@ def _run_cashflow_batch(projects: list[dict], tab_name: str) -> dict:
             rows.append({**p, "data": aurora_data})
 
     _write_cashflow_tab(svc, tab_name, rows)
+    formula_result = _update_cashflow_formulas(svc, tab_name)
     return {
         "status": "ok",
         "tab": tab_name,
         "total": len(rows),
+        "formulas": formula_result,
     }
+
+
+CASHFLOW_MAIN_TAB = "Cash Flow"
+
+
+def _update_cashflow_formulas(svc, pipeline_tab_name: str) -> dict:
+    """
+    Rewrite the SUMPRODUCT formulas in the 'Cash Flow' tab to pull from
+    the given pipeline_tab_name instead of the old Jobs tab.
+
+    Rows updated (found by label in column A):
+      • LR 80% Draws / Cash 60% Pre-Install  → Payment 1 (all) + Cash Payment 2 (60%)
+      • LR 20% Finals / Cash 20% Finals       → LR Payment 2 + Cash Payment 3
+      • Commissions (Payout 1)                → Comm Payout 1
+      • Commissions (Payout 2)                → Comm Payout 2 + Comm Payout 3
+    """
+    sheets = svc.spreadsheets()
+
+    # Read column A (up to row 60) to locate label rows
+    col_a_vals = sheets.values().get(
+        spreadsheetId=CASHFLOW_SHEET_ID,
+        range=f"'{CASHFLOW_MAIN_TAB}'!A1:A60",
+        valueRenderOption="FORMATTED_VALUE",
+    ).execute().get("values", [])
+    col_a = [r[0].strip() if r else "" for r in col_a_vals]
+
+    def find_row(fragment):
+        for i, v in enumerate(col_a):
+            if fragment.lower() in v.lower():
+                return i + 1  # 1-indexed sheet row
+        return None
+
+    row_draws   = find_row("LR 80% Draws")
+    row_finals  = find_row("LR 20% Finals")
+    row_comm1   = find_row("Commissions (Payout 1)")
+    row_comm2   = find_row("Commissions (Payout 2)")
+
+    missing = [k for k, v in {"lr_draws": row_draws, "lr_finals": row_finals,
+                               "comm1": row_comm1, "comm2": row_comm2}.items() if not v]
+    if missing:
+        return {"error": f"Could not find rows: {missing}"}
+
+    # Read row 2 to discover week-date columns (D onward)
+    row2 = sheets.values().get(
+        spreadsheetId=CASHFLOW_SHEET_ID,
+        range=f"'{CASHFLOW_MAIN_TAB}'!2:2",
+        valueRenderOption="FORMATTED_VALUE",
+    ).execute().get("values", [[]])[0]
+
+    start_col = 3  # 0-indexed — column D
+    end_col = start_col
+    for i in range(start_col, len(row2)):
+        if row2[i]:
+            end_col = i
+    num_weeks = end_col - start_col + 1
+
+    def col_letter(idx):
+        if idx < 26:
+            return chr(65 + idx)
+        return chr(65 + idx // 26 - 1) + chr(65 + idx % 26)
+
+    p = f"'{pipeline_tab_name}'"
+    updates = []
+
+    for w in range(num_weeks):
+        c = col_letter(start_col + w)
+
+        # Payment 1 (LR draw / loan) + Cash Payment 2 (60% progress)
+        f_draws = (
+            f"=SUMPRODUCT(ISNUMBER({p}!$I$2:$I$200)*({p}!$I$2:$I$200>={c}$2)*({p}!$I$2:$I$200<{c}$2+7)*ISNUMBER({p}!$J$2:$J$200)*({p}!$J$2:$J$200))"
+            f"+SUMPRODUCT(ISNUMBER({p}!$K$2:$K$200)*({p}!$K$2:$K$200>={c}$2)*({p}!$K$2:$K$200<{c}$2+7)*(LEFT({p}!$C$2:$C$200,4)=\"CASH\")*ISNUMBER({p}!$L$2:$L$200)*({p}!$L$2:$L$200))"
+        )
+        # LR Payment 2 (20% final) + Cash Payment 3 (20% final)
+        f_finals = (
+            f"=SUMPRODUCT(ISNUMBER({p}!$K$2:$K$200)*({p}!$K$2:$K$200>={c}$2)*({p}!$K$2:$K$200<{c}$2+7)*({p}!$C$2:$C$200=\"LR\")*ISNUMBER({p}!$L$2:$L$200)*({p}!$L$2:$L$200))"
+            f"+SUMPRODUCT(ISNUMBER({p}!$M$2:$M$200)*({p}!$M$2:$M$200>={c}$2)*({p}!$M$2:$M$200<{c}$2+7)*(LEFT({p}!$C$2:$C$200,4)=\"CASH\")*ISNUMBER({p}!$N$2:$N$200)*({p}!$N$2:$N$200))"
+        )
+        # Comm Payout 1
+        f_comm1 = (
+            f"=SUMPRODUCT(ISNUMBER({p}!$T$2:$T$200)*({p}!$T$2:$T$200>={c}$2)*({p}!$T$2:$T$200<{c}$2+7)*ISNUMBER({p}!$U$2:$U$200)*({p}!$U$2:$U$200))"
+        )
+        # Comm Payout 2 + Comm Payout 3
+        f_comm2 = (
+            f"=SUMPRODUCT(ISNUMBER({p}!$V$2:$V$200)*({p}!$V$2:$V$200>={c}$2)*({p}!$V$2:$V$200<{c}$2+7)*ISNUMBER({p}!$W$2:$W$200)*({p}!$W$2:$W$200))"
+            f"+SUMPRODUCT(ISNUMBER({p}!$X$2:$X$200)*({p}!$X$2:$X$200>={c}$2)*({p}!$X$2:$X$200<{c}$2+7)*ISNUMBER({p}!$Y$2:$Y$200)*({p}!$Y$2:$Y$200))"
+        )
+
+        for row, formula in [(row_draws, f_draws), (row_finals, f_finals),
+                              (row_comm1, f_comm1), (row_comm2, f_comm2)]:
+            updates.append({"range": f"'{CASHFLOW_MAIN_TAB}'!{c}{row}", "values": [[formula]]})
+
+    sheets.values().batchUpdate(
+        spreadsheetId=CASHFLOW_SHEET_ID,
+        body={"valueInputOption": "USER_ENTERED", "data": updates},
+    ).execute()
+
+    logger.info(f"_update_cashflow_formulas: updated {len(updates)} cells → '{pipeline_tab_name}'")
+    return {"status": "ok", "pipeline_tab": pipeline_tab_name, "cells_updated": len(updates)}
 
 
 @app.post("/cashflow/run")
