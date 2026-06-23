@@ -4055,6 +4055,18 @@ def _write_cashflow_tab(svc, tab_name: str, rows: list[dict]) -> None:
             except (ValueError, TypeError):
                 pass
 
+        # Apply manual payment date overrides (from Overrides tab)
+        pov = row.get("payment_overrides", {})
+        if pov.get("payment1"):
+            payment1_date = pov["payment1"]
+            comm_payout1_date = pov["payment1"]
+        if pov.get("payment2"):
+            payment2_date = pov["payment2"]
+            comm_payout2_date = pov["payment2"]
+        if pov.get("payment3"):
+            payment3_date = pov["payment3"]
+            comm_payout3_date = pov["payment3"]
+
         notes_col = subcontractor_notes
 
         value_rows.append([
@@ -4156,18 +4168,16 @@ def _ensure_overrides_tab(svc) -> None:
     ).execute()
     sheet_id = resp["replies"][0]["addSheet"]["properties"]["sheetId"]
 
-    # Write headers + example row
     sheets.values().update(
         spreadsheetId=CASHFLOW_SHEET_ID,
         range=f"'{CASHFLOW_OVERRIDES_TAB}'!A1",
         valueInputOption="USER_ENTERED",
         body={"values": [
-            ["Project ID", "Override SC Date", "Notes"],
-            ["# Example: PROJ-1234", "2026-08-01", "Customer delayed permit"],
+            ["Project ID", "Customer", "Payment 1 Date", "Payment 2 Date", "Payment 3 Date", "Notes"],
+            ["# Example: PROJ-1234", "", "2026-08-01", "", "", "LR draw delayed — paid week of 8/1"],
         ]},
     ).execute()
 
-    # Bold header, freeze row 1
     sheets.batchUpdate(
         spreadsheetId=CASHFLOW_SHEET_ID,
         body={"requests": [
@@ -4192,36 +4202,48 @@ def _ensure_overrides_tab(svc) -> None:
     logger.info("_ensure_overrides_tab: created Overrides tab")
 
 
-def _read_sc_overrides(svc) -> dict:
+def _read_payment_overrides(svc) -> dict:
     """
-    Read the Overrides tab and return a dict of {project_id: override_sc_date_str}.
-    Rows where Project ID starts with '#' are treated as comments and skipped.
+    Read the Overrides tab and return a dict keyed by project_id:
+      {project_id: {"payment1": "YYYY-MM-DD", "payment2": "YYYY-MM-DD", "payment3": "YYYY-MM-DD"}}
+    Only populated keys are included. Rows starting with '#' are skipped.
+    Columns: A=Project ID, B=Customer (ignored), C=Payment 1, D=Payment 2, E=Payment 3, F=Notes
     """
     sheets = svc.spreadsheets()
     try:
         data = sheets.values().get(
             spreadsheetId=CASHFLOW_SHEET_ID,
-            range=f"'{CASHFLOW_OVERRIDES_TAB}'!A2:B200",
+            range=f"'{CASHFLOW_OVERRIDES_TAB}'!A2:E200",
             valueRenderOption="FORMATTED_VALUE",
         ).execute().get("values", [])
     except Exception:
         return {}
 
+    def valid_date(s):
+        try:
+            datetime.date.fromisoformat(s.strip())
+            return s.strip()
+        except (ValueError, AttributeError):
+            return None
+
     overrides = {}
     for row in data:
-        if len(row) < 2:
+        if not row:
             continue
-        proj_id = row[0].strip()
-        sc_date = row[1].strip()
+        proj_id = row[0].strip() if row else ""
         if not proj_id or proj_id.startswith("#"):
             continue
-        # Validate date format
-        try:
-            datetime.date.fromisoformat(sc_date)
-            overrides[proj_id] = sc_date
-        except ValueError:
-            logger.warning(f"_read_sc_overrides: invalid date '{sc_date}' for {proj_id}, skipping")
-    logger.info(f"_read_sc_overrides: loaded {len(overrides)} override(s)")
+        entry = {}
+        if len(row) > 2 and valid_date(row[2]):
+            entry["payment1"] = valid_date(row[2])
+        if len(row) > 3 and valid_date(row[3]):
+            entry["payment2"] = valid_date(row[3])
+        if len(row) > 4 and valid_date(row[4]):
+            entry["payment3"] = valid_date(row[4])
+        if entry:
+            overrides[proj_id] = entry
+            logger.info(f"_read_payment_overrides: {proj_id} → {entry}")
+    logger.info(f"_read_payment_overrides: loaded {len(overrides)} override(s)")
     return overrides
 
 
@@ -4326,11 +4348,13 @@ def _write_weekly_payments_tab(svc, rows: list[dict]) -> None:
                 zoho_link,
             ])
 
+        pov = row.get("payment_overrides", {})
+
         if finance_type == "LR" and effective_sc_str:
             try:
                 sc = datetime.date.fromisoformat(effective_sc_str)
-                draw_date = _next_monday_on_or_after(sc + datetime.timedelta(days=14))
-                final_date = _next_monday_on_or_after(sc + datetime.timedelta(days=33))
+                draw_date_str = pov.get("payment1") or _next_monday_on_or_after(sc + datetime.timedelta(days=14)).isoformat()
+                final_date_str = pov.get("payment2") or _next_monday_on_or_after(sc + datetime.timedelta(days=33)).isoformat()
                 mat = materials_est if isinstance(materials_est, (int, float)) else 0
                 draw_amt = round(base_price * 0.8 - mat, 2)
                 final_amt = round(base_price * 0.2 - CASHFLOW_LR_WARRANTY, 2)
@@ -4338,10 +4362,8 @@ def _write_weekly_payments_tab(svc, rows: list[dict]) -> None:
                 comm2_amt = round(total_commission * 0.2, 2)
 
                 if lending_status not in CASHFLOW_LR_DRAW_PAID_STATUSES:
-                    add_event(draw_date.isoformat(), "LR 80% Draw", draw_amt,
-                              draw_date.isoformat(), comm1_amt)
-                add_event(final_date.isoformat(), "LR 20% Final", final_amt,
-                          final_date.isoformat(), comm2_amt)
+                    add_event(draw_date_str, "LR 80% Draw", draw_amt, draw_date_str, comm1_amt)
+                add_event(final_date_str, "LR 20% Final", final_amt, final_date_str, comm2_amt)
             except (ValueError, TypeError):
                 pass
 
@@ -4350,29 +4372,30 @@ def _write_weekly_payments_tab(svc, rows: list[dict]) -> None:
                 sc = datetime.date.fromisoformat(effective_sc_str)
                 if created_date_str:
                     created = datetime.date.fromisoformat(created_date_str)
-                    deposit_date = created + datetime.timedelta(days=11)
+                    deposit_date_str = pov.get("payment1") or (created + datetime.timedelta(days=11)).isoformat()
                 else:
-                    deposit_date = today
-                progress_date = sc - datetime.timedelta(days=5)
-                final_date = sc + datetime.timedelta(days=26)
+                    deposit_date_str = pov.get("payment1") or today.isoformat()
+                progress_date_str = pov.get("payment2") or (sc - datetime.timedelta(days=5)).isoformat()
+                final_date_str = pov.get("payment3") or (sc + datetime.timedelta(days=26)).isoformat()
 
-                add_event(deposit_date.isoformat(), "Cash 20% Deposit",
+                add_event(deposit_date_str, "Cash 20% Deposit",
                           round(base_price * 0.2, 2),
-                          deposit_date.isoformat(), round(total_commission * 0.2, 2))
-                add_event(progress_date.isoformat(), "Cash 60% Progress",
+                          deposit_date_str, round(total_commission * 0.2, 2))
+                add_event(progress_date_str, "Cash 60% Progress",
                           round(base_price * 0.6, 2),
-                          progress_date.isoformat(), round(total_commission * 0.6, 2))
-                add_event(final_date.isoformat(), "Cash 20% Final",
+                          progress_date_str, round(total_commission * 0.6, 2))
+                add_event(final_date_str, "Cash 20% Final",
                           round(base_price * 0.2, 2),
-                          final_date.isoformat(), round(total_commission * 0.2 + referral_flat, 2))
+                          final_date_str, round(total_commission * 0.2 + referral_flat, 2))
             except (ValueError, TypeError):
                 pass
 
         elif effective_sc_str:
             try:
                 sc = datetime.date.fromisoformat(effective_sc_str)
-                add_event(sc.isoformat(), "Loan / Full Payment", base_price,
-                          sc.isoformat(), round(total_commission + referral_flat, 2))
+                pay_date_str = pov.get("payment1") or sc.isoformat()
+                add_event(pay_date_str, "Loan / Full Payment", base_price,
+                          pay_date_str, round(total_commission + referral_flat, 2))
             except (ValueError, TypeError):
                 pass
 
@@ -4442,7 +4465,7 @@ def _run_cashflow_batch(projects: list[dict], tab_name: str) -> dict:
         return {"status": "failed", "reason": "could not build Sheets service"}
 
     _ensure_overrides_tab(svc)
-    overrides = _read_sc_overrides(svc)
+    overrides = _read_payment_overrides(svc)
 
     rows = []
     for p in projects:
@@ -4454,9 +4477,7 @@ def _run_cashflow_batch(projects: list[dict], tab_name: str) -> dict:
         row = {**p, "data": aurora_data}
         proj_id = p.get("project_id", "")
         if proj_id in overrides:
-            row["substantial_completion"] = overrides[proj_id]
-            row["sc_overridden"] = True
-            logger.info(f"cashflow_batch: SC override applied to {proj_id} → {overrides[proj_id]}")
+            row["payment_overrides"] = overrides[proj_id]
         rows.append(row)
 
     _write_cashflow_tab(svc, tab_name, rows)
@@ -4466,7 +4487,7 @@ def _run_cashflow_batch(projects: list[dict], tab_name: str) -> dict:
         "status": "ok",
         "tab": tab_name,
         "total": len(rows),
-        "overrides_applied": sum(1 for r in rows if r.get("sc_overridden")),
+        "overrides_applied": sum(1 for r in rows if r.get("payment_overrides")),
         "formulas": formula_result,
     }
 
