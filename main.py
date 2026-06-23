@@ -4636,9 +4636,9 @@ def _compute_cashflow_row(row: dict, today: datetime.date, zoho_base: str, auror
         payment3_date = pov["payment3"]
         comm_payout3_date = pov["payment3"]
 
-    # Cash materials cost: $1.26/W at 60% progress payment date
+    # Cash materials cost: $1.26/W at 60% progress (Cash) or Payment 2 (SE) date
     cash_materials_date = cash_materials_amt = ""
-    if finance_type == "CASH" and system_watts and payment2_date:
+    if finance_type in ("CASH", "SE") and system_watts and payment2_date:
         cash_materials_date = payment2_date
         cash_materials_amt = round(system_watts * CASHFLOW_MATERIALS_PPW, 2)
 
@@ -4649,7 +4649,7 @@ def _compute_cashflow_row(row: dict, today: datetime.date, zoho_base: str, auror
         # Final payment date by finance type
         if finance_type == "LR":
             final_date_for_ct = payment2_date
-        elif finance_type == "CASH":
+        elif finance_type in ("CASH", "SE"):
             final_date_for_ct = payment3_date
         else:
             final_date_for_ct = payment1_date
