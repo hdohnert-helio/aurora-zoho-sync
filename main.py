@@ -4458,8 +4458,229 @@ def _write_weekly_payments_tab(svc, rows: list[dict]) -> None:
     logger.info(f"_write_weekly_payments_tab: wrote {len(event_rows)} payment events")
 
 
+def _compute_cashflow_row(row: dict, today: datetime.date, zoho_base: str, aurora_base: str):
+    """
+    Compute the Pipeline tab row values and weekly payment events for a single
+    project row (with 'data' key containing Aurora fields and optional
+    'payment_overrides' key).
+
+    Returns (pipeline_row_list, pay_events_list).
+    pay_events_list entries: [pay_date, customer, finance_type, pay_type,
+                               pay_amt, comm_date, comm_amt, stage, sc_display,
+                               project_id, zoho_link]  (11 fields, week_of prepended by caller)
+    """
+    zoho_id = row.get("zoho_record_id", "")
+    aurora_id = row.get("aurora_project_id", "")
+    zoho_link = f'=HYPERLINK("{zoho_base}{zoho_id}","Zoho")' if zoho_id else ""
+    aurora_link = f'=HYPERLINK("{aurora_base}{aurora_id}","Aurora")' if aurora_id else ""
+
+    finance_type = row.get("finance_type", "")
+    lending_status = row.get("lending_status", "")
+    stage = row.get("stage", "")
+    sc_date_str = row.get("substantial_completion", "")
+    created_date_str = row.get("created_date", "")
+    d = row.get("data", {})
+    pov = row.get("payment_overrides", {})
+    customer = row.get("customer", "")
+    project_id = row.get("project_id", "")
+
+    system_watts = d.get("system_size_watts") or int(row.get("system_kw_zoho", 0) * 1000)
+    system_kw = round(system_watts / 1000, 3) if system_watts else row.get("system_kw_zoho", 0)
+    base_price = d.get("base_price") or row.get("base_price_zoho", 0)
+    rev_ppw = round(base_price / system_watts, 4) if system_watts else row.get("price_per_watt_zoho", 0)
+    base_ppw = base_price / system_watts if system_watts else 0
+    base_commission = max(0, (base_ppw - COMMISSION_PPW_FLOOR) * system_watts) if system_watts else 0
+    consultant_comp_ppw = float(d.get("consultant_comp_ppw") or 0)
+    total_commission = round(base_commission + consultant_comp_ppw * system_watts, 2)
+    referral_flat = float(d.get("referral_flat") or 0)
+    subcontractor_total = d.get("subcontractor_total", 0)
+    subcontractor_notes = d.get("subcontractor_notes", "")
+    materials_est = round(system_watts * CASHFLOW_MATERIALS_PPW, 2) if system_watts and finance_type == "LR" else ""
+
+    is_projected_sc = False
+    effective_sc_str = sc_date_str
+    if not sc_date_str and stage in CASHFLOW_STAGE_DAYS_TO_SC:
+        effective_sc_str = (today + datetime.timedelta(days=CASHFLOW_STAGE_DAYS_TO_SC[stage])).isoformat()
+        is_projected_sc = True
+    sc_display = f"~{effective_sc_str}" if is_projected_sc else (sc_date_str or "(no SC)")
+
+    payment1_date = payment1_amt = ""
+    payment2_date = payment2_amt = ""
+    payment3_date = payment3_amt = ""
+    comm_payout1_date = comm_payout1_amt = ""
+    comm_payout2_date = comm_payout2_amt = ""
+    comm_payout3_date = comm_payout3_amt = ""
+
+    if finance_type == "LR" and effective_sc_str:
+        try:
+            sc = datetime.date.fromisoformat(effective_sc_str)
+            mat = materials_est if isinstance(materials_est, (int, float)) else 0
+            payment1_date = _next_monday_on_or_after(sc + datetime.timedelta(days=14)).isoformat()
+            payment1_amt = round(base_price * 0.8 - mat, 2)
+            payment2_date = _next_monday_on_or_after(sc + datetime.timedelta(days=33)).isoformat()
+            payment2_amt = round(base_price * 0.2 - CASHFLOW_LR_WARRANTY, 2)
+            comm_payout1_date = payment1_date
+            comm_payout1_amt = round(total_commission * 0.8 + referral_flat, 2)
+            comm_payout2_date = payment2_date
+            comm_payout2_amt = round(total_commission * 0.2, 2)
+            if lending_status in CASHFLOW_LR_DRAW_PAID_STATUSES:
+                payment1_date = payment1_amt = ""
+                comm_payout1_date = comm_payout1_amt = ""
+        except (ValueError, TypeError):
+            pass
+
+    elif finance_type == "CASH" and effective_sc_str:
+        try:
+            sc = datetime.date.fromisoformat(effective_sc_str)
+            if created_date_str:
+                created = datetime.date.fromisoformat(created_date_str)
+                payment1_date = (created + datetime.timedelta(days=11)).isoformat()
+            else:
+                payment1_date = today.isoformat()
+            payment2_date = (sc - datetime.timedelta(days=5)).isoformat()
+            payment3_date = (sc + datetime.timedelta(days=26)).isoformat()
+            payment1_amt = round(base_price * 0.2, 2)
+            payment2_amt = round(base_price * 0.6, 2)
+            payment3_amt = round(base_price * 0.2, 2)
+            comm_payout1_date = payment1_date
+            comm_payout1_amt = round(total_commission * 0.2, 2)
+            comm_payout2_date = payment2_date
+            comm_payout2_amt = round(total_commission * 0.6, 2)
+            comm_payout3_date = payment3_date
+            comm_payout3_amt = round(total_commission * 0.2 + referral_flat, 2)
+        except (ValueError, TypeError):
+            pass
+
+    elif effective_sc_str:
+        try:
+            sc = datetime.date.fromisoformat(effective_sc_str)
+            payment1_date = sc.isoformat()
+            payment1_amt = base_price
+            comm_payout1_date = sc.isoformat()
+            comm_payout1_amt = round(total_commission + referral_flat, 2)
+        except (ValueError, TypeError):
+            pass
+
+    # Apply manual payment date overrides
+    if pov.get("payment1"):
+        payment1_date = pov["payment1"]
+        comm_payout1_date = pov["payment1"]
+    if pov.get("payment2"):
+        payment2_date = pov["payment2"]
+        comm_payout2_date = pov["payment2"]
+    if pov.get("payment3"):
+        payment3_date = pov["payment3"]
+        comm_payout3_date = pov["payment3"]
+
+    pipeline_row = [
+        customer, project_id, finance_type, stage, sc_display,
+        system_kw, rev_ppw, base_price,
+        payment1_date, payment1_amt,
+        payment2_date, payment2_amt,
+        payment3_date, payment3_amt,
+        materials_est, subcontractor_total if subcontractor_total else "", subcontractor_notes,
+        referral_flat if referral_flat else "", total_commission,
+        comm_payout1_date, comm_payout1_amt,
+        comm_payout2_date, comm_payout2_amt,
+        comm_payout3_date, comm_payout3_amt,
+        zoho_link, aurora_link,
+    ]
+
+    PAYMENT_TYPE_MAP = {
+        ("LR",   0): "LR 80% Draw",
+        ("LR",   1): "LR 20% Final",
+        ("CASH", 0): "Cash 20% Deposit",
+        ("CASH", 1): "Cash 60% Progress",
+        ("CASH", 2): "Cash 20% Final",
+    }
+    pay_slots = [
+        (payment1_date, payment1_amt, comm_payout1_date, comm_payout1_amt),
+        (payment2_date, payment2_amt, comm_payout2_date, comm_payout2_amt),
+        (payment3_date, payment3_amt, comm_payout3_date, comm_payout3_amt),
+    ]
+    pay_events = []
+    for i, (pd, pa, cd, ca) in enumerate(pay_slots):
+        if not pd:
+            continue
+        pay_type = PAYMENT_TYPE_MAP.get((finance_type, i), "Loan / Full Payment")
+        pay_events.append([pd, customer, finance_type, pay_type, pa, cd, ca, stage, sc_display, project_id, zoho_link])
+
+    return pipeline_row, pay_events
+
+
+def _write_weekly_payments_from_events(svc, weekly_events: list) -> None:
+    """Write the Weekly Payments tab from pre-sorted event rows."""
+    sheets = svc.spreadsheets()
+    tab_name = CASHFLOW_WEEKLY_TAB
+
+    existing = sheets.get(spreadsheetId=CASHFLOW_SHEET_ID).execute()
+    weekly_sheet_id = None
+    for s in existing.get("sheets", []):
+        if s["properties"]["title"] == tab_name:
+            sheets.batchUpdate(
+                spreadsheetId=CASHFLOW_SHEET_ID,
+                body={"requests": [{"deleteSheet": {"sheetId": s["properties"]["sheetId"]}}]}
+            ).execute()
+            break
+
+    resp = sheets.batchUpdate(
+        spreadsheetId=CASHFLOW_SHEET_ID,
+        body={"requests": [{"addSheet": {"properties": {"title": tab_name}}}]}
+    ).execute()
+    weekly_sheet_id = resp["replies"][0]["addSheet"]["properties"]["sheetId"]
+
+    headers = [
+        "Week Of", "Payment Date", "Customer", "Finance Type", "Payment Type",
+        "Amount", "Commission Date", "Commission Amt",
+        "Stage", "SC / Projected SC", "Project ID", "Zoho Link",
+    ]
+    sheets.values().update(
+        spreadsheetId=CASHFLOW_SHEET_ID,
+        range=f"'{tab_name}'!A1",
+        valueInputOption="USER_ENTERED",
+        body={"values": [headers] + weekly_events},
+    ).execute()
+
+    dollar_fmt = {"numberFormat": {"type": "CURRENCY", "pattern": '"$"#,##0.00'}}
+    sheets.batchUpdate(
+        spreadsheetId=CASHFLOW_SHEET_ID,
+        body={"requests": [
+            {
+                "repeatCell": {
+                    "range": {"sheetId": weekly_sheet_id, "startRowIndex": 0, "endRowIndex": 1},
+                    "cell": {"userEnteredFormat": {"textFormat": {"bold": True}}},
+                    "fields": "userEnteredFormat.textFormat.bold",
+                }
+            },
+            {
+                "updateSheetProperties": {
+                    "properties": {"sheetId": weekly_sheet_id, "gridProperties": {"frozenRowCount": 1}},
+                    "fields": "gridProperties.frozenRowCount",
+                }
+            },
+            *[
+                {
+                    "repeatCell": {
+                        "range": {"sheetId": weekly_sheet_id, "startRowIndex": 1,
+                                  "startColumnIndex": col, "endColumnIndex": col + 1},
+                        "cell": {"userEnteredFormat": dollar_fmt},
+                        "fields": "userEnteredFormat.numberFormat",
+                    }
+                }
+                for col in [5, 7]
+            ],
+        ]},
+    ).execute()
+    logger.info(f"_write_weekly_payments_from_events: wrote {len(weekly_events)} events")
+
+
 def _run_cashflow_batch(projects: list[dict], tab_name: str) -> dict:
-    """Fetch Aurora data for each project and write the cash flow tab."""
+    """
+    Fetch Aurora data one project at a time and stream rows directly to the
+    Pipeline tab, keeping memory usage flat regardless of project count.
+    Weekly payment events are accumulated as minimal 12-field tuples only.
+    """
+    import gc
     svc = _build_sheets_service()
     if not svc:
         return {"status": "failed", "reason": "could not build Sheets service"}
@@ -4467,27 +4688,132 @@ def _run_cashflow_batch(projects: list[dict], tab_name: str) -> dict:
     _ensure_overrides_tab(svc)
     overrides = _read_payment_overrides(svc)
 
-    rows = []
+    # --- Set up Pipeline tab (headers + formatting shell) ---
+    sheets = svc.spreadsheets()
+    existing = sheets.get(spreadsheetId=CASHFLOW_SHEET_ID).execute()
+    for s in existing.get("sheets", []):
+        if s["properties"]["title"] == tab_name:
+            sheets.batchUpdate(
+                spreadsheetId=CASHFLOW_SHEET_ID,
+                body={"requests": [{"deleteSheet": {"sheetId": s["properties"]["sheetId"]}}]}
+            ).execute()
+            break
+    resp = sheets.batchUpdate(
+        spreadsheetId=CASHFLOW_SHEET_ID,
+        body={"requests": [{"addSheet": {"properties": {"title": tab_name}}}]}
+    ).execute()
+    sheet_id = resp["replies"][0]["addSheet"]["properties"]["sheetId"]
+
+    pipeline_headers = [
+        "Customer", "Project ID", "Finance Type", "Stage",
+        "SC / Projected SC", "kW", "Rev $/W", "Total Revenue",
+        "Payment 1 Date", "Payment 1 Amt",
+        "Payment 2 Date", "Payment 2 Amt",
+        "Payment 3 Date", "Payment 3 Amt",
+        "Materials (est)", "Subcontractor Cost", "Subcontractor Notes",
+        "Referral Payout", "Total Commission",
+        "Comm Payout 1 Date", "Comm Payout 1 Amt",
+        "Comm Payout 2 Date", "Comm Payout 2 Amt",
+        "Comm Payout 3 Date", "Comm Payout 3 Amt",
+        "Zoho Link", "Aurora Link",
+    ]
+    sheets.values().update(
+        spreadsheetId=CASHFLOW_SHEET_ID,
+        range=f"'{tab_name}'!A1",
+        valueInputOption="USER_ENTERED",
+        body={"values": [pipeline_headers]},
+    ).execute()
+
+    zoho_base = "https://crm.zoho.com/crm/heliosolar/tab/CustomModule6/"
+    aurora_base = "https://v2.aurorasolar.com/projects/"
+    today = datetime.date.today()
+
+    def week_of(date_str):
+        try:
+            d = datetime.date.fromisoformat(date_str)
+            return (d - datetime.timedelta(days=d.weekday())).isoformat()
+        except (ValueError, TypeError):
+            return ""
+
+    total = 0
+    overrides_applied = 0
+    weekly_events = []  # list of 12-field lists — small footprint
+
     for p in projects:
         logger.info(f"cashflow_batch: fetching {p['aurora_project_id']} ({p['customer']})")
         aurora_data = _get_commission_data_for_project(p["aurora_project_id"])
         if "error" in aurora_data:
             logger.info(f"cashflow_batch: skipping {p['customer']} — {aurora_data['error']}")
+            gc.collect()
             continue
-        row = {**p, "data": aurora_data}
-        proj_id = p.get("project_id", "")
-        if proj_id in overrides:
-            row["payment_overrides"] = overrides[proj_id]
-        rows.append(row)
 
-    _write_cashflow_tab(svc, tab_name, rows)
-    _write_weekly_payments_tab(svc, rows)
+        proj_id = p.get("project_id", "")
+        pov = overrides.get(proj_id, {})
+        if pov:
+            overrides_applied += 1
+
+        # Combine project + aurora data into one temp row dict, process it,
+        # then discard — never accumulate into a list of full rows
+        row = {**p, "data": aurora_data, "payment_overrides": pov}
+        pipeline_row, pay_events = _compute_cashflow_row(row, today, zoho_base, aurora_base)
+        del row, aurora_data
+        gc.collect()
+
+        # Append pipeline row immediately
+        sheets.values().append(
+            spreadsheetId=CASHFLOW_SHEET_ID,
+            range=f"'{tab_name}'!A1",
+            valueInputOption="USER_ENTERED",
+            insertDataOption="INSERT_ROWS",
+            body={"values": [pipeline_row]},
+        ).execute()
+
+        # Accumulate only minimal weekly event tuples
+        for evt in pay_events:
+            weekly_events.append([week_of(evt[0])] + evt)
+
+        total += 1
+
+    # Apply Pipeline tab formatting
+    dollar_fmt = {"numberFormat": {"type": "CURRENCY", "pattern": '"$"#,##0.00'}}
+    format_requests = [
+        {
+            "repeatCell": {
+                "range": {"sheetId": sheet_id, "startRowIndex": 0, "endRowIndex": 1},
+                "cell": {"userEnteredFormat": {"textFormat": {"bold": True}}},
+                "fields": "userEnteredFormat.textFormat.bold",
+            }
+        },
+        {
+            "updateSheetProperties": {
+                "properties": {"sheetId": sheet_id, "gridProperties": {"frozenRowCount": 1}},
+                "fields": "gridProperties.frozenRowCount",
+            }
+        },
+        *[
+            {
+                "repeatCell": {
+                    "range": {"sheetId": sheet_id, "startRowIndex": 1,
+                              "startColumnIndex": col, "endColumnIndex": col + 1},
+                    "cell": {"userEnteredFormat": dollar_fmt},
+                    "fields": "userEnteredFormat.numberFormat",
+                }
+            }
+            for col in [7, 9, 11, 13, 14, 15, 17, 18, 20, 22, 24]
+        ],
+    ]
+    sheets.batchUpdate(spreadsheetId=CASHFLOW_SHEET_ID, body={"requests": format_requests}).execute()
+
+    # Write Weekly Payments tab
+    weekly_events.sort(key=lambda r: r[1] if r[1] else "9999")
+    _write_weekly_payments_from_events(svc, weekly_events)
+
     formula_result = _update_cashflow_formulas(svc, tab_name)
     return {
         "status": "ok",
         "tab": tab_name,
-        "total": len(rows),
-        "overrides_applied": sum(1 for r in rows if r.get("payment_overrides")),
+        "total": total,
+        "overrides_applied": overrides_applied,
         "formulas": formula_result,
     }
 
