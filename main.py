@@ -3746,6 +3746,8 @@ CASHFLOW_FULLY_PAID_STATUSES = {
     "LR - Activation Package Paid",
     "Cash - paid in full",
     "CF - Phase 2 Funded",
+    "SG - PTO Package Paid",
+    "SE- Final 1/3 Payment Funded",
 }
 
 # LR statuses where the 80% draw has already been received — show only 20% final
@@ -3838,6 +3840,8 @@ def _fetch_all_cashflow_projects(cutoff_date: str = "2026-01-01") -> list[dict]:
             is_installed = bool(substantial_completion) or stage in CASHFLOW_INSTALLED_STAGES
             is_pipeline = stage in CASHFLOW_PIPELINE_STAGES
             if not is_installed and not is_pipeline:
+                continue
+            if stage == "Project Closeout":
                 continue
             lending_status = (r.get("Lending_Status") or "").strip()
             # Skip fully paid projects — all payments received, nothing pending
