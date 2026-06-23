@@ -3752,6 +3752,7 @@ CASHFLOW_FULLY_PAID_STATUSES = {
 CASHFLOW_LR_DRAW_PAID_STATUSES = {
     "LR - Install Package Paid",
     "LR - Activation Package Submitted",
+    "Cash - 20PCT deposit paid",
 }
 
 CASHFLOW_PIPELINE_STAGES = {
@@ -3778,14 +3779,14 @@ def _classify_finance_type(lending_status: str) -> str:
     s = (lending_status or "").strip().upper()
     if s.startswith("LR"):
         return "LR"
-    if s == "CF":
-        return "CF"
-    if s in ("SG", "SO"):
-        return "SG"
-    if s in ("SE", "SMART E LOAN", "SMART E"):
-        return "SE"
-    if s == "CASH":
+    if s.startswith("CASH"):
         return "CASH"
+    if s.startswith("CF"):
+        return "CF"
+    if s in ("SG", "SO") or s.startswith("SG"):
+        return "SG"
+    if s in ("SE", "SMART E LOAN", "SMART E") or s.startswith("SE"):
+        return "SE"
     return s or "UNKNOWN"
 
 
@@ -4550,6 +4551,10 @@ def _compute_cashflow_row(row: dict, today: datetime.date, zoho_base: str, auror
             comm_payout2_amt = round(total_commission * 0.6, 2)
             comm_payout3_date = payment3_date
             comm_payout3_amt = round(total_commission * 0.2 + referral_flat, 2)
+            # 20% deposit already collected — clear Payment 1
+            if lending_status in CASHFLOW_LR_DRAW_PAID_STATUSES:
+                payment1_date = payment1_amt = ""
+                comm_payout1_date = comm_payout1_amt = ""
         except (ValueError, TypeError):
             pass
 
