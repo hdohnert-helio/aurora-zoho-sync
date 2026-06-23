@@ -4579,6 +4579,12 @@ def _compute_cashflow_row(row: dict, today: datetime.date, zoho_base: str, auror
         payment3_date = pov["payment3"]
         comm_payout3_date = pov["payment3"]
 
+    # Cash materials cost: $1.26/W at 60% progress payment date
+    cash_materials_date = cash_materials_amt = ""
+    if finance_type == "CASH" and system_watts and payment2_date:
+        cash_materials_date = payment2_date
+        cash_materials_amt = round(system_watts * CASHFLOW_MATERIALS_PPW, 2)
+
     # CT Green Estates cost: $0.25/W, due at final payment, only for pre-install jobs
     ct_green_date = ct_green_amt = ""
     is_pre_install = stage in CASHFLOW_PIPELINE_STAGES
@@ -4607,6 +4613,7 @@ def _compute_cashflow_row(row: dict, today: datetime.date, zoho_base: str, auror
         comm_payout3_date, comm_payout3_amt,
         zoho_link, aurora_link,
         ct_green_date, ct_green_amt,
+        cash_materials_date, cash_materials_amt,
     ]
 
     PAYMENT_TYPE_MAP = {
@@ -4630,6 +4637,10 @@ def _compute_cashflow_row(row: dict, today: datetime.date, zoho_base: str, auror
 
     if ct_green_date and ct_green_amt:
         pay_events.append([ct_green_date, customer, finance_type, "CT Green Estates", ct_green_amt,
+                           "", "", stage, sc_display, project_id, zoho_link])
+
+    if cash_materials_date and cash_materials_amt:
+        pay_events.append([cash_materials_date, customer, finance_type, "Cash Materials", cash_materials_amt,
                            "", "", stage, sc_display, project_id, zoho_link])
 
     return pipeline_row, pay_events
@@ -4727,7 +4738,7 @@ def _run_cashflow_batch(projects: list[dict], tab_name: str) -> dict:
             break
     resp = sheets.batchUpdate(
         spreadsheetId=CASHFLOW_SHEET_ID,
-        body={"requests": [{"addSheet": {"properties": {"title": tab_name, "gridProperties": {"columnCount": 30}}}}]}
+        body={"requests": [{"addSheet": {"properties": {"title": tab_name, "gridProperties": {"columnCount": 32}}}}]}
     ).execute()
     sheet_id = resp["replies"][0]["addSheet"]["properties"]["sheetId"]
 
@@ -4744,6 +4755,7 @@ def _run_cashflow_batch(projects: list[dict], tab_name: str) -> dict:
         "Comm Payout 3 Date", "Comm Payout 3 Amt",
         "Zoho Link", "Aurora Link",
         "CT Green Date", "CT Green Amt",
+        "Cash Materials Date", "Cash Materials Amt",
     ]
     sheets.values().update(
         spreadsheetId=CASHFLOW_SHEET_ID,
@@ -4827,7 +4839,7 @@ def _run_cashflow_batch(projects: list[dict], tab_name: str) -> dict:
                     "fields": "userEnteredFormat.numberFormat",
                 }
             }
-            for col in [7, 9, 11, 13, 14, 15, 17, 18, 20, 22, 24, 28]
+            for col in [7, 9, 11, 13, 14, 15, 17, 18, 20, 22, 24, 28, 30]
         ],
     ]
     sheets.batchUpdate(spreadsheetId=CASHFLOW_SHEET_ID, body={"requests": format_requests}).execute()
@@ -4865,7 +4877,7 @@ def _update_cashflow_formulas(svc, pipeline_tab_name: str) -> dict:
     # Read column A (up to row 60) to locate label rows
     col_a_vals = sheets.values().get(
         spreadsheetId=CASHFLOW_SHEET_ID,
-        range=f"'{CASHFLOW_MAIN_TAB}'!A1:A60",
+        range=f"'{CASHFLOW_MAIN_TAB}'!A1:A70",
         valueRenderOption="FORMATTED_VALUE",
     ).execute().get("values", [])
     col_a = [r[0].strip() if r else "" for r in col_a_vals]
@@ -4876,11 +4888,12 @@ def _update_cashflow_formulas(svc, pipeline_tab_name: str) -> dict:
                 return i + 1  # 1-indexed sheet row
         return None
 
-    row_draws      = find_row("LR 80% Draws")
-    row_finals     = find_row("LR 20% Finals")
-    row_comm1      = find_row("Commissions (Payout 1)")
-    row_comm2      = find_row("Commissions (Payout 2)")
-    row_ct_green   = find_row("CT Green Estates")
+    row_draws        = find_row("LR 80% Draws")
+    row_finals       = find_row("LR 20% Finals")
+    row_comm1        = find_row("Commissions (Payout 1)")
+    row_comm2        = find_row("Commissions (Payout 2)")
+    row_ct_green     = find_row("CT Green Estates")
+    row_cash_mat     = find_row("Materials (Cash Deals)")
 
     missing = [k for k, v in {"lr_draws": row_draws, "lr_finals": row_finals,
                                "comm1": row_comm1, "comm2": row_comm2}.items() if not v]
@@ -4958,10 +4971,18 @@ def _update_cashflow_formulas(svc, pipeline_tab_name: str) -> dict:
                               (row_comm1, f_comm1), (row_comm2, f_comm2)]:
             updates.append({"range": f"'{CASHFLOW_MAIN_TAB}'!{c}{row}", "values": [[formula]]})
 
+        # Cash materials: $1.26/W at 60% progress date (Pipeline tab col AD/AE)
+        f_cash_mat = (
+            f"=SUMPRODUCT(ISNUMBER({p}!$AD$2:$AD$200)*({p}!$AD$2:$AD$200>={c}$2)*({p}!$AD$2:$AD$200<{c}$2+7)*ISNUMBER({p}!$AE$2:$AE$200)*({p}!$AE$2:$AE$200))"
+        )
+
         # Only write CT Green formula if cell is currently empty
         col_idx = start_col + w
         if row_ct_green and col_idx not in ct_green_existing:
             updates.append({"range": f"'{CASHFLOW_MAIN_TAB}'!{c}{row_ct_green}", "values": [[f_ct_green]]})
+
+        if row_cash_mat:
+            updates.append({"range": f"'{CASHFLOW_MAIN_TAB}'!{c}{row_cash_mat}", "values": [[f_cash_mat]]})
 
     sheets.values().batchUpdate(
         spreadsheetId=CASHFLOW_SHEET_ID,
