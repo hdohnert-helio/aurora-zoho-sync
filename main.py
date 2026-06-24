@@ -4772,7 +4772,78 @@ def _write_weekly_payments_from_events(svc, weekly_events: list) -> None:
     logger.info(f"_write_weekly_payments_from_events: wrote {len(weekly_events)} events")
 
 
+CASHFLOW_README_TAB = "README"
 CASHFLOW_SUMMARY_TAB = "Summary"
+
+
+def _write_readme_tab(svc) -> None:
+    """Overwrite column A of the README tab with current documentation.
+    Columns B+ are left untouched so existing buttons are preserved."""
+    readme_rows = [
+        ["Helio Cash Flow Model — README"],
+        [""],
+        ["TABS:"],
+        ["  • Pipeline [date] — auto-generated from Zoho + Aurora on each sync. One row per active project."],
+        ["  • Cash Flow — 16-week weekly forecast. Pulls automatically from the latest Pipeline tab."],
+        ["  • Weekly Payments — chronological list of all payment events (draws, finals, commissions, materials, CT Green)."],
+        ["  • Overrides — manually override payment dates for specific projects by Project ID (YYYY-MM-DD format)."],
+        ["  • Summary — totals and % of revenue for revenue, commissions, subs, materials, referral, and net."],
+        [""],
+        ["RUNNING A REFRESH:"],
+        ["  • Click 'Run Cash Flow' (blue button) to pull fresh data from Zoho and Aurora, create a new dated Pipeline tab,"],
+        ["    rebuild Weekly Payments and Summary, and update Cash Flow formulas. Takes ~2-3 minutes."],
+        ["  • Click 'Run Overrides' (yellow button) to apply manual date overrides from the Overrides tab without"],
+        ["    re-fetching all data. Use this for quick date tweaks between full syncs."],
+        ["  • Note: Overrides are applied automatically during every full Cash Flow run — 'Run Overrides' is only"],
+        ["    needed when you want to update dates without waiting for a full sync."],
+        [""],
+        ["PAYMENT LOGIC:"],
+        ["  LR (Lightreach):"],
+        ["    • 80% draw ~14 days post-SC (rounded to next Monday)"],
+        ["      = Contract Price × 80% − (kW × 1000 × $1.26) for materials"],
+        ["    • 20% final ~33 days post-SC (rounded to next Monday)"],
+        ["      = Contract Price × 20% − $250 inverter warranty"],
+        ["    • Commissions: 80% paid with 80% draw, 20% paid with 20% final"],
+        [""],
+        ["  CASH:"],
+        ["    • 20% deposit ~11 days after contract date (rounded to next Monday)"],
+        ["    • 60% progress ~5 days before SC (rounded to next Monday)"],
+        ["    • 20% final ~26 days post-SC (rounded to next Monday)"],
+        ["    • Commissions: proportional — 20% / 60% / 20%"],
+        ["    • Zoho 'Cash - 20PCT deposit paid' → removes deposit from forecast"],
+        ["    • Zoho 'Cash - 60PCT paid' → removes both deposit and progress from forecast"],
+        [""],
+        ["  SE (Smart E-Loan):"],
+        ["    • Payment 1 (33%) ~14 days post-SC (rounded to next Monday)"],
+        ["    • Payment 2 (33%) ~33 days post-SC (rounded to next Monday)"],
+        ["    • Payment 3 (34%) ~14 days post-PTO, or SC+60 days if no PTO date yet"],
+        ["    • Commissions: proportional — 33% / 33% / 34%"],
+        [""],
+        ["COSTS:"],
+        ["  • LR Materials: $1.26/W deducted directly from the 80% draw amount"],
+        ["  • Cash/SE Materials: $1.26/W cash outflow at the 60% progress / Payment 2 date"],
+        ["  • CT Green Estates: $0.25/W cash outflow at final payment date (pre-install projects only)"],
+        ["  • Subcontractor costs: pulled from Aurora project notes per project"],
+        [""],
+        ["PRICING:"],
+        ["  • Payment amounts calculated on Final System Price (base + adders − discounts) from Aurora."],
+        ["  • Commissions calculated on Base Price only, above the $2.50/W floor."],
+        ["    Formula: max(0, (base_ppw − $2.50) × system_watts) + consultant $/W × system_watts"],
+        [""],
+        ["OVERRIDES TAB:"],
+        ["  • Add a row: Project ID | Payment 1 Date | Payment 2 Date | Payment 3 Date | Notes"],
+        ["  • Dates must be in YYYY-MM-DD format."],
+        ["  • Overrides are applied automatically on every full sync — no separate step needed."],
+        ["  • To remove an override, delete the row from the Overrides tab and re-run."],
+    ]
+
+    svc.spreadsheets().values().update(
+        spreadsheetId=CASHFLOW_SHEET_ID,
+        range=f"'{CASHFLOW_README_TAB}'!A1:A{len(readme_rows)}",
+        valueInputOption="RAW",
+        body={"values": readme_rows},
+    ).execute()
+    logger.info("_write_readme_tab: README tab updated")
 
 
 def _write_summary_tab(svc, pipeline_tab_name: str) -> None:
@@ -4996,6 +5067,7 @@ def _run_cashflow_batch(projects: list[dict], tab_name: str) -> dict:
     _write_weekly_payments_from_events(svc, weekly_events)
 
     _write_summary_tab(svc, tab_name)
+    _write_readme_tab(svc)
 
     formula_result = _update_cashflow_formulas(svc, tab_name)
     return {
