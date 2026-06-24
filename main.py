@@ -4799,19 +4799,20 @@ def _write_summary_tab(svc, pipeline_tab_name: str) -> None:
     # Formulas — Pipeline columns:
     #   H = Total Revenue, S = Total Commission, P = Subcontractor Cost
     #   O = Materials est (LR), AE = Cash Materials (CASH/SE), R = Referral Payout
+    # Column C = % of revenue (blank for Revenue and Net Revenue rows)
     rows = [
-        ["Helio Pipeline Summary", "", ""],
-        ["", "", ""],
-        ["Metric", "Amount", "Notes"],
-        ["Total Revenue",       f"=SUMIF('{p}'!C2:C,\"<>\",'{p}'!H2:H)",  "Contract price (base + adders - discounts)"],
-        ["Total Commissions",   f"=SUMIF('{p}'!C2:C,\"<>\",'{p}'!S2:S)",  "Rep + consultant commissions"],
-        ["Total Subcontractor", f"=SUMIF('{p}'!C2:C,\"<>\",'{p}'!P2:P)",  "Subcontractor payments"],
-        ["Total Materials",     f"=SUMIF('{p}'!C2:C,\"<>\",'{p}'!O2:O)+SUMIF('{p}'!C2:C,\"<>\",'{p}'!AE2:AE)", "LR materials est + Cash/SE materials"],
-        ["Total Referral",      f"=SUMIF('{p}'!C2:C,\"<>\",'{p}'!R2:R)",  "Referral payouts"],
-        ["", "", ""],
-        ["Net Revenue",         f"=B4-B5-B6-B7-B8", "Revenue minus all costs above"],
-        ["", "", ""],
-        ["Project Count",       f"=COUNTA('{p}'!A2:A)", "Active pipeline projects"],
+        ["Helio Pipeline Summary", "", "", ""],
+        ["", "", "", ""],
+        ["Metric", "Amount", "% of Revenue", "Notes"],
+        ["Total Revenue",       f"=SUMIF('{p}'!C2:C,\"<>\",'{p}'!H2:H)",  "",          "Contract price (base + adders - discounts)"],
+        ["Total Commissions",   f"=SUMIF('{p}'!C2:C,\"<>\",'{p}'!S2:S)",  "=B5/B4",   "Rep + consultant commissions"],
+        ["Total Subcontractor", f"=SUMIF('{p}'!C2:C,\"<>\",'{p}'!P2:P)",  "=B6/B4",   "Subcontractor payments"],
+        ["Total Materials",     f"=SUMIF('{p}'!C2:C,\"<>\",'{p}'!O2:O)+SUMIF('{p}'!C2:C,\"<>\",'{p}'!AE2:AE)", "=B7/B4", "LR materials est + Cash/SE materials"],
+        ["Total Referral",      f"=SUMIF('{p}'!C2:C,\"<>\",'{p}'!R2:R)",  "=B8/B4",   "Referral payouts"],
+        ["", "", "", ""],
+        ["Net Revenue",         f"=B4-B5-B6-B7-B8",                       "=B10/B4",  "Revenue minus all costs above"],
+        ["", "", "", ""],
+        ["Project Count",       f"=COUNTA('{p}'!A2:A)",                    "",         "Active pipeline projects"],
     ]
 
     sheets.values().update(
@@ -4824,11 +4825,11 @@ def _write_summary_tab(svc, pipeline_tab_name: str) -> None:
     # Formatting
     format_requests = [
         # Title row bold + large
-        {"repeatCell": {"range": {"sheetId": sheet_id, "startRowIndex": 0, "endRowIndex": 1, "startColumnIndex": 0, "endColumnIndex": 3},
+        {"repeatCell": {"range": {"sheetId": sheet_id, "startRowIndex": 0, "endRowIndex": 1, "startColumnIndex": 0, "endColumnIndex": 4},
             "cell": {"userEnteredFormat": {"textFormat": {"bold": True, "fontSize": 14}}},
             "fields": "userEnteredFormat.textFormat"}},
-        # Header row bold
-        {"repeatCell": {"range": {"sheetId": sheet_id, "startRowIndex": 2, "endRowIndex": 3, "startColumnIndex": 0, "endColumnIndex": 3},
+        # Header row bold + background
+        {"repeatCell": {"range": {"sheetId": sheet_id, "startRowIndex": 2, "endRowIndex": 3, "startColumnIndex": 0, "endColumnIndex": 4},
             "cell": {"userEnteredFormat": {"textFormat": {"bold": True},
                      "backgroundColor": {"red": 0.22, "green": 0.46, "blue": 0.64}}},
             "fields": "userEnteredFormat.textFormat,userEnteredFormat.backgroundColor"}},
@@ -4836,8 +4837,12 @@ def _write_summary_tab(svc, pipeline_tab_name: str) -> None:
         {"repeatCell": {"range": {"sheetId": sheet_id, "startRowIndex": 3, "endRowIndex": 12, "startColumnIndex": 1, "endColumnIndex": 2},
             "cell": {"userEnteredFormat": {"numberFormat": {"type": "CURRENCY", "pattern": "$#,##0.00"}}},
             "fields": "userEnteredFormat.numberFormat"}},
+        # Percentage format for column C (rows 4-12)
+        {"repeatCell": {"range": {"sheetId": sheet_id, "startRowIndex": 3, "endRowIndex": 12, "startColumnIndex": 2, "endColumnIndex": 3},
+            "cell": {"userEnteredFormat": {"numberFormat": {"type": "PERCENT", "pattern": "0.0%"}}},
+            "fields": "userEnteredFormat.numberFormat"}},
         # Net Revenue bold
-        {"repeatCell": {"range": {"sheetId": sheet_id, "startRowIndex": 9, "endRowIndex": 10, "startColumnIndex": 0, "endColumnIndex": 2},
+        {"repeatCell": {"range": {"sheetId": sheet_id, "startRowIndex": 9, "endRowIndex": 10, "startColumnIndex": 0, "endColumnIndex": 3},
             "cell": {"userEnteredFormat": {"textFormat": {"bold": True}}},
             "fields": "userEnteredFormat.textFormat"}},
         # Column widths
@@ -4846,6 +4851,8 @@ def _write_summary_tab(svc, pipeline_tab_name: str) -> None:
         {"updateDimensionProperties": {"range": {"sheetId": sheet_id, "dimension": "COLUMNS", "startIndex": 1, "endIndex": 2},
             "properties": {"pixelSize": 150}, "fields": "pixelSize"}},
         {"updateDimensionProperties": {"range": {"sheetId": sheet_id, "dimension": "COLUMNS", "startIndex": 2, "endIndex": 3},
+            "properties": {"pixelSize": 120}, "fields": "pixelSize"}},
+        {"updateDimensionProperties": {"range": {"sheetId": sheet_id, "dimension": "COLUMNS", "startIndex": 3, "endIndex": 4},
             "properties": {"pixelSize": 320}, "fields": "pixelSize"}},
     ]
     sheets.batchUpdate(spreadsheetId=CASHFLOW_SHEET_ID, body={"requests": format_requests}).execute()
