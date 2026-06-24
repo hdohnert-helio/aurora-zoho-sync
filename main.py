@@ -3120,8 +3120,13 @@ async def debug_pricing(request: Request):
     if not designs:
         return {"error": "no designs found", "raw": designs_resp.json()}
 
-    best_design = max(designs, key=lambda d: d.get("updated_at") or d.get("created_at") or "")
-    design_id = best_design.get("id")
+    sold_designs = [d for d in designs if (d.get("milestone") or {}).get("milestone") == "sold"]
+    if len(sold_designs) != 1:
+        return {"error": f"expected 1 sold design, found {len(sold_designs)}", "designs": [
+            {"id": d.get("id"), "milestone": (d.get("milestone") or {}).get("milestone"), "updated_at": d.get("updated_at")}
+            for d in designs
+        ]}
+    design_id = sold_designs[0].get("id")
 
     pricing_resp = pull_pricing(design_id)
     return {
