@@ -5515,6 +5515,141 @@ async def cashflow_apply_overrides():
         return {"error": str(e), "traceback": traceback.format_exc()}
 
 
+@app.post("/cashflow/fix-total-cash-out")
+async def cashflow_fix_total_cash_out():
+    """
+    Insert a missing Total Cash Out row between the last expense row (Misc)
+    and Net Cash Flow, then fix Net Cash Flow to reference it.
+    """
+    try:
+        svc = _build_sheets_service()
+        if not svc:
+            return {"error": "could not build sheets service"}
+        sheets = svc.spreadsheets()
+
+        # Read col A to find key rows
+        col_a = sheets.values().get(
+            spreadsheetId=CASHFLOW_SHEET_ID,
+            range=f"'{CASHFLOW_MAIN_TAB}'!A1:A80",
+            valueRenderOption="FORMATTED_VALUE",
+        ).execute().get("values", [])
+        labels = [r[0].strip() if r else "" for r in col_a]
+
+        def find_row_1idx(fragment):
+            for i, v in enumerate(labels):
+                if fragment.lower() in v.lower():
+                    return i + 1  # 1-indexed
+            return None
+
+        misc_row   = find_row_1idx("Misc")
+        net_cf_row = find_row_1idx("Net Cash Flow")
+
+        if not misc_row or not net_cf_row:
+            return {"error": f"Could not locate Misc ({misc_row}) or Net Cash Flow ({net_cf_row})"}
+
+        # If Total Cash Out already exists between Misc and Net Cash Flow, skip
+        total_co_row = find_row_1idx("Total Cash Out")
+        if total_co_row and misc_row < total_co_row < net_cf_row:
+            return {"status": "already ok", "total_cash_out_row": total_co_row}
+
+        # Get Cash Flow sheet ID
+        meta = sheets.get(spreadsheetId=CASHFLOW_SHEET_ID).execute()
+        cf_sheet_id = None
+        for s in meta.get("sheets", []):
+            if s["properties"]["title"] == CASHFLOW_MAIN_TAB:
+                cf_sheet_id = s["properties"]["sheetId"]
+                break
+        if cf_sheet_id is None:
+            return {"error": "Cash Flow sheet not found"}
+
+        # Insert a blank row at net_cf_row (0-indexed = net_cf_row - 1)
+        insert_idx = net_cf_row - 1  # 0-indexed
+        sheets.batchUpdate(
+            spreadsheetId=CASHFLOW_SHEET_ID,
+            body={"requests": [{
+                "insertDimension": {
+                    "range": {"sheetId": cf_sheet_id, "dimension": "ROWS",
+                               "startIndex": insert_idx, "endIndex": insert_idx + 1},
+                    "inheritFromBefore": False,
+                }
+            }]}
+        ).execute()
+
+        # New row numbers after insert
+        total_co_row = net_cf_row      # the newly inserted row
+        new_net_cf_row = net_cf_row + 1
+
+        # Read row 2 to discover week columns
+        row2 = sheets.values().get(
+            spreadsheetId=CASHFLOW_SHEET_ID,
+            range=f"'{CASHFLOW_MAIN_TAB}'!2:2",
+            valueRenderOption="FORMATTED_VALUE",
+        ).execute().get("values", [[]])[0]
+        start_col = 3
+        end_col = start_col
+        for i in range(start_col, len(row2)):
+            if row2[i]:
+                end_col = i
+        num_weeks = end_col - start_col + 1
+
+        total_in_row = find_row_1idx("Total Cash In")
+        if not total_in_row:
+            return {"error": "Cannot find Total Cash In row"}
+
+        # Write Total Cash Out row
+        tco_values = [["Total Cash Out", "", ""]]
+        for w in range(num_weeks):
+            c = _col_letter(start_col + w)
+            # SUM from payroll (row 13) through Misc row (misc_row)
+            tco_values[0].append(f"=SUM({c}13:{c}{misc_row})")
+        sheets.values().update(
+            spreadsheetId=CASHFLOW_SHEET_ID,
+            range=f"'{CASHFLOW_MAIN_TAB}'!A{total_co_row}",
+            valueInputOption="USER_ENTERED",
+            body={"values": tco_values},
+        ).execute()
+
+        # Fix Net Cash Flow formula: =Total Cash In - Total Cash Out
+        ncf_values = [["Net Cash Flow", "", ""]]
+        for w in range(num_weeks):
+            c = _col_letter(start_col + w)
+            ncf_values[0].append(f"={c}{total_in_row}-{c}{total_co_row}")
+        sheets.values().update(
+            spreadsheetId=CASHFLOW_SHEET_ID,
+            range=f"'{CASHFLOW_MAIN_TAB}'!A{new_net_cf_row}",
+            valueInputOption="USER_ENTERED",
+            body={"values": ncf_values},
+        ).execute()
+
+        # Bold + light yellow formatting for Total Cash Out row
+        sheets.batchUpdate(
+            spreadsheetId=CASHFLOW_SHEET_ID,
+            body={"requests": [{
+                "repeatCell": {
+                    "range": {"sheetId": cf_sheet_id,
+                               "startRowIndex": total_co_row - 1,
+                               "endRowIndex": total_co_row},
+                    "cell": {"userEnteredFormat": {
+                        "textFormat": {"bold": True},
+                        "backgroundColor": {"red": 1.0, "green": 0.95, "blue": 0.8},
+                    }},
+                    "fields": "userEnteredFormat.textFormat.bold,userEnteredFormat.backgroundColor",
+                }
+            }]}
+        ).execute()
+
+        return {
+            "status": "ok",
+            "total_cash_out_row": total_co_row,
+            "net_cash_flow_row": new_net_cf_row,
+            "weeks_written": num_weeks,
+        }
+
+    except Exception as e:
+        import traceback
+        return {"error": str(e), "traceback": traceback.format_exc()}
+
+
 @app.post("/cashflow/reorganize-expenses")
 async def cashflow_reorganize_expenses():
     """
