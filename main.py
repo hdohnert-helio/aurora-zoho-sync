@@ -4695,7 +4695,7 @@ def _compute_cashflow_row(row: dict, today: datetime.date, zoho_base: str, auror
     ]
     pay_events = []
     for i, (pd, pa, cd, ca) in enumerate(pay_slots):
-        if not pd:
+        if not pd or not pa:
             continue
         pay_type = PAYMENT_TYPE_MAP.get((finance_type, i), "Loan / Full Payment")
         pay_events.append([pd, customer, finance_type, pay_type, pa, cd, ca, stage, sc_display, project_id, zoho_link])
