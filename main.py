@@ -5523,7 +5523,7 @@ async def cashflow_reorganize_expenses():
     reads existing values and rewrites the section in place.
     """
     try:
-        svc = _get_sheets_service()
+        svc = _build_sheets_service()
         if not svc:
             return {"error": "could not build sheets service"}
         sheets = svc.spreadsheets()
