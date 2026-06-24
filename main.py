@@ -4772,6 +4772,86 @@ def _write_weekly_payments_from_events(svc, weekly_events: list) -> None:
     logger.info(f"_write_weekly_payments_from_events: wrote {len(weekly_events)} events")
 
 
+CASHFLOW_SUMMARY_TAB = "Summary"
+
+
+def _write_summary_tab(svc, pipeline_tab_name: str) -> None:
+    """Create/replace a Summary tab with totals pulled from the Pipeline tab."""
+    sheets = svc.spreadsheets()
+    p = pipeline_tab_name
+
+    # Delete existing Summary tab if present
+    existing = sheets.get(spreadsheetId=CASHFLOW_SHEET_ID).execute()
+    for s in existing.get("sheets", []):
+        if s["properties"]["title"] == CASHFLOW_SUMMARY_TAB:
+            sheets.batchUpdate(
+                spreadsheetId=CASHFLOW_SHEET_ID,
+                body={"requests": [{"deleteSheet": {"sheetId": s["properties"]["sheetId"]}}]}
+            ).execute()
+            break
+
+    resp = sheets.batchUpdate(
+        spreadsheetId=CASHFLOW_SHEET_ID,
+        body={"requests": [{"addSheet": {"properties": {"title": CASHFLOW_SUMMARY_TAB, "gridProperties": {"columnCount": 3, "rowCount": 20}}}}]}
+    ).execute()
+    sheet_id = resp["replies"][0]["addSheet"]["properties"]["sheetId"]
+
+    # Formulas — Pipeline columns:
+    #   H = Total Revenue, S = Total Commission, P = Subcontractor Cost
+    #   O = Materials est (LR), AE = Cash Materials (CASH/SE), R = Referral Payout
+    rows = [
+        ["Helio Pipeline Summary", "", ""],
+        ["", "", ""],
+        ["Metric", "Amount", "Notes"],
+        ["Total Revenue",       f"=SUMIF('{p}'!C2:C,\"<>\",'{p}'!H2:H)",  "Contract price (base + adders - discounts)"],
+        ["Total Commissions",   f"=SUMIF('{p}'!C2:C,\"<>\",'{p}'!S2:S)",  "Rep + consultant commissions"],
+        ["Total Subcontractor", f"=SUMIF('{p}'!C2:C,\"<>\",'{p}'!P2:P)",  "Subcontractor payments"],
+        ["Total Materials",     f"=SUMIF('{p}'!C2:C,\"<>\",'{p}'!O2:O)+SUMIF('{p}'!C2:C,\"<>\",'{p}'!AE2:AE)", "LR materials est + Cash/SE materials"],
+        ["Total Referral",      f"=SUMIF('{p}'!C2:C,\"<>\",'{p}'!R2:R)",  "Referral payouts"],
+        ["", "", ""],
+        ["Net Revenue",         f"=B4-B5-B6-B7-B8", "Revenue minus all costs above"],
+        ["", "", ""],
+        ["Project Count",       f"=COUNTA('{p}'!A2:A)", "Active pipeline projects"],
+    ]
+
+    sheets.values().update(
+        spreadsheetId=CASHFLOW_SHEET_ID,
+        range=f"'{CASHFLOW_SUMMARY_TAB}'!A1",
+        valueInputOption="USER_ENTERED",
+        body={"values": rows},
+    ).execute()
+
+    # Formatting
+    format_requests = [
+        # Title row bold + large
+        {"repeatCell": {"range": {"sheetId": sheet_id, "startRowIndex": 0, "endRowIndex": 1, "startColumnIndex": 0, "endColumnIndex": 3},
+            "cell": {"userEnteredFormat": {"textFormat": {"bold": True, "fontSize": 14}}},
+            "fields": "userEnteredFormat.textFormat"}},
+        # Header row bold
+        {"repeatCell": {"range": {"sheetId": sheet_id, "startRowIndex": 2, "endRowIndex": 3, "startColumnIndex": 0, "endColumnIndex": 3},
+            "cell": {"userEnteredFormat": {"textFormat": {"bold": True},
+                     "backgroundColor": {"red": 0.22, "green": 0.46, "blue": 0.64}}},
+            "fields": "userEnteredFormat.textFormat,userEnteredFormat.backgroundColor"}},
+        # Currency format for column B (rows 4-12)
+        {"repeatCell": {"range": {"sheetId": sheet_id, "startRowIndex": 3, "endRowIndex": 12, "startColumnIndex": 1, "endColumnIndex": 2},
+            "cell": {"userEnteredFormat": {"numberFormat": {"type": "CURRENCY", "pattern": "$#,##0.00"}}},
+            "fields": "userEnteredFormat.numberFormat"}},
+        # Net Revenue bold
+        {"repeatCell": {"range": {"sheetId": sheet_id, "startRowIndex": 9, "endRowIndex": 10, "startColumnIndex": 0, "endColumnIndex": 2},
+            "cell": {"userEnteredFormat": {"textFormat": {"bold": True}}},
+            "fields": "userEnteredFormat.textFormat"}},
+        # Column widths
+        {"updateDimensionProperties": {"range": {"sheetId": sheet_id, "dimension": "COLUMNS", "startIndex": 0, "endIndex": 1},
+            "properties": {"pixelSize": 200}, "fields": "pixelSize"}},
+        {"updateDimensionProperties": {"range": {"sheetId": sheet_id, "dimension": "COLUMNS", "startIndex": 1, "endIndex": 2},
+            "properties": {"pixelSize": 150}, "fields": "pixelSize"}},
+        {"updateDimensionProperties": {"range": {"sheetId": sheet_id, "dimension": "COLUMNS", "startIndex": 2, "endIndex": 3},
+            "properties": {"pixelSize": 320}, "fields": "pixelSize"}},
+    ]
+    sheets.batchUpdate(spreadsheetId=CASHFLOW_SHEET_ID, body={"requests": format_requests}).execute()
+    logger.info("_write_summary_tab: Summary tab written")
+
+
 def _run_cashflow_batch(projects: list[dict], tab_name: str) -> dict:
     """
     Fetch Aurora data one project at a time and stream rows directly to the
@@ -4907,6 +4987,8 @@ def _run_cashflow_batch(projects: list[dict], tab_name: str) -> dict:
     # Write Weekly Payments tab
     weekly_events.sort(key=lambda r: r[1] if r[1] else "9999")
     _write_weekly_payments_from_events(svc, weekly_events)
+
+    _write_summary_tab(svc, tab_name)
 
     formula_result = _update_cashflow_formulas(svc, tab_name)
     return {
