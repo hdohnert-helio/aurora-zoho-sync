@@ -5087,6 +5087,12 @@ def _run_cashflow_batch(projects: list[dict], tab_name: str) -> dict:
 CASHFLOW_MAIN_TAB = "Cash Flow"
 
 
+def _col_letter(idx):
+    if idx < 26:
+        return chr(65 + idx)
+    return chr(65 + idx // 26 - 1) + chr(65 + idx % 26)
+
+
 def _update_cashflow_formulas(svc, pipeline_tab_name: str) -> dict:
     """
     Rewrite the SUMPRODUCT formulas in the 'Cash Flow' tab to pull from
@@ -5120,6 +5126,7 @@ def _update_cashflow_formulas(svc, pipeline_tab_name: str) -> dict:
     row_comm2        = find_row("Commissions (Payout 2)")
     row_ct_green     = find_row("CT Green Estates")
     row_cash_mat     = find_row("Materials (Cash Deals)")
+    row_sub_ref      = find_row("Subcontractor + Referral")
 
     missing = [k for k, v in {"lr_draws": row_draws, "lr_finals": row_finals,
                                "comm1": row_comm1, "comm2": row_comm2}.items() if not v]
@@ -5157,16 +5164,11 @@ def _update_cashflow_formulas(svc, pipeline_tab_name: str) -> dict:
             except (ValueError, TypeError):
                 pass
 
-    def col_letter(idx):
-        if idx < 26:
-            return chr(65 + idx)
-        return chr(65 + idx // 26 - 1) + chr(65 + idx % 26)
-
     p = f"'{pipeline_tab_name}'"
     updates = []
 
     for w in range(num_weeks):
-        c = col_letter(start_col + w)
+        c = _col_letter(start_col + w)
 
         # Payment 1 (LR 80% draw / SE 33% / loan) + Cash Payment 2 (60% progress)
         f_draws = (
@@ -5211,6 +5213,15 @@ def _update_cashflow_formulas(svc, pipeline_tab_name: str) -> dict:
 
         if row_cash_mat:
             updates.append({"range": f"'{CASHFLOW_MAIN_TAB}'!{c}{row_cash_mat}", "values": [[f_cash_mat]]})
+
+        # Subcontractor + Referral: Pipeline cols P (subcontractor) + R (referral)
+        if row_sub_ref:
+            f_sub_ref = (
+                f"=SUMPRODUCT(ISNUMBER({p}!$I$2:$I$200)*({p}!$I$2:$I$200>={c}$2)*({p}!$I$2:$I$200<{c}$2+7)*ISNUMBER({p}!$P$2:$P$200)*({p}!$P$2:$P$200))"
+                f"+SUMPRODUCT(ISNUMBER({p}!$M$2:$M$200)*({p}!$M$2:$M$200>={c}$2)*({p}!$M$2:$M$200<{c}$2+7)*(LEFT({p}!$C$2:$C$200,4)=\"CASH\")*ISNUMBER({p}!$P$2:$P$200)*({p}!$P$2:$P$200))"
+                f"+SUMPRODUCT(ISNUMBER({p}!$I$2:$I$200)*({p}!$I$2:$I$200>={c}$2)*({p}!$I$2:$I$200<{c}$2+7)*ISNUMBER({p}!$R$2:$R$200)*({p}!$R$2:$R$200))"
+            )
+            updates.append({"range": f"'{CASHFLOW_MAIN_TAB}'!{c}{row_sub_ref}", "values": [[f_sub_ref]]})
 
     sheets.values().batchUpdate(
         spreadsheetId=CASHFLOW_SHEET_ID,
@@ -5499,6 +5510,251 @@ async def cashflow_apply_overrides():
             "weekly_payment_rows": len(event_rows),
             "formulas": formula_result,
         }
+    except Exception as e:
+        import traceback
+        return {"error": str(e), "traceback": traceback.format_exc()}
+
+
+@app.post("/cashflow/reorganize-expenses")
+async def cashflow_reorganize_expenses():
+    """
+    Reorganize the Cash Flow tab expense rows (CASH OUT section) into
+    categorized groups with header rows. Safe to run multiple times —
+    reads existing values and rewrites the section in place.
+    """
+    try:
+        svc = _get_sheets_service()
+        if not svc:
+            return {"error": "could not build sheets service"}
+        sheets = svc.spreadsheets()
+
+        # Read full Cash Flow tab to find structure
+        raw = sheets.values().get(
+            spreadsheetId=CASHFLOW_SHEET_ID,
+            range=f"'{CASHFLOW_MAIN_TAB}'!A1:ZZ200",
+            valueRenderOption="UNFORMATTED_VALUE",
+        ).execute().get("values", [])
+
+        # Find key structural rows
+        def find_row_idx(fragment):
+            for i, r in enumerate(raw):
+                if r and fragment.lower() in str(r[0]).lower():
+                    return i  # 0-indexed
+            return None
+
+        cash_out_idx = find_row_idx("CASH OUT")
+        total_cash_out_idx = find_row_idx("Total Cash Out")
+
+        if cash_out_idx is None or total_cash_out_idx is None:
+            return {"error": "Could not find CASH OUT or Total Cash Out rows"}
+
+        # Determine week columns by reading row 2 (0-indexed row 1)
+        row2 = raw[1] if len(raw) > 1 else []
+        start_col = 3  # column D (0-indexed)
+        end_col = start_col
+        for i in range(start_col, len(row2)):
+            if row2[i]:
+                end_col = i
+        num_cols = end_col - start_col + 1  # number of week columns
+
+        # Build a lookup: label → list of week values
+        def get_vals(label_fragment):
+            idx = find_row_idx(label_fragment)
+            if idx is None:
+                return [""] * num_cols
+            r = raw[idx]
+            vals = []
+            for c in range(start_col, start_col + num_cols):
+                vals.append(r[c] if c < len(r) else "")
+            return vals
+
+        # Collect existing expense values by label
+        expense_data = {
+            "Payroll":             get_vals("Payroll"),
+            "Amex":                get_vals("Amex"),
+            "Lowest Credit Card":  get_vals("Lowest Credit Card"),
+            "Ink Card":            get_vals("Ink Card"),
+            "Mulligan":            get_vals("Mulligan"),
+            "SBA Loan":            get_vals("SBA Loan"),
+            "QuickBooks Loan":     get_vals("QuickBooks Loan"),
+            "QuickBooks 2nd Loan": get_vals("QuickBooks 2nd Loan"),
+            "Auto Loans":          get_vals("Auto Loans"),
+            "Soligent":            get_vals("Soligent"),
+            "Greentech":           get_vals("Greentech"),
+            "US Renewables":       get_vals("US Renewables"),
+            "EW":                  get_vals("\tEW"),  # exact match via tab char fallback
+            "F&M":                 get_vals("F&M"),
+            "TK Properties":       get_vals("TK Properties"),
+            "Aurora":              get_vals("Aurora"),
+            "Zoho One":            get_vals("Zoho One"),
+            "Squarespace":         get_vals("Squarespace"),
+            "Google Workspace":    get_vals("Google Workspace"),
+            "BBB":                 get_vals("BBB"),
+            "Office365 Business":  get_vals("Office365"),
+            "Sirius Radio":        get_vals("Sirius Radio"),
+            "Site Capture":        get_vals("Site Capture"),
+            "Adobe Services":      get_vals("Adobe Services"),
+            "Energytoolbase.com":  get_vals("Energytoolbase"),
+            "duns and bradstreet": get_vals("duns and bradstreet"),
+            "Nav.com":             get_vals("Nav.com"),
+            "zappier":             get_vals("zappier"),
+            "Loom.com":            get_vals("Loom.com"),
+            "chatgpt":             get_vals("chatgpt"),
+            "Anthropic":           get_vals("Anthropic"),
+            "50 Merritt Drive (Rent)": get_vals("50 Merritt"),
+            "Virtual Mailboxes":   get_vals("Virtual Mailbox"),
+            "AT&T":                get_vals("AT&T"),
+            "Canon Printer":       get_vals("Canon Printer"),
+            "SolarInsure":         get_vals("SolarInsure"),
+            "Misc":                get_vals("Misc"),
+        }
+
+        # Also get EW without tab char fallback
+        ew_idx = None
+        for i, r in enumerate(raw):
+            if r and str(r[0]).strip().upper() == "EW":
+                ew_idx = i
+                break
+        if ew_idx is not None:
+            r = raw[ew_idx]
+            expense_data["EW"] = [r[c] if c < len(r) else "" for c in range(start_col, start_col + num_cols)]
+        else:
+            expense_data["EW"] = [""] * num_cols
+
+        # Build new expense section rows
+        # Each row: [label, "", "", (week values...)]
+        # Header rows: [label] with empty data cols
+        empty = [""] * num_cols
+
+        def data_row(label, vals=None):
+            return [label, "", ""] + (vals if vals else empty)
+
+        def header_row(label):
+            return [label, "", ""] + empty
+
+        new_rows = []
+
+        # 1. Payroll
+        new_rows.append(data_row("Payroll", expense_data["Payroll"]))
+
+        # 2. Debt Payments
+        new_rows.append(header_row("  Debt Payments"))
+        for label in ["Amex", "Lowest Credit Card", "Ink Card", "Mulligan", "SBA Loan",
+                       "QuickBooks Loan", "QuickBooks 2nd Loan", "Auto Loans",
+                       "Soligent", "Greentech", "US Renewables", "EW", "F&M", "TK Properties"]:
+            new_rows.append(data_row(label, expense_data[label]))
+
+        # 3. Subscriptions
+        new_rows.append(header_row("  Subscriptions"))
+        for label in ["Aurora", "Zoho One", "Squarespace", "Google Workspace", "BBB",
+                       "Office365 Business", "Sirius Radio", "Site Capture", "Adobe Services",
+                       "Energytoolbase.com", "duns and bradstreet", "Nav.com", "zappier",
+                       "Loom.com", "chatgpt", "Anthropic"]:
+            new_rows.append(data_row(label, expense_data[label]))
+
+        # 4. Office Expenses
+        new_rows.append(header_row("  Office Expenses"))
+        for label in ["50 Merritt Drive (Rent)", "Virtual Mailboxes", "AT&T", "Canon Printer"]:
+            new_rows.append(data_row(label, expense_data[label]))
+
+        # 5. Project Expenses
+        new_rows.append(header_row("  Project Expenses"))
+        new_rows.append(data_row("CT Green Estates", empty))       # auto (formula)
+        new_rows.append(data_row("SolarInsure", expense_data["SolarInsure"]))
+        new_rows.append(data_row("Subcontractor + Referral", empty))  # auto (formula)
+        new_rows.append(data_row("Materials (Cash Deals)", empty))  # auto (formula)
+
+        # 6. Commissions
+        new_rows.append(header_row("  Commissions"))
+        new_rows.append(data_row("Commissions (Payout 1)", empty))  # auto (formula)
+        new_rows.append(data_row("Commissions (Payout 2)", empty))  # auto (formula)
+
+        # 7. Misc
+        new_rows.append(data_row("Misc", expense_data["Misc"]))
+
+        # Write the new expense section starting right after CASH OUT row
+        # The first expense row is 2 rows after CASH OUT (CASH OUT row + 1 blank/header = expense start)
+        # Find where Payroll currently lives to know the write start
+        payroll_idx = find_row_idx("Payroll")
+        if payroll_idx is None:
+            # Fall back to 2 rows after CASH OUT
+            write_start_idx = cash_out_idx + 2
+        else:
+            write_start_idx = payroll_idx
+
+        write_start_row = write_start_idx + 1  # 1-indexed
+        write_end_row = total_cash_out_idx  # write up to (not including) Total Cash Out
+
+        # Pad / trim to exactly fit
+        num_rows_available = write_end_row - write_start_row  # rows before Total Cash Out
+        while len(new_rows) < num_rows_available:
+            new_rows.append([""] * (3 + num_cols))
+
+        # Write expense rows (overwrite existing)
+        col_letter_end = _col_letter(start_col + num_cols)  # last week col letter
+        write_range = f"'{CASHFLOW_MAIN_TAB}'!A{write_start_row}:{col_letter_end}{write_start_row + len(new_rows) - 1}"
+
+        sheets.values().update(
+            spreadsheetId=CASHFLOW_SHEET_ID,
+            range=write_range,
+            valueInputOption="USER_ENTERED",
+            body={"values": new_rows},
+        ).execute()
+
+        # Get sheet ID for formatting
+        sheet_meta = sheets.get(spreadsheetId=CASHFLOW_SHEET_ID).execute()
+        cf_sheet_id = None
+        for s in sheet_meta.get("sheets", []):
+            if s["properties"]["title"] == CASHFLOW_MAIN_TAB:
+                cf_sheet_id = s["properties"]["sheetId"]
+                break
+
+        # Format category header rows as bold + light gray background
+        fmt_requests = []
+        if cf_sheet_id is not None:
+            header_labels = {"  Debt Payments", "  Subscriptions", "  Office Expenses",
+                             "  Project Expenses", "  Commissions"}
+            for i, row in enumerate(new_rows):
+                if row and row[0] in header_labels:
+                    sheet_row = write_start_row + i - 1  # 0-indexed
+                    fmt_requests.append({
+                        "repeatCell": {
+                            "range": {
+                                "sheetId": cf_sheet_id,
+                                "startRowIndex": sheet_row,
+                                "endRowIndex": sheet_row + 1,
+                            },
+                            "cell": {
+                                "userEnteredFormat": {
+                                    "textFormat": {"bold": True},
+                                    "backgroundColor": {"red": 0.9, "green": 0.9, "blue": 0.9},
+                                }
+                            },
+                            "fields": "userEnteredFormat.textFormat.bold,userEnteredFormat.backgroundColor",
+                        }
+                    })
+
+        if fmt_requests:
+            sheets.batchUpdate(
+                spreadsheetId=CASHFLOW_SHEET_ID,
+                body={"requests": fmt_requests},
+            ).execute()
+
+        # Re-run formulas to populate auto rows
+        tab_name = None
+        for s in sheet_meta.get("sheets", []):
+            t = s["properties"]["title"]
+            if t.startswith("Pipeline "):
+                tab_name = t
+        formula_result = _update_cashflow_formulas(svc, tab_name) if tab_name else {"skipped": "no Pipeline tab found"}
+
+        return {
+            "status": "ok",
+            "rows_written": len(new_rows),
+            "write_range": write_range,
+            "formulas": formula_result,
+        }
+
     except Exception as e:
         import traceback
         return {"error": str(e), "traceback": traceback.format_exc()}
