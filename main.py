@@ -3300,6 +3300,7 @@ def _get_commission_data_for_project(aurora_project_id: str) -> dict:
         "removal of existing pv",
         "roof replacement (internal",
         "internal hgc roofing",
+        "custom electrical work needed",
     ]
 
     referral_flat = 0.0
