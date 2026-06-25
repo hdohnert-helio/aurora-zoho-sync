@@ -3137,6 +3137,20 @@ async def debug_pricing(request: Request):
     }
 
 
+@app.post("/commissions/debug-commission")
+async def debug_commission(request: Request):
+    """Returns computed commission + subcontractor data for a given Aurora project UUID."""
+    body = await request.json()
+    aurora_project_id = body.get("aurora_project_id")
+    if not aurora_project_id:
+        raise HTTPException(status_code=400, detail="aurora_project_id required")
+    try:
+        data = _get_commission_data_for_project(aurora_project_id)
+        return data
+    except Exception as e:
+        return {"error": str(e)}
+
+
 # ============================================================================
 # Commission Run — Automated Sheet Output
 # ============================================================================
