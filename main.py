@@ -5319,6 +5319,24 @@ def _update_cashflow_formulas(svc, pipeline_tab_name: str) -> dict:
     return {"status": "ok", "pipeline_tab": pipeline_tab_name, "cells_updated": len(updates)}
 
 
+@app.get("/cashflow/debug-row")
+async def debug_cashflow_row(row: int = 53):
+    """Read a specific row from the Cash Flow tab — shows formula and display value."""
+    svc = _build_sheets_service()
+    sheets = svc.spreadsheets()
+    formatted = sheets.values().get(
+        spreadsheetId=CASHFLOW_SHEET_ID,
+        range=f"'{CASHFLOW_MAIN_TAB}'!{row}:{row}",
+        valueRenderOption="FORMATTED_VALUE",
+    ).execute().get("values", [[]])[0]
+    formula = sheets.values().get(
+        spreadsheetId=CASHFLOW_SHEET_ID,
+        range=f"'{CASHFLOW_MAIN_TAB}'!{row}:{row}",
+        valueRenderOption="FORMULA",
+    ).execute().get("values", [[]])[0]
+    return {"row": row, "formatted": formatted[:10], "formula": formula[:10]}
+
+
 @app.post("/cashflow/run")
 async def cashflow_run(request: Request):
     """
