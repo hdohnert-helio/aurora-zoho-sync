@@ -3281,6 +3281,13 @@ def _get_commission_data_for_project(aurora_project_id: str) -> dict:
     except (ValueError, TypeError):
         adder_details = []
 
+    # D. MISC adder items performed internally — no cash outflow to outside sub
+    INTERNAL_ADDER_KEYWORDS = [
+        "removal of existing pv",
+        "roof replacement (internal",
+        "internal hgc roofing",
+    ]
+
     referral_flat = 0.0
     subcontractor_total = 0.0
     subcontractor_notes = []
@@ -3290,6 +3297,9 @@ def _get_commission_data_for_project(aurora_project_id: str) -> dict:
         if name == "A - Referral Payout":
             referral_flat += total
         elif name.startswith("D. MISC:") and total > 0:
+            name_lower = name.lower()
+            if any(kw in name_lower for kw in INTERNAL_ADDER_KEYWORDS):
+                continue  # internal work — not a subcontractor cash outflow
             subcontractor_total += total
             subcontractor_notes.append(f"{name.replace('D. MISC: ', '')} ${total:,.2f}")
 
@@ -4707,6 +4717,32 @@ def _compute_cashflow_row(row: dict, today: datetime.date, zoho_base: str, auror
     if cash_materials_date and cash_materials_amt:
         pay_events.append([cash_materials_date, customer, finance_type, "Cash Materials", cash_materials_amt,
                            "", "", stage, sc_display, project_id, zoho_link])
+
+    # Subcontractor payments — paid in same proportions as project payments received
+    if subcontractor_total and subcontractor_total > 0:
+        if finance_type == "LR":
+            sub_slots = [
+                (payment1_date, round(subcontractor_total * 0.8, 2)),
+                (payment2_date, round(subcontractor_total * 0.2, 2)),
+            ]
+        elif finance_type == "CASH":
+            sub_slots = [
+                (payment1_date, round(subcontractor_total * 0.2, 2)),
+                (payment2_date, round(subcontractor_total * 0.6, 2)),
+                (payment3_date, round(subcontractor_total * 0.2, 2)),
+            ]
+        elif finance_type == "SE":
+            sub_slots = [
+                (payment1_date, round(subcontractor_total * 0.33, 2)),
+                (payment2_date, round(subcontractor_total * 0.33, 2)),
+                (payment3_date, round(subcontractor_total * 0.34, 2)),
+            ]
+        else:
+            sub_slots = [(payment1_date, subcontractor_total)]
+        for sub_date, sub_amt in sub_slots:
+            if sub_date and sub_amt:
+                pay_events.append([sub_date, customer, finance_type, "Subcontractor", sub_amt,
+                                   "", "", stage, sc_display, project_id, zoho_link])
 
     return pipeline_row, pay_events
 
