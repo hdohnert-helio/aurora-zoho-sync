@@ -4771,17 +4771,21 @@ def _write_weekly_payments_from_events(svc, weekly_events: list) -> None:
     weekly_sheet_id = None
     for s in existing.get("sheets", []):
         if s["properties"]["title"] == tab_name:
-            sheets.batchUpdate(
-                spreadsheetId=CASHFLOW_SHEET_ID,
-                body={"requests": [{"deleteSheet": {"sheetId": s["properties"]["sheetId"]}}]}
-            ).execute()
+            weekly_sheet_id = s["properties"]["sheetId"]
             break
 
-    resp = sheets.batchUpdate(
-        spreadsheetId=CASHFLOW_SHEET_ID,
-        body={"requests": [{"addSheet": {"properties": {"title": tab_name}}}]}
-    ).execute()
-    weekly_sheet_id = resp["replies"][0]["addSheet"]["properties"]["sheetId"]
+    if weekly_sheet_id is None:
+        resp = sheets.batchUpdate(
+            spreadsheetId=CASHFLOW_SHEET_ID,
+            body={"requests": [{"addSheet": {"properties": {"title": tab_name}}}]}
+        ).execute()
+        weekly_sheet_id = resp["replies"][0]["addSheet"]["properties"]["sheetId"]
+    else:
+        # Clear existing content so filter views are preserved
+        sheets.values().clear(
+            spreadsheetId=CASHFLOW_SHEET_ID,
+            range=f"'{tab_name}'!A:Z",
+        ).execute()
 
     headers = [
         "Week Of", "Payment Date", "Customer", "Finance Type", "Payment Type",
