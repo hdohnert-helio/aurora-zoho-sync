@@ -4788,12 +4788,39 @@ def _write_weekly_payments_from_events(svc, weekly_events: list) -> None:
         "Amount", "Commission Date", "Commission Amt",
         "Stage", "SC / Projected SC", "Project ID", "Zoho Link",
     ]
+    # Write data without relying on USER_ENTERED to parse HYPERLINK — replace
+    # zoho_link cells with empty placeholder so the main write is plain data.
+    plain_events = [evt[:11] + [""] for evt in weekly_events]
     sheets.values().update(
         spreadsheetId=CASHFLOW_SHEET_ID,
         range=f"'{tab_name}'!A1",
         valueInputOption="USER_ENTERED",
-        body={"values": [headers] + weekly_events},
+        body={"values": [headers] + plain_events},
     ).execute()
+
+    # Write HYPERLINK formulas for column L (Zoho Link) explicitly via formulaValue
+    formula_requests = []
+    for row_idx, evt in enumerate(weekly_events):
+        formula = evt[11] if len(evt) > 11 else ""
+        if formula and formula.startswith("="):
+            formula_requests.append({
+                "updateCells": {
+                    "range": {
+                        "sheetId": weekly_sheet_id,
+                        "startRowIndex": row_idx + 1,
+                        "endRowIndex": row_idx + 2,
+                        "startColumnIndex": 11,
+                        "endColumnIndex": 12,
+                    },
+                    "rows": [{"values": [{"userEnteredValue": {"formulaValue": formula}}]}],
+                    "fields": "userEnteredValue",
+                }
+            })
+    if formula_requests:
+        sheets.batchUpdate(
+            spreadsheetId=CASHFLOW_SHEET_ID,
+            body={"requests": formula_requests},
+        ).execute()
 
     dollar_fmt = {"numberFormat": {"type": "CURRENCY", "pattern": '"$"#,##0.00'}}
     sheets.batchUpdate(
@@ -5273,6 +5300,15 @@ def _update_cashflow_formulas(svc, pipeline_tab_name: str) -> dict:
                 f"+SUMPRODUCT(ISNUMBER({p}!$I$2:$I$200)*({p}!$I$2:$I$200>={c}$2)*({p}!$I$2:$I$200<{c}$2+7)*ISNUMBER({p}!$R$2:$R$200)*({p}!$R$2:$R$200))"
             )
             updates.append({"range": f"'{CASHFLOW_MAIN_TAB}'!{c}{row_sub_ref}", "values": [[f_sub_ref]]})
+
+        # $0.10/watt fee for non-LR final payments (col M = payment3_date, col F = system_kw)
+        # Skip column I — cell I53 contains a hard-coded value
+        if c != "I":
+            f_warranty = (
+                f"=SUMPRODUCT(ISNUMBER({p}!$M$2:$M$200)*({p}!$M$2:$M$200>={c}$2)*({p}!$M$2:$M$200<{c}$2+7)"
+                f"*(LEFT({p}!$C$2:$C$200,2)<>\"LR\")*ISNUMBER({p}!$F$2:$F$200)*({p}!$F$2:$F$200)*100)"
+            )
+            updates.append({"range": f"'{CASHFLOW_MAIN_TAB}'!{c}53", "values": [[f_warranty]]})
 
     sheets.values().batchUpdate(
         spreadsheetId=CASHFLOW_SHEET_ID,
