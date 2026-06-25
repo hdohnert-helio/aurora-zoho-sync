@@ -5671,30 +5671,35 @@ async def cashflow_extend_weeks(request: Request):
             return {"error": "could not build sheets service"}
         sheets = svc.spreadsheets()
 
-        # Read row 2 to find existing week dates
-        row2 = sheets.values().get(
+        # Read row 2 as raw values (dates are stored as serial numbers)
+        row2_raw = sheets.values().get(
             spreadsheetId=CASHFLOW_SHEET_ID,
             range=f"'{CASHFLOW_MAIN_TAB}'!2:2",
-            valueRenderOption="FORMATTED_VALUE",
+            valueRenderOption="UNFORMATTED_VALUE",
         ).execute().get("values", [[]])[0]
 
         start_col = 3  # col D (0-indexed)
         last_col = start_col
-        for i in range(start_col, len(row2)):
-            if row2[i]:
+        for i in range(start_col, len(row2_raw)):
+            if row2_raw[i] not in ("", None):
                 last_col = i
 
-        last_date_str = row2[last_col] if last_col < len(row2) else None
-        if not last_date_str:
+        last_val = row2_raw[last_col] if last_col < len(row2_raw) else None
+        if not last_val:
             return {"error": "Could not find last week date in row 2"}
 
-        # Parse the last date (may be formatted as M/D/YYYY or YYYY-MM-DD)
-        import re as _re
-        m = _re.match(r"(\d{1,2})/(\d{1,2})/(\d{4})", last_date_str)
-        if m:
-            last_date = datetime.date(int(m.group(3)), int(m.group(1)), int(m.group(2)))
+        # Google Sheets date serial: days since Dec 30, 1899
+        if isinstance(last_val, (int, float)):
+            last_date = datetime.date(1899, 12, 30) + datetime.timedelta(days=int(last_val))
         else:
-            last_date = datetime.date.fromisoformat(last_date_str)
+            # Fallback: try string parsing
+            import re as _re
+            s = str(last_val)
+            m = _re.match(r"(\d{1,2})/(\d{1,2})/(\d{4})", s)
+            if m:
+                last_date = datetime.date(int(m.group(3)), int(m.group(1)), int(m.group(2)))
+            else:
+                last_date = datetime.date.fromisoformat(s)
 
         # Build new Monday dates
         new_dates = []
