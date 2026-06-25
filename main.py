@@ -5650,6 +5650,95 @@ async def cashflow_fix_total_cash_out():
         return {"error": str(e), "traceback": traceback.format_exc()}
 
 
+@app.post("/cashflow/extend-weeks")
+async def cashflow_extend_weeks(request: Request):
+    """
+    Extend the Cash Flow tab by adding more week columns.
+    Body: {"weeks_to_add": 8}  (default 8)
+    Adds Monday dates after the last existing week column in row 2,
+    then re-runs _update_cashflow_formulas so auto rows get populated.
+    Does not touch existing columns.
+    """
+    try:
+        body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    except Exception:
+        body = {}
+    weeks_to_add = int(body.get("weeks_to_add", 8))
+
+    try:
+        svc = _build_sheets_service()
+        if not svc:
+            return {"error": "could not build sheets service"}
+        sheets = svc.spreadsheets()
+
+        # Read row 2 to find existing week dates
+        row2 = sheets.values().get(
+            spreadsheetId=CASHFLOW_SHEET_ID,
+            range=f"'{CASHFLOW_MAIN_TAB}'!2:2",
+            valueRenderOption="FORMATTED_VALUE",
+        ).execute().get("values", [[]])[0]
+
+        start_col = 3  # col D (0-indexed)
+        last_col = start_col
+        for i in range(start_col, len(row2)):
+            if row2[i]:
+                last_col = i
+
+        last_date_str = row2[last_col] if last_col < len(row2) else None
+        if not last_date_str:
+            return {"error": "Could not find last week date in row 2"}
+
+        # Parse the last date (may be formatted as M/D/YYYY or YYYY-MM-DD)
+        import re as _re
+        m = _re.match(r"(\d{1,2})/(\d{1,2})/(\d{4})", last_date_str)
+        if m:
+            last_date = datetime.date(int(m.group(3)), int(m.group(1)), int(m.group(2)))
+        else:
+            last_date = datetime.date.fromisoformat(last_date_str)
+
+        # Build new Monday dates
+        new_dates = []
+        d = last_date
+        for _ in range(weeks_to_add):
+            d += datetime.timedelta(weeks=1)
+            new_dates.append(d.strftime("%-m/%-d/%Y"))
+
+        # Write new dates to row 2 starting one column after last_col
+        write_col_start = last_col + 1
+        write_range = f"'{CASHFLOW_MAIN_TAB}'!{_col_letter(write_col_start)}2:{_col_letter(write_col_start + weeks_to_add - 1)}2"
+        sheets.values().update(
+            spreadsheetId=CASHFLOW_SHEET_ID,
+            range=write_range,
+            valueInputOption="USER_ENTERED",
+            body={"values": [new_dates]},
+        ).execute()
+
+        # Date format for new header cells
+        sheet_meta = sheets.get(spreadsheetId=CASHFLOW_SHEET_ID).execute()
+        cf_sheet_id = next(
+            (s["properties"]["sheetId"] for s in sheet_meta.get("sheets", [])
+             if s["properties"]["title"] == CASHFLOW_MAIN_TAB), None
+        )
+
+        # Re-run formulas to populate new columns
+        tab_name = next(
+            (s["properties"]["title"] for s in sheet_meta.get("sheets", [])
+             if s["properties"]["title"].startswith("Pipeline ")), None
+        )
+        formula_result = _update_cashflow_formulas(svc, tab_name) if tab_name else {"skipped": "no Pipeline tab"}
+
+        return {
+            "status": "ok",
+            "weeks_added": weeks_to_add,
+            "new_dates": new_dates,
+            "formulas": formula_result,
+        }
+
+    except Exception as e:
+        import traceback
+        return {"error": str(e), "traceback": traceback.format_exc()}
+
+
 @app.post("/cashflow/reorganize-expenses")
 async def cashflow_reorganize_expenses():
     """
@@ -5807,36 +5896,12 @@ async def cashflow_reorganize_expenses():
         # 7. Misc
         new_rows.append(data_row("Misc", expense_data["Misc"]))
 
-        # Write the new expense section starting right after CASH OUT row
-        # The first expense row is 2 rows after CASH OUT (CASH OUT row + 1 blank/header = expense start)
         # Find where Payroll currently lives to know the write start
         payroll_idx = find_row_idx("Payroll")
-        if payroll_idx is None:
-            # Fall back to 2 rows after CASH OUT
-            write_start_idx = cash_out_idx + 2
-        else:
-            write_start_idx = payroll_idx
-
+        write_start_idx = payroll_idx if payroll_idx is not None else cash_out_idx + 2
         write_start_row = write_start_idx + 1  # 1-indexed
-        write_end_row = total_cash_out_idx  # write up to (not including) Total Cash Out
 
-        # Pad / trim to exactly fit
-        num_rows_available = write_end_row - write_start_row  # rows before Total Cash Out
-        while len(new_rows) < num_rows_available:
-            new_rows.append([""] * (3 + num_cols))
-
-        # Write expense rows (overwrite existing)
-        col_letter_end = _col_letter(start_col + num_cols)  # last week col letter
-        write_range = f"'{CASHFLOW_MAIN_TAB}'!A{write_start_row}:{col_letter_end}{write_start_row + len(new_rows) - 1}"
-
-        sheets.values().update(
-            spreadsheetId=CASHFLOW_SHEET_ID,
-            range=write_range,
-            valueInputOption="USER_ENTERED",
-            body={"values": new_rows},
-        ).execute()
-
-        # Get sheet ID for formatting
+        # Get sheet ID and metadata before writing
         sheet_meta = sheets.get(spreadsheetId=CASHFLOW_SHEET_ID).execute()
         cf_sheet_id = None
         for s in sheet_meta.get("sheets", []):
@@ -5844,27 +5909,58 @@ async def cashflow_reorganize_expenses():
                 cf_sheet_id = s["properties"]["sheetId"]
                 break
 
-        # Format category header rows as bold + light gray background
+        # If new rows exceed space before Total Cash Out, insert extra rows first
+        write_end_row = total_cash_out_idx  # 0-indexed; 1-indexed = total_cash_out_idx+1
+        rows_available = write_end_row - write_start_idx  # rows available in sheet
+        extra_needed = len(new_rows) - rows_available
+        if extra_needed > 0 and cf_sheet_id is not None:
+            sheets.batchUpdate(
+                spreadsheetId=CASHFLOW_SHEET_ID,
+                body={"requests": [{
+                    "insertDimension": {
+                        "range": {"sheetId": cf_sheet_id, "dimension": "ROWS",
+                                   "startIndex": write_end_row, "endIndex": write_end_row + extra_needed},
+                        "inheritFromBefore": True,
+                    }
+                }]}
+            ).execute()
+
+        # Write expense rows
+        col_letter_end = _col_letter(start_col + num_cols)
+        write_range = f"'{CASHFLOW_MAIN_TAB}'!A{write_start_row}:{col_letter_end}{write_start_row + len(new_rows) - 1}"
+        sheets.values().update(
+            spreadsheetId=CASHFLOW_SHEET_ID,
+            range=write_range,
+            valueInputOption="USER_ENTERED",
+            body={"values": new_rows},
+        ).execute()
+
+        # Per-category colors (bold + distinct background)
+        HEADER_COLORS = {
+            "  Debt Payments":    {"red": 0.78, "green": 0.87, "blue": 0.97},  # light blue
+            "  Subscriptions":    {"red": 0.78, "green": 0.96, "blue": 0.82},  # light green
+            "  Office Expenses":  {"red": 1.00, "green": 0.90, "blue": 0.74},  # light orange
+            "  Project Expenses": {"red": 0.90, "green": 0.80, "blue": 0.97},  # light purple
+            "  Commissions":      {"red": 1.00, "green": 0.95, "blue": 0.70},  # light yellow
+        }
+
         fmt_requests = []
         if cf_sheet_id is not None:
-            header_labels = {"  Debt Payments", "  Subscriptions", "  Office Expenses",
-                             "  Project Expenses", "  Commissions"}
             for i, row in enumerate(new_rows):
-                if row and row[0] in header_labels:
-                    sheet_row = write_start_row + i - 1  # 0-indexed
+                label = row[0] if row else ""
+                if label in HEADER_COLORS:
+                    sheet_row_0 = write_start_row - 1 + i  # 0-indexed
                     fmt_requests.append({
                         "repeatCell": {
                             "range": {
                                 "sheetId": cf_sheet_id,
-                                "startRowIndex": sheet_row,
-                                "endRowIndex": sheet_row + 1,
+                                "startRowIndex": sheet_row_0,
+                                "endRowIndex": sheet_row_0 + 1,
                             },
-                            "cell": {
-                                "userEnteredFormat": {
-                                    "textFormat": {"bold": True},
-                                    "backgroundColor": {"red": 0.9, "green": 0.9, "blue": 0.9},
-                                }
-                            },
+                            "cell": {"userEnteredFormat": {
+                                "textFormat": {"bold": True},
+                                "backgroundColor": HEADER_COLORS[label],
+                            }},
                             "fields": "userEnteredFormat.textFormat.bold,userEnteredFormat.backgroundColor",
                         }
                     })
