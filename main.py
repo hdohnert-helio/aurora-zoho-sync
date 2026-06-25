@@ -4598,7 +4598,7 @@ def _compute_cashflow_row(row: dict, today: datetime.date, zoho_base: str, auror
             else:
                 payment1_date = today.isoformat()
             payment2_date = (sc - datetime.timedelta(days=5)).isoformat()
-            payment3_date = (sc + datetime.timedelta(days=26)).isoformat()
+            payment3_date = (sc + datetime.timedelta(days=7)).isoformat()
             payment1_amt = round(contract_price * 0.2, 2)
             payment2_amt = round(contract_price * 0.6, 2)
             payment3_amt = round(contract_price * 0.2, 2)
