@@ -5172,7 +5172,11 @@ def _write_dashboard_expenses(svc) -> int:
         range="Expenses!A2:H",
         valueRenderOption="FORMATTED_VALUE",
     ).execute().get("values", [])
-    manual_rows = [r for r in existing if len(r) > 4 and str(r[4]).strip() == "No"]
+    # Never preserve project-calculated categories — those are always regenerated as "Auto"
+    _PROJECT_CATS = {"Commissions", "Materials", "SolarInsure/Warranty", "Subcontractor"}
+    manual_rows = [r for r in existing
+                   if len(r) > 4 and str(r[4]).strip() == "No"
+                   and (len(r) < 2 or r[1] not in _PROJECT_CATS)]
 
     # Clear and rewrite auto rows, then append preserved manual rows
     sheets.values().clear(
