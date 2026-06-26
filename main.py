@@ -6224,9 +6224,8 @@ async def dashboard_create(request: Request):
 
             # Detect section header rows (no indented amount, just a category label)
             for key, cat in SECTION_TO_CAT.items():
-                if key in label_lower and not any(
-                    c.isdigit() for c in (row[3] if len(row) > 3 else "")
-                ):
+                val = row[3] if len(row) > 3 else None
+                if key in label_lower and not isinstance(val, (int, float)):
                     current_cat = cat
                     break
 
