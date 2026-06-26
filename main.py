@@ -6178,23 +6178,87 @@ def dashboard_create():
             ],
         })
 
-        # ---- Expenses tab -------------------------------------------------
+        # ---- Expenses tab — pre-populate from existing Cash Flow sheet -------
         exp_headers = ["Week", "Category", "Description", "Amount",
                        "Recurring", "Status", "Approved By", "Notes"]
-        exp_rows = [
-            ["", "Payroll & Benefits", "Weekly Payroll",    0, "Yes", "Active", "", ""],
-            ["", "Debt Service",       "Loan Payment",      0, "Yes", "Active", "", ""],
-            ["", "Subscriptions",      "Software & Tools",  0, "Yes", "Active", "", ""],
-            ["", "Office & Operating", "Office Expenses",   0, "Yes", "Active", "", ""],
-        ]
-        value_data.append({
-            "range": "Expenses!A1:H1",
-            "values": [exp_headers],
-        })
-        value_data.append({
-            "range": "Expenses!A2:H5",
-            "values": exp_rows,
-        })
+
+        # Read existing Cash Flow tab: column A (labels) + columns D-F (first 3 week amounts)
+        existing_cf = svc.spreadsheets().values().get(
+            spreadsheetId=CASHFLOW_SHEET_ID,
+            range=f"'{CASHFLOW_MAIN_TAB}'!A13:G59",
+            valueRenderOption="UNFORMATTED_VALUE",
+        ).execute().get("values", [])
+
+        # Section header → category mapping
+        SECTION_TO_CAT = {
+            "debt": "Debt Service",
+            "subscription": "Subscriptions",
+            "office": "Office & Operating",
+            "project": "Misc",
+            "commission": "Commissions",
+            "payroll": "Payroll & Benefits",
+        }
+        AUTO_ROWS = {
+            "lr 80%", "lr 20%", "cash 60%", "cash 20%", "se payment",
+            "commissions (payout", "ct green", "materials (cash",
+            "subcontractor", "total", "net cash", "opening", "closing",
+        }
+
+        current_cat = "Misc"
+        exp_rows = []
+        for row in existing_cf:
+            label = (row[0] if row else "").strip()
+            if not label:
+                continue
+            label_lower = label.lower()
+
+            # Detect section header rows (no indented amount, just a category label)
+            for key, cat in SECTION_TO_CAT.items():
+                if key in label_lower and not any(
+                    c.isdigit() for c in (row[3] if len(row) > 3 else "")
+                ):
+                    current_cat = cat
+                    break
+
+            # Skip auto-formula rows and section headers
+            if any(kw in label_lower for kw in AUTO_ROWS):
+                continue
+            if label_lower in [k for k in SECTION_TO_CAT]:
+                continue
+
+            # Find first non-zero amount in columns D-G (indices 3-6 relative to A13)
+            amt = 0
+            for i in range(3, min(len(row), 7)):
+                try:
+                    v = float(row[i])
+                    if v != 0:
+                        amt = v
+                        break
+                except (ValueError, TypeError):
+                    pass
+
+            if amt == 0 and label_lower.startswith("  "):
+                # Skip rows that look like section sub-headers with no value
+                continue
+
+            exp_rows.append(["", current_cat, label, amt, "Yes", "Active", "", ""])
+
+        # Fallback if read failed
+        if not exp_rows:
+            exp_rows = [
+                ["", "Payroll & Benefits", "Weekly Payroll",   0, "Yes", "Active", "", ""],
+                ["", "Debt Service",       "Loan Payment",     0, "Yes", "Active", "", ""],
+                ["", "Subscriptions",      "Software & Tools", 0, "Yes", "Active", "", ""],
+                ["", "Office & Operating", "Office Expenses",  0, "Yes", "Active", "", ""],
+            ]
+
+        value_data.append({"range": "Expenses!A1:H1", "values": [exp_headers]})
+        if exp_rows:
+            end_row = 1 + len(exp_rows)
+            value_data.append({
+                "range": f"Expenses!A2:H{end_row}",
+                "values": exp_rows,
+            })
 
         # ---- Revenue tab --------------------------------------------------
         rev_headers = ["Week", "Category", "Amount", "Project", "Notes"]
