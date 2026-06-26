@@ -4572,14 +4572,16 @@ def _compute_cashflow_row(row: dict, today: datetime.date, zoho_base: str, auror
     comm_payout2_date = comm_payout2_amt = ""
     comm_payout3_date = comm_payout3_amt = ""
 
-    if finance_type == "LR" and effective_sc_str:
+    if finance_type in ("LR", "SG") and effective_sc_str:
         try:
             sc = datetime.date.fromisoformat(effective_sc_str)
-            mat = materials_est if isinstance(materials_est, (int, float)) else 0
+            # Materials deducted from draw only for LR (not SG)
+            mat = materials_est if (isinstance(materials_est, (int, float)) and finance_type == "LR") else 0
+            warranty = CASHFLOW_LR_WARRANTY if finance_type == "LR" else 0
             payment1_date = _next_monday_on_or_after(sc + datetime.timedelta(days=14)).isoformat()
             payment1_amt = round(contract_price * 0.8 - mat, 2)
             payment2_date = _next_monday_on_or_after(sc + datetime.timedelta(days=33)).isoformat()
-            payment2_amt = round(contract_price * 0.2 - CASHFLOW_LR_WARRANTY, 2)
+            payment2_amt = round(contract_price * 0.2 - warranty, 2)
             comm_payout1_date = payment1_date
             comm_payout1_amt = round(total_commission * 0.8 + referral_flat, 2)
             comm_payout2_date = payment2_date
@@ -4705,14 +4707,18 @@ def _compute_cashflow_row(row: dict, today: datetime.date, zoho_base: str, auror
     ]
 
     PAYMENT_TYPE_MAP = {
-        ("LR",   0): "LR 80% Draw",
-        ("LR",   1): "LR 20% Final",
-        ("CASH", 0): "Cash 20% Deposit",
-        ("CASH", 1): "Cash 60% Progress",
-        ("CASH", 2): "Cash 20% Final",
-        ("SE",   0): "SE Payment 1 (33%)",
-        ("SE",   1): "SE Payment 2 (33%)",
-        ("SE",   2): "SE Payment 3 (34%)",
+        ("LR",   0): "LR/SG M1",
+        ("LR",   1): "LR/SG M2",
+        ("SG",   0): "LR/SG M1",
+        ("SG",   1): "LR/SG M2",
+        ("CF",   0): "CF M1",
+        ("CF",   1): "CF M2",
+        ("SE",   0): "SE M1",
+        ("SE",   1): "SE M2",
+        ("SE",   2): "SE M3",
+        ("CASH", 0): "Cash Deposit",
+        ("CASH", 1): "Cash Progress",
+        ("CASH", 2): "Cash Final",
     }
     pay_slots = [
         (payment1_date, payment1_amt, comm_payout1_date, comm_payout1_amt),
@@ -5018,11 +5024,125 @@ def _write_summary_tab(svc, pipeline_tab_name: str) -> None:
     logger.info("_write_summary_tab: Summary tab written")
 
 
-_REVENUE_CATEGORY_MAP = {
-    "LR 80% Draw":        "LR Draw",
-    "LR 20% Final":       "LR Final",
-    "Cash 20% Final":     "Cash Final",
-    "SE Payment 3 (34%)": "SE Final",
+# ---- Dashboard expense sync data ----------------------------------------
+DASHBOARD_OPEX = [
+    # (description, category, monthly_amount, day_of_month)
+    ("Virtual Mailboxes",   "Office & Operating", 120,   5),
+    ("ATT Bill",            "Office & Operating", 650,  12),
+    ("Quickbooks",          "Subscriptions",      690,  19),
+    ("Canon Printer",       "Office & Operating", 350,  21),
+    ("BBB",                 "Subscriptions",       59,  20),
+    ("Aurora Solar",        "Subscriptions",     6667,   1),
+    ("Office365 Business",  "Subscriptions",      115,   8),
+    ("Zoho One",            "Subscriptions",     1045,   1),
+    ("Google Workspace",    "Subscriptions",     1100,  31),  # uses last day for short months
+    ("Sirius Radio",        "Subscriptions",       27,  25),
+    ("Site Capture",        "Subscriptions",      565,  25),
+    ("Adobe Services",      "Subscriptions",      395,  19),
+    ("Energytoolbase",      "Subscriptions",      249,  18),
+    ("Duns and Bradstreet", "Subscriptions",       42,  14),
+    ("Nav.com",             "Subscriptions",      128,  11),
+    ("Zapier",              "Subscriptions",       31,   6),
+    ("Loom.com",            "Subscriptions",       54,   3),
+    ("ChatGPT",             "Subscriptions",       82,   5),
+    ("Anthropic",           "Subscriptions",      228,   2),
+]
+
+DASHBOARD_FLEET = [
+    # (description, monthly_payment, day_of_month)
+    ("GMC Sierra 2020",      712.54,  24),
+    ("Chevy Silverado 2016", 521.38,  15),
+    ("GMC Savana 2020",      881.82,  15),
+    ("Ford Transit 2023",   1230.12,  14),
+    ("Ford Transit 2021",    873.88,  15),
+    ("Ford Ranger 2024",     846.45,  12),
+    ("Ford Transit 2024",   1124.00,  12),
+    ("Ford F-350 2024",     1557.31,   7),
+    ("Ford Escape 2019",     507.59,  10),
+    ("Forklift",             901.00,  30),
+]
+
+
+def _write_dashboard_expenses(svc) -> int:
+    """
+    Generate and write expense rows to the dashboard Expenses tab.
+    Reads week dates from the dashboard Cash Flow tab row 2, then maps
+    monthly expenses (OpEx + Fleet) and weekly payroll into those weeks.
+    Returns number of rows written.
+    """
+    import calendar as _cal
+
+    sheets = svc.spreadsheets()
+
+    # Read week dates from Cash Flow row 2 (B2:S2 to allow for expansion)
+    raw = sheets.values().get(
+        spreadsheetId=DASHBOARD_SHEET_ID,
+        range="'Cash Flow'!B2:S2",
+        valueRenderOption="UNFORMATTED_VALUE",
+    ).execute().get("values", [[]])[0]
+
+    week_dates = []
+    for val in raw:
+        if isinstance(val, (int, float)) and val > 0:
+            week_dates.append(datetime.date(1899, 12, 30) + datetime.timedelta(days=int(val)))
+
+    if not week_dates:
+        logger.warning("_write_dashboard_expenses: no week dates found in dashboard")
+        return 0
+
+    rows = []
+
+    for week_monday in week_dates:
+        week_str = week_monday.isoformat()
+        week_days = [week_monday + datetime.timedelta(days=i) for i in range(7)]
+
+        # Payroll: $12K every week; $21K in the week containing the 1st of any month
+        payroll_amt = 21000 if any(d.day == 1 for d in week_days) else 12000
+        rows.append([week_str, "Payroll & Benefits", "Payroll", payroll_amt,
+                     "Yes", "Active", "", ""])
+
+        # OpEx subscriptions / office expenses
+        for desc, cat, amount, billing_day in DASHBOARD_OPEX:
+            for d in week_days:
+                max_day = _cal.monthrange(d.year, d.month)[1]
+                effective_day = min(billing_day, max_day)
+                if d.day == effective_day:
+                    rows.append([week_str, cat, desc, amount, "Yes", "Active", "", ""])
+                    break
+
+        # Fleet loan payments
+        for desc, amount, billing_day in DASHBOARD_FLEET:
+            for d in week_days:
+                max_day = _cal.monthrange(d.year, d.month)[1]
+                effective_day = min(billing_day, max_day)
+                if d.day == effective_day:
+                    rows.append([week_str, "Fleet", desc, amount, "Yes", "Active", "", ""])
+                    break
+
+    # Clear and rewrite (auto-generated rows only; manual entries go via Submissions)
+    sheets.values().clear(
+        spreadsheetId=DASHBOARD_SHEET_ID,
+        range="Expenses!A2:H",
+    ).execute()
+
+    if rows:
+        sheets.values().update(
+            spreadsheetId=DASHBOARD_SHEET_ID,
+            range="Expenses!A2",
+            valueInputOption="USER_ENTERED",
+            body={"values": rows},
+        ).execute()
+
+    logger.info(f"_write_dashboard_expenses: wrote {len(rows)} expense rows across {len(week_dates)} weeks")
+    return len(rows)
+
+
+_REVENUE_KNOWN_CATEGORIES = {
+    "LR/SG M1", "LR/SG M2",
+    "CF M1", "CF M2",
+    "SE M1", "SE M2", "SE M3",
+    "Cash Deposit", "Cash Progress", "Cash Final",
+    "Manual",
 }
 _REVENUE_SKIP = {"CT Green Estates", "Cash Materials", "Subcontractor"}
 
@@ -5059,7 +5179,7 @@ def _write_dashboard_revenue_tab(svc, weekly_events: list) -> None:
         if not pay_amt or pay_amt == "":
             continue
 
-        category = _REVENUE_CATEGORY_MAP.get(pay_type, "Other")
+        category = pay_type if pay_type in _REVENUE_KNOWN_CATEGORIES else "Other"
         rows.append([week_of, category, pay_amt, customer, pay_type])
 
     if rows:
@@ -5208,8 +5328,9 @@ def _run_cashflow_batch(projects: list[dict], tab_name: str) -> dict:
     weekly_events.sort(key=lambda r: r[1] if r[1] else "9999")
     _write_weekly_payments_from_events(svc, weekly_events)
 
-    # Write Revenue tab to dashboard sheet
+    # Write Revenue + Expenses tabs to dashboard sheet
     _write_dashboard_revenue_tab(svc, weekly_events)
+    _write_dashboard_expenses(svc)
 
     _write_summary_tab(svc, tab_name)
     _write_readme_tab(svc)
@@ -6364,27 +6485,36 @@ async def dashboard_create(request: Request):
         })
 
         # Row labels (col A)
+        # Revenue: rows 4-16 | Expenses: rows 18-29 | Net/Balance: rows 31-34
         label_rows = {
             4:  "💰 MONEY IN",
-            5:  "  LR Draws",
-            6:  "  LR Finals",
-            7:  "  Cash & SE Finals",
-            8:  "  Other Revenue",
-            9:  "TOTAL MONEY IN",
-            11: "💸 MONEY OUT",
-            12: "  Payroll & Benefits",
-            13: "  Subcontractor Payments",
-            14: "  Materials",
-            15: "  Commissions",
-            16: "  SolarInsure / Warranty",
-            17: "  Debt Service",
-            18: "  Subscriptions",
-            19: "  Office & Operating",
-            20: "  Misc",
-            21: "TOTAL MONEY OUT",
-            23: "NET CASH FLOW",
-            24: "Opening Balance",
-            25: "CLOSING BALANCE",
+            5:  "  LR/SG M1",
+            6:  "  LR/SG M2",
+            7:  "  CF M1",
+            8:  "  CF M2",
+            9:  "  SE M1",
+            10: "  SE M2",
+            11: "  SE M3",
+            12: "  Cash Deposit",
+            13: "  Cash Progress",
+            14: "  Cash Final",
+            15: "  Manual Revenue",
+            16: "TOTAL MONEY IN",
+            18: "💸 MONEY OUT",
+            19: "  Payroll & Benefits",
+            20: "  Subcontractor Payments",
+            21: "  Materials",
+            22: "  Commissions",
+            23: "  SolarInsure / Warranty",
+            24: "  Debt Service",
+            25: "  Subscriptions",
+            26: "  Office & Operating",
+            27: "  Fleet",
+            28: "  Misc",
+            29: "TOTAL MONEY OUT",
+            31: "NET CASH FLOW",
+            33: "Opening Balance",
+            34: "CLOSING BALANCE",
         }
         for row_1idx, label in label_rows.items():
             value_data.append({
@@ -6394,48 +6524,59 @@ async def dashboard_create(request: Request):
 
         # Formulas for each week column (B=col index 1, …, R=col index 17)
         expense_categories = {
-            12: "Payroll & Benefits",
-            13: "Subcontractor",
-            14: "Materials",
-            15: "Commissions",
-            16: "SolarInsure/Warranty",
-            17: "Debt Service",
-            18: "Subscriptions",
-            19: "Office & Operating",
-            20: "Misc",
+            19: "Payroll & Benefits",
+            20: "Subcontractor",
+            21: "Materials",
+            22: "Commissions",
+            23: "SolarInsure/Warranty",
+            24: "Debt Service",
+            25: "Subscriptions",
+            26: "Office & Operating",
+            27: "Fleet",
+            28: "Misc",
         }
+
+        def rev_sumif(col, cat):
+            return f'=SUMIFS(Revenue!$C:$C,Revenue!$A:$A,{col}$2,Revenue!$B:$B,"{cat}")'
+
+        def exp_sumif(col, cat):
+            return (f'=SUMIFS(Expenses!$D:$D,Expenses!$A:$A,{col}$2,'
+                    f'Expenses!$B:$B,"{cat}",Expenses!$F:$F,"Active")')
 
         for col_idx in range(num_weeks):  # 0-based; col B = index 1 in sheet
             col_letter = _col_letter(col_idx + 1)  # +1 because A is labels
 
             formulas = {}
 
-            # Revenue
-            formulas[5]  = f'=SUMIFS(Revenue!$C:$C,Revenue!$A:$A,{col_letter}$2,Revenue!$B:$B,"LR Draw")'
-            formulas[6]  = f'=SUMIFS(Revenue!$C:$C,Revenue!$A:$A,{col_letter}$2,Revenue!$B:$B,"LR Final")'
-            formulas[7]  = (f'=SUMIFS(Revenue!$C:$C,Revenue!$A:$A,{col_letter}$2,Revenue!$B:$B,"Cash Final")'
-                            f'+SUMIFS(Revenue!$C:$C,Revenue!$A:$A,{col_letter}$2,Revenue!$B:$B,"SE Final")')
-            formulas[8]  = f'=SUMIFS(Revenue!$C:$C,Revenue!$A:$A,{col_letter}$2,Revenue!$B:$B,"Other")'
-            formulas[9]  = f'=SUM({col_letter}5:{col_letter}8)'
+            # Revenue rows 5-15
+            formulas[5]  = rev_sumif(col_letter, "LR/SG M1")
+            formulas[6]  = rev_sumif(col_letter, "LR/SG M2")
+            formulas[7]  = rev_sumif(col_letter, "CF M1")
+            formulas[8]  = rev_sumif(col_letter, "CF M2")
+            formulas[9]  = rev_sumif(col_letter, "SE M1")
+            formulas[10] = rev_sumif(col_letter, "SE M2")
+            formulas[11] = rev_sumif(col_letter, "SE M3")
+            formulas[12] = rev_sumif(col_letter, "Cash Deposit")
+            formulas[13] = rev_sumif(col_letter, "Cash Progress")
+            formulas[14] = rev_sumif(col_letter, "Cash Final")
+            formulas[15] = rev_sumif(col_letter, "Manual")
+            formulas[16] = f'=SUM({col_letter}5:{col_letter}15)'
 
-            # Expenses
+            # Expense rows 19-28
             for row_num, cat in expense_categories.items():
-                formulas[row_num] = (
-                    f'=SUMIFS(Expenses!$D:$D,Expenses!$A:$A,{col_letter}$2,'
-                    f'Expenses!$B:$B,"{cat}",Expenses!$F:$F,"Active")'
-                )
-            formulas[21] = f'=SUM({col_letter}12:{col_letter}20)'
+                formulas[row_num] = exp_sumif(col_letter, cat)
+            formulas[29] = f'=SUM({col_letter}19:{col_letter}28)'
 
             # Net / Opening / Closing
-            formulas[23] = f'={col_letter}9-{col_letter}21'
+            formulas[31] = f'={col_letter}16-{col_letter}29'
 
             if col_idx == 0:
-                formulas[24] = "=Inputs!$B$2"
+                formulas[33] = "=Inputs!$B$2"
             else:
-                prev_col = _col_letter(col_idx)  # previous week column
-                formulas[24] = f"={prev_col}25"
+                prev_col = _col_letter(col_idx)
+                formulas[33] = f"={prev_col}34"
 
-            formulas[25] = f'={col_letter}24+{col_letter}23'
+            formulas[34] = f'={col_letter}33+{col_letter}31'
 
             for row_num, formula in formulas.items():
                 value_data.append({
@@ -6540,18 +6681,18 @@ async def dashboard_create(request: Request):
             }
         })
 
-        # Section header rows (0-indexed: row 4→idx3, row 11→idx10)
-        requests.append(row_bg_bold(cf_sid, 3,  18, light_green))   # MONEY IN header
-        requests.append(row_bg_bold(cf_sid, 8,  18, green_total))   # TOTAL MONEY IN
-        requests.append(row_bg_bold(cf_sid, 10, 18, light_red))     # MONEY OUT header
-        requests.append(row_bg_bold(cf_sid, 20, 18, red_total))     # TOTAL MONEY OUT
-        requests.append(row_bg_bold(cf_sid, 22, 18, closing_bg))    # NET CASH FLOW
-        requests.append(row_bg_bold(cf_sid, 24, 18, closing_bg))    # CLOSING BALANCE
+        # Section header rows (0-indexed: row N → idx N-1)
+        requests.append(row_bg_bold(cf_sid,  3, 18, light_green))   # row 4:  MONEY IN header
+        requests.append(row_bg_bold(cf_sid, 15, 18, green_total))   # row 16: TOTAL MONEY IN
+        requests.append(row_bg_bold(cf_sid, 17, 18, light_red))     # row 18: MONEY OUT header
+        requests.append(row_bg_bold(cf_sid, 28, 18, red_total))     # row 29: TOTAL MONEY OUT
+        requests.append(row_bg_bold(cf_sid, 30, 18, closing_bg))    # row 31: NET CASH FLOW
+        requests.append(row_bg_bold(cf_sid, 33, 18, closing_bg))    # row 34: CLOSING BALANCE
 
-        # Currency format for all data rows (5–25 = idx 4–24, cols 1–17)
-        for r in list(range(4, 9)) + list(range(11, 26)):
-            if r in (3, 10, 22):  # spacers / section headers with no $
-                continue
+        # Currency format for revenue (rows 5-15=idx4-14), expenses (rows 19-28=idx18-27),
+        # net/balance (rows 31,33,34 = idx 30,32,33)
+        currency_rows = list(range(4, 15)) + list(range(18, 28)) + [30, 32, 33]
+        for r in currency_rows:
             requests.append({
                 "repeatCell": {
                     "range": cell_range(cf_sid, r, r + 1, 1, 18),
@@ -6622,7 +6763,7 @@ async def dashboard_create(request: Request):
         # Data validation — Category column B (index 1), rows 2-1000
         cat_options = ["Payroll & Benefits", "Subcontractor", "Materials",
                        "Commissions", "SolarInsure/Warranty", "Debt Service",
-                       "Subscriptions", "Office & Operating", "Misc"]
+                       "Subscriptions", "Office & Operating", "Fleet", "Misc"]
         requests.append({
             "setDataValidation": {
                 "range": cell_range(exp_sid, 1, 1000, 1, 2),
@@ -6706,6 +6847,18 @@ async def dashboard_create(request: Request):
             "url": f"https://docs.google.com/spreadsheets/d/{ss_id}",
         }
 
+    except Exception as e:
+        import traceback as _tb
+        return {"error": str(e), "traceback": _tb.format_exc()}
+
+
+@app.post("/dashboard/sync-expenses")
+async def dashboard_sync_expenses():
+    """Regenerate Expenses tab rows from OpEx + Fleet + Payroll schedules."""
+    try:
+        svc = _build_sheets_service()
+        n = _write_dashboard_expenses(svc)
+        return {"status": "ok", "rows_written": n}
     except Exception as e:
         import traceback as _tb
         return {"error": str(e), "traceback": _tb.format_exc()}
