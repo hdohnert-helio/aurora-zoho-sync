@@ -5048,6 +5048,27 @@ DASHBOARD_OPEX = [
     ("Anthropic",           "Subscriptions",      228,   2),
 ]
 
+DASHBOARD_DEBT_WEEKLY = [
+    # (description, amount)  — "" means no amount yet
+    ("Mulligan",      4524),
+    ("SBA Loan",      1500),
+    ("Soligent",       500),
+    ("Greentech",      500),
+    ("US Renewables",   ""),
+    ("EW",              ""),
+    ("F&M",             ""),
+    ("TK Properties",   ""),
+]
+
+DASHBOARD_DEBT_MONTHLY = [
+    # (description, amount, day_of_month)  — "" means no amount yet
+    ("QuickBooks Loan",     4929, 29),
+    ("QuickBooks 2nd Loan", 3169, 29),
+    ("Amex",                  "", 29),
+    ("Lowest Credit Card",    "", 29),
+    ("Ink Card",              "", 29),
+]
+
 DASHBOARD_FLEET = [
     # (description, monthly_payment, day_of_month)
     ("GMC Sierra 2020",      712.54,  24),
@@ -5100,6 +5121,19 @@ def _write_dashboard_expenses(svc) -> int:
         payroll_amt = 21000 if any(d.day == 1 for d in week_days) else 12000
         rows.append([week_str, "Payroll & Benefits", "Payroll", payroll_amt,
                      "Yes", "Active", "", ""])
+
+        # Weekly debt service items
+        for desc, amount in DASHBOARD_DEBT_WEEKLY:
+            rows.append([week_str, "Debt Service", desc, amount, "Yes", "Active", "", ""])
+
+        # Monthly debt service items
+        for desc, amount, billing_day in DASHBOARD_DEBT_MONTHLY:
+            for d in week_days:
+                max_day = _cal.monthrange(d.year, d.month)[1]
+                effective_day = min(billing_day, max_day)
+                if d.day == effective_day:
+                    rows.append([week_str, "Debt Service", desc, amount, "Yes", "Active", "", ""])
+                    break
 
         # OpEx subscriptions / office expenses
         for desc, cat, amount, billing_day in DASHBOARD_OPEX:
