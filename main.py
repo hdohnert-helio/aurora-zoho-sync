@@ -6110,27 +6110,37 @@ async def cashflow_reorganize_expenses():
 # ============================================================================
 
 @app.post("/dashboard/create")
-def dashboard_create():
+async def dashboard_create(request: Request):
     try:
+        body_in = await request.json()
+        ss_id = (body_in.get("spreadsheet_id") or "").strip()
+        if not ss_id:
+            raise HTTPException(status_code=400, detail="spreadsheet_id required — create a blank Google Sheet, then pass its ID here")
+
         service = _build_sheets_service()
 
         # ------------------------------------------------------------------ #
-        # 1. Create spreadsheet with all tabs
+        # 1. Set up tabs on the provided spreadsheet
         # ------------------------------------------------------------------ #
-        body = {
-            "properties": {"title": "Helio Cash Flow Dashboard"},
-            "sheets": [
-                {"properties": {"title": "Cash Flow",   "index": 0}},
-                {"properties": {"title": "Expenses",    "index": 1}},
-                {"properties": {"title": "Revenue",     "index": 2}},
-                {"properties": {"title": "Inputs",      "index": 3}},
-                {"properties": {"title": "Submissions", "index": 4}},
-            ],
-        }
-        spreadsheet = service.spreadsheets().create(body=body).execute()
-        ss_id = spreadsheet["spreadsheetId"]
+        meta = service.spreadsheets().get(spreadsheetId=ss_id).execute()
+        existing_titles = {s["properties"]["title"]: s["properties"]["sheetId"]
+                           for s in meta.get("sheets", [])}
+
+        tab_requests = []
+        needed = ["Cash Flow", "Expenses", "Revenue", "Inputs", "Submissions"]
+        for i, title in enumerate(needed):
+            if title not in existing_titles:
+                tab_requests.append({"addSheet": {"properties": {"title": title, "index": i}}})
+
+        if tab_requests:
+            resp = service.spreadsheets().batchUpdate(
+                spreadsheetId=ss_id, body={"requests": tab_requests}
+            ).execute()
+
+        # Refresh metadata
+        meta = service.spreadsheets().get(spreadsheetId=ss_id).execute()
         sheets = {s["properties"]["title"]: s["properties"]["sheetId"]
-                  for s in spreadsheet["sheets"]}
+                  for s in meta.get("sheets", [])}
 
         # ------------------------------------------------------------------ #
         # Helper: date math
