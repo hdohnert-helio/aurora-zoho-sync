@@ -6709,3 +6709,19 @@ async def dashboard_create(request: Request):
     except Exception as e:
         import traceback as _tb
         return {"error": str(e), "traceback": _tb.format_exc()}
+
+
+@app.get("/debug/read-tab")
+async def debug_read_tab(sheet_id: str, tab: str, range_: str = "A1:Z200"):
+    """Read raw values from any tab of any sheet the service account can access."""
+    try:
+        svc = _build_sheets_service()
+        values = svc.spreadsheets().values().get(
+            spreadsheetId=sheet_id,
+            range=f"'{tab}'!{range_}",
+            valueRenderOption="FORMATTED_VALUE",
+        ).execute().get("values", [])
+        return {"tab": tab, "rows": len(values), "values": values}
+    except Exception as e:
+        import traceback as _tb
+        return {"error": str(e), "traceback": _tb.format_exc()}
