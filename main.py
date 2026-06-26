@@ -4740,6 +4740,14 @@ def _compute_cashflow_row(row: dict, today: datetime.date, zoho_base: str, auror
         pay_events.append([cash_materials_date, customer, finance_type, "Cash Materials", cash_materials_amt,
                            "", "", stage, sc_display, project_id, zoho_link])
 
+    # SolarInsure: $0.10/watt at final payment for non-LR projects
+    if finance_type not in ("LR", "SG") and system_watts:
+        si_date = payment3_date or payment2_date or payment1_date
+        if si_date:
+            si_amt = round(system_watts * 0.10, 2)
+            pay_events.append([si_date, customer, finance_type, "SolarInsure", si_amt,
+                               "", "", stage, sc_display, project_id, zoho_link])
+
     # Subcontractor payments — paid in same proportions as project payments received
     if subcontractor_total and subcontractor_total > 0:
         if finance_type == "LR":
@@ -5171,6 +5179,63 @@ def _write_dashboard_expenses(svc) -> int:
     return len(rows)
 
 
+def _week_of_date(date_str: str) -> str:
+    """Return ISO Monday date for the week containing date_str."""
+    try:
+        d = datetime.date.fromisoformat(date_str)
+        return (d - datetime.timedelta(days=d.weekday())).isoformat()
+    except (ValueError, TypeError):
+        return ""
+
+
+def _write_dashboard_project_expenses(svc, weekly_events: list) -> int:
+    """
+    Append project-based expense rows to the dashboard Expenses tab:
+    commissions, Cash/SE materials, and SolarInsure warranty.
+    Call AFTER _write_dashboard_expenses (which handles the clear).
+    weekly_events: 12-field lists [week_of, pay_date, customer, finance_type,
+                   pay_type, pay_amt, comm_date, comm_amt, stage, sc_display,
+                   project_id, zoho_link]
+    """
+    sheets = _build_sheets_service().spreadsheets()
+    rows = []
+
+    for evt in weekly_events:
+        if len(evt) < 8:
+            continue
+        customer    = evt[2]
+        pay_type    = evt[4]
+        pay_amt     = evt[5]
+        comm_date   = evt[6]
+        comm_amt    = evt[7]
+
+        # Cash/SE materials outflow
+        if pay_type == "Cash Materials" and pay_amt:
+            rows.append([evt[0], "Materials", customer, pay_amt, "No", "Active", "", ""])
+
+        # SolarInsure warranty fee
+        if pay_type == "SolarInsure" and pay_amt:
+            rows.append([evt[0], "SolarInsure/Warranty", customer, pay_amt, "No", "Active", "", ""])
+
+        # Commission payouts (keyed to comm_date, not pay_date)
+        if comm_date and comm_amt and comm_amt != "" and comm_amt != 0:
+            week = _week_of_date(comm_date)
+            if week:
+                rows.append([week, "Commissions", customer, comm_amt, "No", "Active", "", ""])
+
+    if rows:
+        sheets.values().append(
+            spreadsheetId=DASHBOARD_SHEET_ID,
+            range="Expenses!A:H",
+            valueInputOption="USER_ENTERED",
+            insertDataOption="INSERT_ROWS",
+            body={"values": rows},
+        ).execute()
+
+    logger.info(f"_write_dashboard_project_expenses: appended {len(rows)} project expense rows")
+    return len(rows)
+
+
 _REVENUE_KNOWN_CATEGORIES = {
     "LR/SG M1", "LR/SG M2",
     "CF M1", "CF M2",
@@ -5178,7 +5243,7 @@ _REVENUE_KNOWN_CATEGORIES = {
     "Cash Deposit", "Cash Progress", "Cash Final",
     "Manual",
 }
-_REVENUE_SKIP = {"CT Green Estates", "Cash Materials", "Subcontractor"}
+_REVENUE_SKIP = {"CT Green Estates", "Cash Materials", "Subcontractor", "SolarInsure"}
 
 
 def _write_dashboard_revenue_tab(svc, weekly_events: list) -> None:
@@ -5365,6 +5430,7 @@ def _run_cashflow_batch(projects: list[dict], tab_name: str) -> dict:
     # Write Revenue + Expenses tabs to dashboard sheet
     _write_dashboard_revenue_tab(svc, weekly_events)
     _write_dashboard_expenses(svc)
+    _write_dashboard_project_expenses(svc, weekly_events)
 
     _write_summary_tab(svc, tab_name)
     _write_readme_tab(svc)
