@@ -5033,6 +5033,11 @@ def _write_summary_tab(svc, pipeline_tab_name: str) -> None:
 
 
 # ---- Dashboard expense sync data ----------------------------------------
+def _sheets_serial(d: datetime.date) -> int:
+    """Convert a date to a Google Sheets date serial (days since 1899-12-30)."""
+    return (d - datetime.date(1899, 12, 30)).days
+
+
 DASHBOARD_OPEX = [
     # (description, category, monthly_amount, day_of_month)
     ("Virtual Mailboxes",   "Office & Operating", 120,   5),
@@ -5122,17 +5127,17 @@ def _write_dashboard_expenses(svc) -> int:
     rows = []
 
     for week_monday in week_dates:
-        week_str = week_monday.isoformat()
+        week_serial = _sheets_serial(week_monday)  # integer serial matches Cash Flow row 2
         week_days = [week_monday + datetime.timedelta(days=i) for i in range(7)]
 
         # Payroll: $12K every week; $21K in the week containing the 1st of any month
         payroll_amt = 21000 if any(d.day == 1 for d in week_days) else 12000
-        rows.append([week_str, "Payroll & Benefits", "Payroll", payroll_amt,
+        rows.append([week_serial, "Payroll & Benefits", "Payroll", payroll_amt,
                      "Yes", "Active", "", ""])
 
         # Weekly debt service items
         for desc, amount in DASHBOARD_DEBT_WEEKLY:
-            rows.append([week_str, "Debt Service", desc, amount, "Yes", "Active", "", ""])
+            rows.append([week_serial, "Debt Service", desc, amount, "Yes", "Active", "", ""])
 
         # Monthly debt service items
         for desc, amount, billing_day in DASHBOARD_DEBT_MONTHLY:
@@ -5140,7 +5145,7 @@ def _write_dashboard_expenses(svc) -> int:
                 max_day = _cal.monthrange(d.year, d.month)[1]
                 effective_day = min(billing_day, max_day)
                 if d.day == effective_day:
-                    rows.append([week_str, "Debt Service", desc, amount, "Yes", "Active", "", ""])
+                    rows.append([week_serial, "Debt Service", desc, amount, "Yes", "Active", "", ""])
                     break
 
         # OpEx subscriptions / office expenses
@@ -5149,7 +5154,7 @@ def _write_dashboard_expenses(svc) -> int:
                 max_day = _cal.monthrange(d.year, d.month)[1]
                 effective_day = min(billing_day, max_day)
                 if d.day == effective_day:
-                    rows.append([week_str, cat, desc, amount, "Yes", "Active", "", ""])
+                    rows.append([week_serial, cat, desc, amount, "Yes", "Active", "", ""])
                     break
 
         # Fleet loan payments
@@ -5158,7 +5163,7 @@ def _write_dashboard_expenses(svc) -> int:
                 max_day = _cal.monthrange(d.year, d.month)[1]
                 effective_day = min(billing_day, max_day)
                 if d.day == effective_day:
-                    rows.append([week_str, "Fleet", desc, amount, "Yes", "Active", "", ""])
+                    rows.append([week_serial, "Fleet", desc, amount, "Yes", "Active", "", ""])
                     break
 
     # Clear and rewrite (auto-generated rows only; manual entries go via Submissions)
@@ -5211,17 +5216,31 @@ def _write_dashboard_project_expenses(svc, weekly_events: list) -> int:
 
         # Cash/SE materials outflow
         if pay_type == "Cash Materials" and pay_amt:
-            rows.append([evt[0], "Materials", customer, pay_amt, "No", "Active", "", ""])
+            try:
+                serial = _sheets_serial(datetime.date.fromisoformat(evt[1]))
+                monday = datetime.date.fromisoformat(evt[1]) - datetime.timedelta(days=datetime.date.fromisoformat(evt[1]).weekday())
+                serial = _sheets_serial(monday)
+            except Exception:
+                serial = evt[0]
+            rows.append([serial, "Materials", customer, pay_amt, "No", "Active", "", ""])
 
         # SolarInsure warranty fee
         if pay_type == "SolarInsure" and pay_amt:
-            rows.append([evt[0], "SolarInsure/Warranty", customer, pay_amt, "No", "Active", "", ""])
+            try:
+                d = datetime.date.fromisoformat(evt[1])
+                serial = _sheets_serial(d - datetime.timedelta(days=d.weekday()))
+            except Exception:
+                serial = evt[0]
+            rows.append([serial, "SolarInsure/Warranty", customer, pay_amt, "No", "Active", "", ""])
 
         # Commission payouts (keyed to comm_date, not pay_date)
         if comm_date and comm_amt and comm_amt != "" and comm_amt != 0:
-            week = _week_of_date(comm_date)
-            if week:
-                rows.append([week, "Commissions", customer, comm_amt, "No", "Active", "", ""])
+            try:
+                cd = datetime.date.fromisoformat(comm_date)
+                serial = _sheets_serial(cd - datetime.timedelta(days=cd.weekday()))
+            except Exception:
+                serial = evt[0]
+            rows.append([serial, "Commissions", customer, comm_amt, "No", "Active", "", ""])
 
     if rows:
         sheets.values().append(
@@ -5268,7 +5287,7 @@ def _write_dashboard_revenue_tab(svc, weekly_events: list) -> None:
     for evt in weekly_events:
         if len(evt) < 6:
             continue
-        week_of  = evt[0]
+        pay_date_str = evt[1]
         customer = evt[2]
         pay_type = evt[4]
         pay_amt  = evt[5]
@@ -5278,8 +5297,14 @@ def _write_dashboard_revenue_tab(svc, weekly_events: list) -> None:
         if not pay_amt or pay_amt == "":
             continue
 
+        try:
+            pd = datetime.date.fromisoformat(pay_date_str)
+            week_serial = _sheets_serial(pd - datetime.timedelta(days=pd.weekday()))
+        except Exception:
+            week_serial = evt[0]  # fallback to string if parse fails
+
         category = pay_type if pay_type in _REVENUE_KNOWN_CATEGORIES else "Other"
-        rows.append([week_of, category, pay_amt, customer, pay_type])
+        rows.append([week_serial, category, pay_amt, customer, pay_type])
 
     if rows:
         sheets.values().update(
