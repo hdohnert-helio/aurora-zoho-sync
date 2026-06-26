@@ -3765,6 +3765,7 @@ async def debug_run():
 #   the cash flow Google Sheet.
 #
 CASHFLOW_SHEET_ID = "15diQy50zSxuYVl6VINDb-4HOnLuT1xa1J2QtZAS65rM"
+DASHBOARD_SHEET_ID = "1ktCKriA4W97Cxy-bubTD2zSP8W1X8fP52BLXvElkp5g"
 CASHFLOW_MATERIALS_PPW = 1.26  # LR materials estimate $/W
 CASHFLOW_LR_WARRANTY = 250.00  # LR warranty deduction from 20% final
 
@@ -5017,6 +5018,60 @@ def _write_summary_tab(svc, pipeline_tab_name: str) -> None:
     logger.info("_write_summary_tab: Summary tab written")
 
 
+_REVENUE_CATEGORY_MAP = {
+    "LR 80% Draw":        "LR Draw",
+    "LR 20% Final":       "LR Final",
+    "Cash 20% Final":     "Cash Final",
+    "SE Payment 3 (34%)": "SE Final",
+}
+_REVENUE_SKIP = {"CT Green Estates", "Cash Materials"}
+
+
+def _write_dashboard_revenue_tab(svc, weekly_events: list) -> None:
+    """
+    Write payment revenue rows to the Revenue tab of the dashboard sheet.
+    weekly_events entries: [week_of, pay_date, customer, finance_type, pay_type,
+                            pay_amt, comm_date, comm_amt, stage, sc_display,
+                            project_id, zoho_link]  (12 fields)
+    Revenue tab columns: A=Week, B=Category, C=Amount, D=Project, E=Notes
+    """
+    if not DASHBOARD_SHEET_ID:
+        return
+    sheets = svc.spreadsheets()
+
+    # Clear existing data rows (keep header row 1)
+    sheets.values().clear(
+        spreadsheetId=DASHBOARD_SHEET_ID,
+        range="Revenue!A2:E",
+    ).execute()
+
+    rows = []
+    for evt in weekly_events:
+        if len(evt) < 6:
+            continue
+        week_of  = evt[0]
+        customer = evt[2]
+        pay_type = evt[4]
+        pay_amt  = evt[5]
+
+        if pay_type in _REVENUE_SKIP:
+            continue
+        if not pay_amt or pay_amt == "":
+            continue
+
+        category = _REVENUE_CATEGORY_MAP.get(pay_type, "Other")
+        rows.append([week_of, category, pay_amt, customer, pay_type])
+
+    if rows:
+        sheets.values().update(
+            spreadsheetId=DASHBOARD_SHEET_ID,
+            range="Revenue!A2",
+            valueInputOption="USER_ENTERED",
+            body={"values": rows},
+        ).execute()
+    logger.info(f"_write_dashboard_revenue_tab: wrote {len(rows)} revenue rows")
+
+
 def _run_cashflow_batch(projects: list[dict], tab_name: str) -> dict:
     """
     Fetch Aurora data one project at a time and stream rows directly to the
@@ -5152,6 +5207,9 @@ def _run_cashflow_batch(projects: list[dict], tab_name: str) -> dict:
     # Write Weekly Payments tab
     weekly_events.sort(key=lambda r: r[1] if r[1] else "9999")
     _write_weekly_payments_from_events(svc, weekly_events)
+
+    # Write Revenue tab to dashboard sheet
+    _write_dashboard_revenue_tab(svc, weekly_events)
 
     _write_summary_tab(svc, tab_name)
     _write_readme_tab(svc)
