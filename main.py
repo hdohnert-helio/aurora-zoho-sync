@@ -5166,18 +5166,27 @@ def _write_dashboard_expenses(svc) -> int:
                     rows.append([week_serial, "Fleet", desc, amount, "Yes", "Active", "", ""])
                     break
 
-    # Clear and rewrite (auto-generated rows only; manual entries go via Submissions)
+    # Preserve manually-entered rows (Recurring = "No") before clearing
+    existing = sheets.values().get(
+        spreadsheetId=DASHBOARD_SHEET_ID,
+        range="Expenses!A2:H",
+        valueRenderOption="FORMATTED_VALUE",
+    ).execute().get("values", [])
+    manual_rows = [r for r in existing if len(r) > 4 and str(r[4]).strip() == "No"]
+
+    # Clear and rewrite auto rows, then append preserved manual rows
     sheets.values().clear(
         spreadsheetId=DASHBOARD_SHEET_ID,
         range="Expenses!A2:H",
     ).execute()
 
-    if rows:
+    all_rows = rows + manual_rows
+    if all_rows:
         sheets.values().update(
             spreadsheetId=DASHBOARD_SHEET_ID,
             range="Expenses!A2",
             valueInputOption="USER_ENTERED",
-            body={"values": rows},
+            body={"values": all_rows},
         ).execute()
 
     logger.info(f"_write_dashboard_expenses: wrote {len(rows)} expense rows across {len(week_dates)} weeks")
@@ -5217,12 +5226,11 @@ def _write_dashboard_project_expenses(svc, weekly_events: list) -> int:
         # Cash/SE materials outflow
         if pay_type == "Cash Materials" and pay_amt:
             try:
-                serial = _sheets_serial(datetime.date.fromisoformat(evt[1]))
-                monday = datetime.date.fromisoformat(evt[1]) - datetime.timedelta(days=datetime.date.fromisoformat(evt[1]).weekday())
-                serial = _sheets_serial(monday)
+                d = datetime.date.fromisoformat(evt[1])
+                serial = _sheets_serial(d - datetime.timedelta(days=d.weekday()))
             except Exception:
                 serial = evt[0]
-            rows.append([serial, "Materials", customer, pay_amt, "No", "Active", "", ""])
+            rows.append([serial, "Materials", customer, pay_amt, "Auto", "Active", "", ""])
 
         # SolarInsure warranty fee
         if pay_type == "SolarInsure" and pay_amt:
@@ -5231,7 +5239,7 @@ def _write_dashboard_project_expenses(svc, weekly_events: list) -> int:
                 serial = _sheets_serial(d - datetime.timedelta(days=d.weekday()))
             except Exception:
                 serial = evt[0]
-            rows.append([serial, "SolarInsure/Warranty", customer, pay_amt, "No", "Active", "", ""])
+            rows.append([serial, "SolarInsure/Warranty", customer, pay_amt, "Auto", "Active", "", ""])
 
         # Commission payouts (keyed to comm_date, not pay_date)
         if comm_date and comm_amt and comm_amt != "" and comm_amt != 0:
@@ -5240,7 +5248,7 @@ def _write_dashboard_project_expenses(svc, weekly_events: list) -> int:
                 serial = _sheets_serial(cd - datetime.timedelta(days=cd.weekday()))
             except Exception:
                 serial = evt[0]
-            rows.append([serial, "Commissions", customer, comm_amt, "No", "Active", "", ""])
+            rows.append([serial, "Commissions", customer, comm_amt, "Auto", "Active", "", ""])
 
     if rows:
         sheets.values().append(
