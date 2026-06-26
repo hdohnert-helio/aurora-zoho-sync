@@ -6697,4 +6697,5 @@ async def dashboard_create(request: Request):
         }
 
     except Exception as e:
-        return {"error": str(e)}
+        import traceback as _tb
+        return {"error": str(e), "traceback": _tb.format_exc()}
