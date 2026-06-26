@@ -6193,7 +6193,7 @@ async def dashboard_create(request: Request):
                        "Recurring", "Status", "Approved By", "Notes"]
 
         # Read existing Cash Flow tab: column A (labels) + columns D-F (first 3 week amounts)
-        existing_cf = svc.spreadsheets().values().get(
+        existing_cf = service.spreadsheets().values().get(
             spreadsheetId=CASHFLOW_SHEET_ID,
             range=f"'{CASHFLOW_MAIN_TAB}'!A13:G59",
             valueRenderOption="UNFORMATTED_VALUE",
