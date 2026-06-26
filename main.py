@@ -6104,3 +6104,523 @@ async def cashflow_reorganize_expenses():
         import traceback
         return {"error": str(e), "traceback": traceback.format_exc()}
 
+
+# ============================================================================
+# Dashboard — New Cash Flow Sheet
+# ============================================================================
+
+@app.post("/dashboard/create")
+def dashboard_create():
+    try:
+        service = _build_sheets_service()
+
+        # ------------------------------------------------------------------ #
+        # 1. Create spreadsheet with all tabs
+        # ------------------------------------------------------------------ #
+        body = {
+            "properties": {"title": "Helio Cash Flow Dashboard"},
+            "sheets": [
+                {"properties": {"title": "Cash Flow",   "index": 0}},
+                {"properties": {"title": "Expenses",    "index": 1}},
+                {"properties": {"title": "Revenue",     "index": 2}},
+                {"properties": {"title": "Inputs",      "index": 3}},
+                {"properties": {"title": "Submissions", "index": 4}},
+            ],
+        }
+        spreadsheet = service.spreadsheets().create(body=body).execute()
+        ss_id = spreadsheet["spreadsheetId"]
+        sheets = {s["properties"]["title"]: s["properties"]["sheetId"]
+                  for s in spreadsheet["sheets"]}
+
+        # ------------------------------------------------------------------ #
+        # Helper: date math
+        # ------------------------------------------------------------------ #
+        today = datetime.date.today()
+        days_until_monday = (7 - today.weekday()) % 7
+        if days_until_monday == 0:
+            days_until_monday = 7
+        next_monday = today + datetime.timedelta(days=days_until_monday)
+        num_weeks = 17
+        week_dates = [next_monday + datetime.timedelta(weeks=i) for i in range(num_weeks)]
+
+        def sheets_serial(d):
+            return (d - datetime.date(1899, 12, 30)).days
+
+        def currency_format():
+            return {
+                "numberFormat": {
+                    "type": "CURRENCY",
+                    "pattern": '"$"#,##0.00'
+                }
+            }
+
+        def date_format():
+            return {
+                "numberFormat": {
+                    "type": "DATE",
+                    "pattern": "M/D"
+                }
+            }
+
+        # ------------------------------------------------------------------ #
+        # 2. Write VALUES — batchUpdate
+        # ------------------------------------------------------------------ #
+        value_data = []
+
+        # ---- Inputs tab ---------------------------------------------------
+        value_data.append({
+            "range": "Inputs!A1:B4",
+            "values": [
+                ["Label", "Value"],
+                ["Today's Balance", 0],
+                ["Minimum Safe Balance", 50000],
+                ["Last Updated", str(today)],
+            ],
+        })
+
+        # ---- Expenses tab -------------------------------------------------
+        exp_headers = ["Week", "Category", "Description", "Amount",
+                       "Recurring", "Status", "Approved By", "Notes"]
+        exp_rows = [
+            ["", "Payroll & Benefits", "Weekly Payroll",    0, "Yes", "Active", "", ""],
+            ["", "Debt Service",       "Loan Payment",      0, "Yes", "Active", "", ""],
+            ["", "Subscriptions",      "Software & Tools",  0, "Yes", "Active", "", ""],
+            ["", "Office & Operating", "Office Expenses",   0, "Yes", "Active", "", ""],
+        ]
+        value_data.append({
+            "range": "Expenses!A1:H1",
+            "values": [exp_headers],
+        })
+        value_data.append({
+            "range": "Expenses!A2:H5",
+            "values": exp_rows,
+        })
+
+        # ---- Revenue tab --------------------------------------------------
+        rev_headers = ["Week", "Category", "Amount", "Project", "Notes"]
+        value_data.append({
+            "range": "Revenue!A1:E1",
+            "values": [rev_headers],
+        })
+        value_data.append({
+            "range": "Revenue!A2",
+            "values": [["Auto-populated by sync job"]],
+        })
+
+        # ---- Submissions tab ----------------------------------------------
+        sub_headers = ["Timestamp", "Name", "Week Needed", "Category",
+                       "Description", "Amount", "Justification", "Status"]
+        value_data.append({
+            "range": "Submissions!A1:H1",
+            "values": [sub_headers],
+        })
+        value_data.append({
+            "range": "Submissions!A2",
+            "values": [["Google Form responses auto-populate here. Change Status to 'Approved' to add to Expenses tab."]],
+        })
+
+        # ---- Cash Flow tab — row 1 title ----------------------------------
+        value_data.append({
+            "range": "Cash Flow!A1",
+            "values": [["Helio Solar — Weekly Cash Flow"]],
+        })
+
+        # Row 2: "Week of" + date serial numbers
+        row2 = ["Week of"] + [sheets_serial(d) for d in week_dates]
+        value_data.append({
+            "range": "Cash Flow!A2:R2",
+            "values": [row2],
+        })
+
+        # Row labels (col A)
+        label_rows = {
+            4:  "💰 MONEY IN",
+            5:  "  LR Draws",
+            6:  "  LR Finals",
+            7:  "  Cash & SE Finals",
+            8:  "  Other Revenue",
+            9:  "TOTAL MONEY IN",
+            11: "💸 MONEY OUT",
+            12: "  Payroll & Benefits",
+            13: "  Subcontractor Payments",
+            14: "  Materials",
+            15: "  Commissions",
+            16: "  SolarInsure / Warranty",
+            17: "  Debt Service",
+            18: "  Subscriptions",
+            19: "  Office & Operating",
+            20: "  Misc",
+            21: "TOTAL MONEY OUT",
+            23: "NET CASH FLOW",
+            24: "Opening Balance",
+            25: "CLOSING BALANCE",
+        }
+        for row_1idx, label in label_rows.items():
+            value_data.append({
+                "range": f"Cash Flow!A{row_1idx}",
+                "values": [[label]],
+            })
+
+        # Formulas for each week column (B=col index 1, …, R=col index 17)
+        expense_categories = {
+            12: "Payroll & Benefits",
+            13: "Subcontractor",
+            14: "Materials",
+            15: "Commissions",
+            16: "SolarInsure/Warranty",
+            17: "Debt Service",
+            18: "Subscriptions",
+            19: "Office & Operating",
+            20: "Misc",
+        }
+
+        for col_idx in range(num_weeks):  # 0-based; col B = index 1 in sheet
+            col_letter = _col_letter(col_idx + 1)  # +1 because A is labels
+
+            formulas = {}
+
+            # Revenue
+            formulas[5]  = f'=SUMIFS(Revenue!$C:$C,Revenue!$A:$A,{col_letter}$2,Revenue!$B:$B,"LR Draw")'
+            formulas[6]  = f'=SUMIFS(Revenue!$C:$C,Revenue!$A:$A,{col_letter}$2,Revenue!$B:$B,"LR Final")'
+            formulas[7]  = (f'=SUMIFS(Revenue!$C:$C,Revenue!$A:$A,{col_letter}$2,Revenue!$B:$B,"Cash Final")'
+                            f'+SUMIFS(Revenue!$C:$C,Revenue!$A:$A,{col_letter}$2,Revenue!$B:$B,"SE Final")')
+            formulas[8]  = f'=SUMIFS(Revenue!$C:$C,Revenue!$A:$A,{col_letter}$2,Revenue!$B:$B,"Other")'
+            formulas[9]  = f'=SUM({col_letter}5:{col_letter}8)'
+
+            # Expenses
+            for row_num, cat in expense_categories.items():
+                formulas[row_num] = (
+                    f'=SUMIFS(Expenses!$D:$D,Expenses!$A:$A,{col_letter}$2,'
+                    f'Expenses!$B:$B,"{cat}",Expenses!$F:$F,"Active")'
+                )
+            formulas[21] = f'=SUM({col_letter}12:{col_letter}20)'
+
+            # Net / Opening / Closing
+            formulas[23] = f'={col_letter}9-{col_letter}21'
+
+            if col_idx == 0:
+                formulas[24] = "=Inputs!$B$2"
+            else:
+                prev_col = _col_letter(col_idx)  # previous week column
+                formulas[24] = f"={prev_col}25"
+
+            formulas[25] = f'={col_letter}24+{col_letter}23'
+
+            for row_num, formula in formulas.items():
+                value_data.append({
+                    "range": f"Cash Flow!{col_letter}{row_num}",
+                    "values": [[formula]],
+                })
+
+        service.spreadsheets().values().batchUpdate(
+            spreadsheetId=ss_id,
+            body={"valueInputOption": "USER_ENTERED", "data": value_data},
+        ).execute()
+
+        # ------------------------------------------------------------------ #
+        # 3. Formatting — batchUpdate
+        # ------------------------------------------------------------------ #
+        cf_sid  = sheets["Cash Flow"]
+        exp_sid = sheets["Expenses"]
+        rev_sid = sheets["Revenue"]
+        inp_sid = sheets["Inputs"]
+        sub_sid = sheets["Submissions"]
+
+        # colour helpers
+        def rgb(r, g, b):
+            return {"red": r / 255, "green": g / 255, "blue": b / 255}
+
+        light_green  = rgb(183, 225, 205)   # money-in rows
+        light_red    = rgb(244, 199, 195)   # money-out rows
+        light_blue   = rgb(197, 218, 240)   # expenses header
+        light_yellow = rgb(255, 253, 231)   # inputs balance cell
+        light_purple = rgb(225, 210, 240)   # submissions header
+        green_total  = rgb(140, 200, 160)
+        red_total    = rgb(220, 150, 145)
+        closing_bg   = rgb(255, 242, 204)   # neutral closing row bg
+
+        def cell_range(sheet_id, start_row, end_row, start_col, end_col):
+            """0-indexed, end is exclusive."""
+            return {
+                "sheetId": sheet_id,
+                "startRowIndex": start_row,
+                "endRowIndex": end_row,
+                "startColumnIndex": start_col,
+                "endColumnIndex": end_col,
+            }
+
+        def repeat_cell_req(sheet_id, row, col, fmt):
+            return {
+                "repeatCell": {
+                    "range": cell_range(sheet_id, row, row + 1, col, col + 1),
+                    "cell": {"userEnteredFormat": fmt},
+                    "fields": "userEnteredFormat(" + ",".join(fmt.keys()) + ")",
+                }
+            }
+
+        def row_bg_bold(sheet_id, row_0idx, end_col_excl, color, bold=True):
+            """Apply background + bold to an entire row section."""
+            fmt = {
+                "backgroundColor": color,
+                "textFormat": {"bold": bold},
+            }
+            return {
+                "repeatCell": {
+                    "range": cell_range(sheet_id, row_0idx, row_0idx + 1, 0, end_col_excl),
+                    "cell": {"userEnteredFormat": fmt},
+                    "fields": "userEnteredFormat(backgroundColor,textFormat)",
+                }
+            }
+
+        requests = []
+
+        # ---- Cash Flow: title row bold + merge ---------------------------
+        requests.append({
+            "mergeCells": {
+                "range": cell_range(cf_sid, 0, 1, 0, 18),
+                "mergeType": "MERGE_ALL",
+            }
+        })
+        requests.append({
+            "repeatCell": {
+                "range": cell_range(cf_sid, 0, 1, 0, 18),
+                "cell": {"userEnteredFormat": {
+                    "textFormat": {"bold": True, "fontSize": 14},
+                    "horizontalAlignment": "CENTER",
+                }},
+                "fields": "userEnteredFormat(textFormat,horizontalAlignment)",
+            }
+        })
+
+        # Row 2 date format
+        requests.append({
+            "repeatCell": {
+                "range": cell_range(cf_sid, 1, 2, 1, 18),
+                "cell": {"userEnteredFormat": date_format()},
+                "fields": "userEnteredFormat(numberFormat)",
+            }
+        })
+        # Row 2 bold
+        requests.append({
+            "repeatCell": {
+                "range": cell_range(cf_sid, 1, 2, 0, 18),
+                "cell": {"userEnteredFormat": {"textFormat": {"bold": True}}},
+                "fields": "userEnteredFormat(textFormat)",
+            }
+        })
+
+        # Section header rows (0-indexed: row 4→idx3, row 11→idx10)
+        requests.append(row_bg_bold(cf_sid, 3,  18, light_green))   # MONEY IN header
+        requests.append(row_bg_bold(cf_sid, 8,  18, green_total))   # TOTAL MONEY IN
+        requests.append(row_bg_bold(cf_sid, 10, 18, light_red))     # MONEY OUT header
+        requests.append(row_bg_bold(cf_sid, 20, 18, red_total))     # TOTAL MONEY OUT
+        requests.append(row_bg_bold(cf_sid, 22, 18, closing_bg))    # NET CASH FLOW
+        requests.append(row_bg_bold(cf_sid, 24, 18, closing_bg))    # CLOSING BALANCE
+
+        # Currency format for all data rows (5–25 = idx 4–24, cols 1–17)
+        for r in list(range(4, 9)) + list(range(11, 26)):
+            if r in (3, 10, 22):  # spacers / section headers with no $
+                continue
+            requests.append({
+                "repeatCell": {
+                    "range": cell_range(cf_sid, r, r + 1, 1, 18),
+                    "cell": {"userEnteredFormat": currency_format()},
+                    "fields": "userEnteredFormat(numberFormat)",
+                }
+            })
+
+        # Freeze col A + row 2 on Cash Flow
+        requests.append({
+            "updateSheetProperties": {
+                "properties": {
+                    "sheetId": cf_sid,
+                    "gridProperties": {"frozenRowCount": 2, "frozenColumnCount": 1},
+                },
+                "fields": "gridProperties(frozenRowCount,frozenColumnCount)",
+            }
+        })
+
+        # Column widths — Cash Flow
+        requests.append({
+            "updateDimensionProperties": {
+                "range": {"sheetId": cf_sid, "dimension": "COLUMNS",
+                           "startIndex": 0, "endIndex": 1},
+                "properties": {"pixelSize": 200},
+                "fields": "pixelSize",
+            }
+        })
+        requests.append({
+            "updateDimensionProperties": {
+                "range": {"sheetId": cf_sid, "dimension": "COLUMNS",
+                           "startIndex": 1, "endIndex": 18},
+                "properties": {"pixelSize": 90},
+                "fields": "pixelSize",
+            }
+        })
+
+        # ---- Conditional formatting on row 25 (Closing Balance, idx 24) --
+        # Green if >= Inputs!$B$3 * 1.5
+        requests.append({
+            "addConditionalFormatRule": {
+                "rule": {
+                    "ranges": [cell_range(cf_sid, 24, 25, 1, 18)],
+                    "booleanRule": {
+                        "condition": {
+                            "type": "CUSTOM_FORMULA",
+                            "values": [{"userEnteredValue": "=B25>=Inputs!$B$3*1.5"}],
+                        },
+                        "format": {"backgroundColor": rgb(87, 187, 138)},
+                    },
+                },
+                "index": 0,
+            }
+        })
+        # Yellow if >= Inputs!$B$3 but < *1.5
+        requests.append({
+            "addConditionalFormatRule": {
+                "rule": {
+                    "ranges": [cell_range(cf_sid, 24, 25, 1, 18)],
+                    "booleanRule": {
+                        "condition": {
+                            "type": "CUSTOM_FORMULA",
+                            "values": [{"userEnteredValue": "=AND(B25>=Inputs!$B$3,B25<Inputs!$B$3*1.5)"}],
+                        },
+                        "format": {"backgroundColor": rgb(255, 214, 102)},
+                    },
+                },
+                "index": 1,
+            }
+        })
+        # Red if < Inputs!$B$3
+        requests.append({
+            "addConditionalFormatRule": {
+                "rule": {
+                    "ranges": [cell_range(cf_sid, 24, 25, 1, 18)],
+                    "booleanRule": {
+                        "condition": {
+                            "type": "CUSTOM_FORMULA",
+                            "values": [{"userEnteredValue": "=B25<Inputs!$B$3"}],
+                        },
+                        "format": {"backgroundColor": rgb(230, 100, 100)},
+                    },
+                },
+                "index": 2,
+            }
+        })
+
+        # ---- Expenses tab formatting --------------------------------------
+        # Header row bold + light blue
+        requests.append(row_bg_bold(exp_sid, 0, 8, light_blue))
+
+        # Column widths: A=100,B=180,C=250,D=100,E=90,F=100,G=130,H=200
+        exp_col_widths = [100, 180, 250, 100, 90, 100, 130, 200]
+        for ci, pw in enumerate(exp_col_widths):
+            requests.append({
+                "updateDimensionProperties": {
+                    "range": {"sheetId": exp_sid, "dimension": "COLUMNS",
+                               "startIndex": ci, "endIndex": ci + 1},
+                    "properties": {"pixelSize": pw},
+                    "fields": "pixelSize",
+                }
+            })
+
+        # Freeze row 1
+        requests.append({
+            "updateSheetProperties": {
+                "properties": {
+                    "sheetId": exp_sid,
+                    "gridProperties": {"frozenRowCount": 1},
+                },
+                "fields": "gridProperties(frozenRowCount)",
+            }
+        })
+
+        # Data validation — Category column B (index 1), rows 2-1000
+        cat_options = ["Payroll & Benefits", "Subcontractor", "Materials",
+                       "Commissions", "SolarInsure/Warranty", "Debt Service",
+                       "Subscriptions", "Office & Operating", "Misc"]
+        requests.append({
+            "setDataValidation": {
+                "range": cell_range(exp_sid, 1, 1000, 1, 2),
+                "rule": {
+                    "condition": {
+                        "type": "ONE_OF_LIST",
+                        "values": [{"userEnteredValue": v} for v in cat_options],
+                    },
+                    "showCustomUi": True,
+                    "strict": False,
+                },
+            }
+        })
+
+        # Data validation — Status column F (index 5)
+        status_options = ["Active", "Pending", "Approved", "Rejected"]
+        requests.append({
+            "setDataValidation": {
+                "range": cell_range(exp_sid, 1, 1000, 5, 6),
+                "rule": {
+                    "condition": {
+                        "type": "ONE_OF_LIST",
+                        "values": [{"userEnteredValue": v} for v in status_options],
+                    },
+                    "showCustomUi": True,
+                    "strict": False,
+                },
+            }
+        })
+
+        # ---- Revenue tab formatting ---------------------------------------
+        requests.append(row_bg_bold(rev_sid, 0, 5, light_green))
+        requests.append({
+            "updateSheetProperties": {
+                "properties": {
+                    "sheetId": rev_sid,
+                    "gridProperties": {"frozenRowCount": 1},
+                },
+                "fields": "gridProperties(frozenRowCount)",
+            }
+        })
+
+        # ---- Inputs tab formatting ----------------------------------------
+        # Header row bold
+        requests.append({
+            "repeatCell": {
+                "range": cell_range(inp_sid, 0, 1, 0, 2),
+                "cell": {"userEnteredFormat": {"textFormat": {"bold": True}}},
+                "fields": "userEnteredFormat(textFormat)",
+            }
+        })
+        # B2 (idx row 1, col 1) light yellow background
+        requests.append({
+            "repeatCell": {
+                "range": cell_range(inp_sid, 1, 2, 1, 2),
+                "cell": {"userEnteredFormat": {"backgroundColor": light_yellow}},
+                "fields": "userEnteredFormat(backgroundColor)",
+            }
+        })
+
+        # ---- Submissions tab formatting -----------------------------------
+        requests.append(row_bg_bold(sub_sid, 0, 8, light_purple))
+        requests.append({
+            "updateSheetProperties": {
+                "properties": {
+                    "sheetId": sub_sid,
+                    "gridProperties": {"frozenRowCount": 1},
+                },
+                "fields": "gridProperties(frozenRowCount)",
+            }
+        })
+
+        service.spreadsheets().batchUpdate(
+            spreadsheetId=ss_id,
+            body={"requests": requests},
+        ).execute()
+
+        return {
+            "status": "ok",
+            "spreadsheet_id": ss_id,
+            "url": f"https://docs.google.com/spreadsheets/d/{ss_id}",
+        }
+
+    except Exception as e:
+        return {"error": str(e)}
