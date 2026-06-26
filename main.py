@@ -6502,14 +6502,14 @@ async def dashboard_create(request: Request):
                 }
             })
 
-        # Freeze col A + row 2 on Cash Flow
+        # Freeze rows 1+2 on Cash Flow (can't freeze col A — conflicts with merged title row)
         requests.append({
             "updateSheetProperties": {
                 "properties": {
                     "sheetId": cf_sid,
-                    "gridProperties": {"frozenRowCount": 2, "frozenColumnCount": 1},
+                    "gridProperties": {"frozenRowCount": 2},
                 },
-                "fields": "gridProperties(frozenRowCount,frozenColumnCount)",
+                "fields": "gridProperties(frozenRowCount)",
             }
         })
 
