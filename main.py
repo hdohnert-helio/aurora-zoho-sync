@@ -6596,6 +6596,12 @@ async def dashboard_create(request: Request):
             "values": [["Google Form responses auto-populate here. Change Status to 'Approved' to add to Expenses tab."]],
         })
 
+        # ---- Cash Flow tab — clear first to remove stale rows ---------------
+        service.spreadsheets().values().clear(
+            spreadsheetId=ss_id,
+            range="'Cash Flow'!A1:R50",
+        ).execute()
+
         # ---- Cash Flow tab — row 1 title ----------------------------------
         value_data.append({
             "range": "Cash Flow!A1",
