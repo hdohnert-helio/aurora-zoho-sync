@@ -6531,55 +6531,8 @@ async def dashboard_create(request: Request):
             }
         })
 
-        # ---- Conditional formatting on row 25 (Closing Balance, idx 24) --
-        # Green if >= Inputs!$B$3 * 1.5
-        requests.append({
-            "addConditionalFormatRule": {
-                "rule": {
-                    "ranges": [cell_range(cf_sid, 24, 25, 1, 18)],
-                    "booleanRule": {
-                        "condition": {
-                            "type": "CUSTOM_FORMULA",
-                            "values": [{"userEnteredValue": "=B25>=Inputs!$B$3*1.5"}],
-                        },
-                        "format": {"backgroundColor": rgb(87, 187, 138)},
-                    },
-                },
-                "index": 0,
-            }
-        })
-        # Yellow if >= Inputs!$B$3 but < *1.5
-        requests.append({
-            "addConditionalFormatRule": {
-                "rule": {
-                    "ranges": [cell_range(cf_sid, 24, 25, 1, 18)],
-                    "booleanRule": {
-                        "condition": {
-                            "type": "CUSTOM_FORMULA",
-                            "values": [{"userEnteredValue": "=AND(B25>=Inputs!$B$3,B25<Inputs!$B$3*1.5)"}],
-                        },
-                        "format": {"backgroundColor": rgb(255, 214, 102)},
-                    },
-                },
-                "index": 1,
-            }
-        })
-        # Red if < Inputs!$B$3
-        requests.append({
-            "addConditionalFormatRule": {
-                "rule": {
-                    "ranges": [cell_range(cf_sid, 24, 25, 1, 18)],
-                    "booleanRule": {
-                        "condition": {
-                            "type": "CUSTOM_FORMULA",
-                            "values": [{"userEnteredValue": "=B25<Inputs!$B$3"}],
-                        },
-                        "format": {"backgroundColor": rgb(230, 100, 100)},
-                    },
-                },
-                "index": 2,
-            }
-        })
+        # Note: conditional formatting with cross-sheet references (Inputs!$B$3)
+        # is not supported via the Sheets API — set up manually in the sheet if needed.
 
         # ---- Expenses tab formatting --------------------------------------
         # Header row bold + light blue
