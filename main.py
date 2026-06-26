@@ -5024,7 +5024,7 @@ _REVENUE_CATEGORY_MAP = {
     "Cash 20% Final":     "Cash Final",
     "SE Payment 3 (34%)": "SE Final",
 }
-_REVENUE_SKIP = {"CT Green Estates", "Cash Materials"}
+_REVENUE_SKIP = {"CT Green Estates", "Cash Materials", "Subcontractor"}
 
 
 def _write_dashboard_revenue_tab(svc, weekly_events: list) -> None:
