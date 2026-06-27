@@ -5173,7 +5173,7 @@ def _write_dashboard_expenses(svc) -> int:
         valueRenderOption="FORMATTED_VALUE",
     ).execute().get("values", [])
     # Never preserve project-calculated categories — those are always regenerated as "Auto"
-    _PROJECT_CATS = {"Commissions", "Materials", "SolarInsure/Warranty", "Subcontractor"}
+    _PROJECT_CATS = {"Commissions", "Materials", "SolarInsure/Warranty", "Subcontractor", "Subcontractor Payments"}
     manual_rows = [r for r in existing
                    if len(r) > 4 and str(r[4]).strip() == "No"
                    and (len(r) < 2 or r[1] not in _PROJECT_CATS)]
@@ -5226,6 +5226,15 @@ def _write_dashboard_project_expenses(svc, weekly_events: list) -> int:
         pay_amt     = evt[5]
         comm_date   = evt[6]
         comm_amt    = evt[7]
+
+        # Subcontractor costs
+        if pay_type == "Subcontractor" and pay_amt:
+            try:
+                d = datetime.date.fromisoformat(evt[1])
+                serial = _sheets_serial(d - datetime.timedelta(days=d.weekday()))
+            except Exception:
+                serial = evt[0]
+            rows.append([serial, "Subcontractor", customer, pay_amt, "Auto", "Active", "", ""])
 
         # Cash/SE materials outflow
         if pay_type == "Cash Materials" and pay_amt:
