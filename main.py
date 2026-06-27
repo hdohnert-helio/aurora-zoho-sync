@@ -7031,10 +7031,10 @@ async def dashboard_sync_submissions():
         sheets = svc.spreadsheets()
 
         # Read all submission rows
-        # Columns: A=Timestamp, B=Category, C=Vendor, D=Amount, E=Notes, F=Email, G=Status
+        # Columns: A=Timestamp, B=Email, C=Cash Flow Date, D=Category, E=Vendor, F=Amount, G=Notes, H=Status
         raw = sheets.values().get(
             spreadsheetId=DASHBOARD_SHEET_ID,
-            range="Submissions!A2:G200",
+            range="Submissions!A2:H200",
             valueRenderOption="FORMATTED_VALUE",
         ).execute().get("values", [])
 
@@ -7043,28 +7043,31 @@ async def dashboard_sync_submissions():
 
         for i, row in enumerate(raw):
             sheet_row = i + 2  # 1-indexed, row 1 is header
-            status = row[6].strip() if len(row) > 6 else ""
+            status = row[7].strip() if len(row) > 7 else ""
             if status != "Approved":
                 continue
 
             # Parse fields
-            timestamp = row[0].strip() if len(row) > 0 else ""
-            category  = row[1].strip() if len(row) > 1 else ""
-            vendor    = row[2].strip() if len(row) > 2 else ""
-            amount    = row[3].strip() if len(row) > 3 else ""
-            notes     = row[4].strip() if len(row) > 4 else ""
-            email     = row[5].strip() if len(row) > 5 else ""
+            email     = row[1].strip() if len(row) > 1 else ""
+            date_str  = row[2].strip() if len(row) > 2 else ""
+            category  = row[3].strip() if len(row) > 3 else ""
+            vendor    = row[4].strip() if len(row) > 4 else ""
+            amount    = row[5].strip() if len(row) > 5 else ""
+            notes     = row[6].strip() if len(row) > 6 else ""
 
-            # Parse date from timestamp (M/D/YYYY H:MM:SS or similar)
+            # Parse Cash Flow Date (M/D/YYYY or YYYY-MM-DD)
             import re as _re
             d = None
-            m = _re.match(r"(\d+)/(\d+)/(\d+)", timestamp)
-            if m:
-                try:
-                    mo, dy, yr = int(m.group(1)), int(m.group(2)), int(m.group(3))
-                    d = datetime.date(yr, mo, dy)
-                except Exception:
-                    pass
+            try:
+                d = datetime.date.fromisoformat(date_str)
+            except ValueError:
+                m = _re.match(r"(\d+)/(\d+)/(\d+)", date_str)
+                if m:
+                    try:
+                        mo, dy, yr = int(m.group(1)), int(m.group(2)), int(m.group(3))
+                        d = datetime.date(yr, mo, dy)
+                    except Exception:
+                        pass
             if d is None:
                 continue
 
@@ -7076,7 +7079,7 @@ async def dashboard_sync_submissions():
             except ValueError:
                 amt = amount
 
-            note_str = f"{notes} | {email}".strip(" |")
+            note_str = f"{notes} | Submitted by: {email}".strip(" |")
             expense_rows.append([week_serial, category, vendor, amt, "No", "Active", note_str, ""])
             status_updates.append((sheet_row, "Synced"))
 
@@ -7093,7 +7096,7 @@ async def dashboard_sync_submissions():
         for sheet_row, new_status in status_updates:
             sheets.values().update(
                 spreadsheetId=DASHBOARD_SHEET_ID,
-                range=f"Submissions!G{sheet_row}",
+                range=f"Submissions!H{sheet_row}",
                 valueInputOption="RAW",
                 body={"values": [[new_status]]},
             ).execute()
