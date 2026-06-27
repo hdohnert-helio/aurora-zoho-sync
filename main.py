@@ -7080,7 +7080,7 @@ async def dashboard_sync_submissions():
                 amt = amount
 
             note_str = f"{notes} | Submitted by: {email}".strip(" |")
-            expense_rows.append([week_serial, category, vendor, amt, "No", "Active", note_str, ""])
+            expense_rows.append([week_serial, category, vendor, amt, "No", "Active", email, note_str])
             status_updates.append((sheet_row, "Synced"))
 
         if expense_rows:
