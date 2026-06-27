@@ -7016,6 +7016,97 @@ async def dashboard_sync_expenses():
         return {"error": str(e), "traceback": _tb.format_exc()}
 
 
+@app.post("/dashboard/sync-submissions")
+async def dashboard_sync_submissions():
+    """
+    Read Submissions tab, find rows with Status='Approved', write them to
+    Expenses tab as Recurring='No', then mark them 'Synced'.
+
+    Submissions tab columns (from Google Form):
+      A: Timestamp, B: Date, C: Category, D: Vendor, E: Amount,
+      F: Notes, G: Requestor, H: Status (Approved / Denied / Synced)
+    """
+    try:
+        svc = _build_sheets_service()
+        sheets = svc.spreadsheets()
+
+        # Read all submission rows
+        raw = sheets.values().get(
+            spreadsheetId=DASHBOARD_SHEET_ID,
+            range="Submissions!A2:H200",
+            valueRenderOption="FORMATTED_VALUE",
+        ).execute().get("values", [])
+
+        expense_rows = []
+        status_updates = []
+
+        for i, row in enumerate(raw):
+            sheet_row = i + 2  # 1-indexed, row 1 is header
+            status = row[7].strip() if len(row) > 7 else ""
+            if status != "Approved":
+                continue
+
+            # Parse fields
+            date_str  = row[1].strip() if len(row) > 1 else ""
+            category  = row[2].strip() if len(row) > 2 else ""
+            vendor    = row[3].strip() if len(row) > 3 else ""
+            amount    = row[4].strip() if len(row) > 4 else ""
+            notes     = row[5].strip() if len(row) > 5 else ""
+            requestor = row[6].strip() if len(row) > 6 else ""
+
+            # Convert date to week serial
+            try:
+                d = datetime.date.fromisoformat(date_str)
+            except ValueError:
+                # Try M/D/YYYY format from Google Forms
+                try:
+                    import re as _re
+                    m = _re.match(r"(\d+)/(\d+)/(\d+)", date_str)
+                    if m:
+                        mo, dy, yr = int(m.group(1)), int(m.group(2)), int(m.group(3))
+                        d = datetime.date(yr, mo, dy)
+                    else:
+                        continue
+                except Exception:
+                    continue
+
+            week_monday = d - datetime.timedelta(days=d.weekday())
+            week_serial = _sheets_serial(week_monday)
+
+            try:
+                amt = float(str(amount).replace("$", "").replace(",", ""))
+            except ValueError:
+                amt = amount
+
+            note_str = f"{notes} | Submitted by: {requestor}".strip(" |")
+            expense_rows.append([week_serial, category, vendor, amt, "No", "Active", note_str, ""])
+            status_updates.append((sheet_row, "Synced"))
+
+        if expense_rows:
+            sheets.values().append(
+                spreadsheetId=DASHBOARD_SHEET_ID,
+                range="Expenses!A:H",
+                valueInputOption="USER_ENTERED",
+                insertDataOption="INSERT_ROWS",
+                body={"values": expense_rows},
+            ).execute()
+
+        # Mark processed rows as Synced
+        for sheet_row, new_status in status_updates:
+            sheets.values().update(
+                spreadsheetId=DASHBOARD_SHEET_ID,
+                range=f"Submissions!H{sheet_row}",
+                valueInputOption="RAW",
+                body={"values": [[new_status]]},
+            ).execute()
+
+        return {"status": "ok", "synced": len(expense_rows)}
+
+    except Exception as e:
+        import traceback as _tb
+        return {"error": str(e), "traceback": _tb.format_exc()}
+
+
 @app.get("/debug/read-tab")
 async def debug_read_tab(sheet_id: str, tab: str, range_: str = "A1:Z200"):
     """Read raw values from any tab of any sheet the service account can access."""
