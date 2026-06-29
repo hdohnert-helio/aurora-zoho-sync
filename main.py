@@ -7167,7 +7167,7 @@ async def dashboard_create(request: Request):
                                             }
                                         },
                                         "targetAxis": "LEFT_AXIS",
-                                        "type": "BAR",
+                                        "type": "COLUMN",
                                         "color": {"red": 0.2, "green": 0.6, "blue": 0.2},
                                     },
                                     {
@@ -7181,7 +7181,7 @@ async def dashboard_create(request: Request):
                                             }
                                         },
                                         "targetAxis": "LEFT_AXIS",
-                                        "type": "BAR",
+                                        "type": "COLUMN",
                                         "color": {"red": 0.8, "green": 0.2, "blue": 0.2},
                                     },
                                     {
