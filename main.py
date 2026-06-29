@@ -5038,77 +5038,55 @@ def _sheets_serial(d: datetime.date) -> int:
     return (d - datetime.date(1899, 12, 30)).days
 
 
-DASHBOARD_OPEX = [
-    # (description, category, monthly_amount, day_of_month)
-    ("Virtual Mailboxes",   "Office & Operating", 120,   5),
-    ("ATT Bill",            "Office & Operating", 650,  12),
-    ("Quickbooks",          "Subscriptions",      690,  19),
-    ("Canon Printer",       "Office & Operating", 350,  21),
-    ("BBB",                 "Subscriptions",       59,  20),
-    ("Aurora Solar",        "Subscriptions",     6667,   1),
-    ("Office365 Business",  "Subscriptions",      115,   8),
-    ("Zoho One",            "Subscriptions",     1045,   1),
-    ("Google Workspace",    "Subscriptions",     1100,  31),  # uses last day for short months
-    ("Sirius Radio",        "Subscriptions",       27,  25),
-    ("Site Capture",        "Subscriptions",      565,  25),
-    ("Adobe Services",      "Subscriptions",      395,  19),
-    ("Energytoolbase",      "Subscriptions",      249,  18),
-    ("Duns and Bradstreet", "Subscriptions",       42,  14),
-    ("Nav.com",             "Subscriptions",      128,  11),
-    ("Zapier",              "Subscriptions",       31,   6),
-    ("Loom.com",            "Subscriptions",       54,   3),
-    ("ChatGPT",             "Subscriptions",       82,   5),
-    ("Anthropic",           "Subscriptions",      228,   2),
-]
 
-DASHBOARD_DEBT_WEEKLY = [
-    # (description, amount)  — "" means no amount yet
-    ("Mulligan",      4524),
-    ("SBA Loan",      1500),
-    ("Soligent",       500),
-    ("Greentech",      500),
-    ("US Renewables",   ""),
-    ("EW",              ""),
-    ("F&M",             ""),
-    ("TK Properties",   ""),
-]
 
-DASHBOARD_DEBT_MONTHLY = [
-    # (description, amount, day_of_month)  — "" means no amount yet
-    ("QuickBooks Loan",     4929, 29),
-    ("QuickBooks 2nd Loan", 3169, 29),
-    ("Amex",                  "", 29),
-    ("Lowest Credit Card",    "", 29),
-    ("Ink Card",              "", 29),
-]
-
-DASHBOARD_FLEET = [
-    # (description, monthly_payment, day_of_month)
-    ("GMC Sierra 2020",      712.54,  24),
-    ("Chevy Silverado 2016", 521.38,  15),
-    ("GMC Savana 2020",      881.82,  15),
-    ("Ford Transit 2023",   1230.12,  14),
-    ("Ford Transit 2021",    873.88,  15),
-    ("Ford Ranger 2024",     846.45,  12),
-    ("Ford Transit 2024",   1124.00,  12),
-    ("Ford F-350 2024",     1557.31,   7),
-    ("Ford Escape 2019",     507.59,  10),
-    ("Forklift",             901.00,  30),
-]
+def _read_config(svc) -> list:
+    """Read Config tab and return list of dicts with keys: name, category, amount, frequency, billing_day, status."""
+    raw = svc.spreadsheets().values().get(
+        spreadsheetId=DASHBOARD_SHEET_ID,
+        range="Config!A2:F200",
+        valueRenderOption="UNFORMATTED_VALUE",
+    ).execute().get("values", [])
+    items = []
+    for row in raw:
+        if not row or not row[0]:
+            continue
+        name        = str(row[0]).strip() if len(row) > 0 else ""
+        category    = str(row[1]).strip() if len(row) > 1 else ""
+        amount      = row[2] if len(row) > 2 else ""
+        frequency   = str(row[3]).strip().lower() if len(row) > 3 else "weekly"
+        billing_day = int(row[4]) if len(row) > 4 and row[4] != "" else None
+        status      = str(row[5]).strip() if len(row) > 5 else "Active"
+        if not name or status.lower() != "active":
+            continue
+        try:
+            amount = float(amount) if amount != "" else ""
+        except (ValueError, TypeError):
+            amount = ""
+        items.append({
+            "name": name, "category": category, "amount": amount,
+            "frequency": frequency, "billing_day": billing_day,
+        })
+    return items
 
 
 def _write_dashboard_expenses(svc) -> int:
     """
     Generate and write expense rows to the dashboard Expenses tab.
-    Reads week dates from the dashboard Cash Flow tab row 2, then maps
-    monthly expenses (OpEx + Fleet) and weekly payroll into those weeks.
+    Reads schedule from the Config tab and week dates from Cash Flow row 2.
     Returns number of rows written.
     """
     import calendar as _cal
 
     sheets = svc.spreadsheets()
 
-    # Read week dates from Cash Flow row 2 (B2:S2 to allow for expansion)
+    # Read Config tab
+    config_items = _read_config(svc)
+    if not config_items:
+        logger.warning("_write_dashboard_expenses: Config tab is empty or missing")
+        return 0
+
+    # Read week dates from Cash Flow row 2
     raw = sheets.values().get(
         spreadsheetId=DASHBOARD_SHEET_ID,
         range="'Cash Flow'!B2:S2",
@@ -5127,44 +5105,25 @@ def _write_dashboard_expenses(svc) -> int:
     rows = []
 
     for week_monday in week_dates:
-        week_serial = _sheets_serial(week_monday)  # integer serial matches Cash Flow row 2
+        week_serial = _sheets_serial(week_monday)
         week_days = [week_monday + datetime.timedelta(days=i) for i in range(7)]
 
-        # Payroll: $12K every week; $21K in the week containing the 1st of any month
-        payroll_amt = 21000 if any(d.day == 1 for d in week_days) else 12000
-        rows.append([week_serial, "Payroll & Benefits", "Payroll", payroll_amt,
-                     "Yes", "Active", "", ""])
+        for item in config_items:
+            name        = item["name"]
+            category    = item["category"]
+            amount      = item["amount"]
+            frequency   = item["frequency"]
+            billing_day = item["billing_day"]
 
-        # Weekly debt service items
-        for desc, amount in DASHBOARD_DEBT_WEEKLY:
-            rows.append([week_serial, "Debt Service", desc, amount, "Yes", "Active", "", ""])
-
-        # Monthly debt service items
-        for desc, amount, billing_day in DASHBOARD_DEBT_MONTHLY:
-            for d in week_days:
-                max_day = _cal.monthrange(d.year, d.month)[1]
-                effective_day = min(billing_day, max_day)
-                if d.day == effective_day:
-                    rows.append([week_serial, "Debt Service", desc, amount, "Yes", "Active", "", ""])
-                    break
-
-        # OpEx subscriptions / office expenses
-        for desc, cat, amount, billing_day in DASHBOARD_OPEX:
-            for d in week_days:
-                max_day = _cal.monthrange(d.year, d.month)[1]
-                effective_day = min(billing_day, max_day)
-                if d.day == effective_day:
-                    rows.append([week_serial, cat, desc, amount, "Yes", "Active", "", ""])
-                    break
-
-        # Fleet loan payments
-        for desc, amount, billing_day in DASHBOARD_FLEET:
-            for d in week_days:
-                max_day = _cal.monthrange(d.year, d.month)[1]
-                effective_day = min(billing_day, max_day)
-                if d.day == effective_day:
-                    rows.append([week_serial, "Fleet", desc, amount, "Yes", "Active", "", ""])
-                    break
+            if frequency == "weekly":
+                rows.append([week_serial, category, name, amount, "Yes", "Active", "", ""])
+            elif frequency == "monthly" and billing_day:
+                for d in week_days:
+                    max_day = _cal.monthrange(d.year, d.month)[1]
+                    effective_day = min(billing_day, max_day)
+                    if d.day == effective_day:
+                        rows.append([week_serial, category, name, amount, "Yes", "Active", "", ""])
+                        break
 
     # Preserve manually-entered rows (Recurring = "No") before clearing
     existing = sheets.values().get(
@@ -6452,7 +6411,7 @@ async def dashboard_create(request: Request):
                            for s in meta.get("sheets", [])}
 
         tab_requests = []
-        needed = ["Cash Flow", "Expenses", "Revenue", "Inputs", "Submissions"]
+        needed = ["Cash Flow", "Expenses", "Revenue", "Inputs", "Submissions", "Config"]
         for i, title in enumerate(needed):
             if title not in existing_titles:
                 tab_requests.append({"addSheet": {"properties": {"title": title, "index": i}}})
@@ -6512,6 +6471,62 @@ async def dashboard_create(request: Request):
                 ["Last Updated", str(today)],
             ],
         })
+
+        # ---- Config tab -------------------------------------------------------
+        config_headers = ["Name", "Category", "Amount", "Frequency", "Billing Day", "Status"]
+        config_rows = [
+            config_headers,
+            # Payroll
+            ["Payroll",                "Payroll & Benefits",  12000,  "Weekly",  "",  "Active"],
+            ["Payroll Health Insurance","Payroll & Benefits",  9000,  "Monthly",  1,  "Active"],
+            # Weekly debt
+            ["Mulligan",               "Debt Service",         4524,  "Weekly",  "",  "Active"],
+            ["SBA Loan",               "Debt Service",         1500,  "Weekly",  "",  "Active"],
+            ["Soligent",               "Debt Service",          500,  "Weekly",  "",  "Active"],
+            ["Greentech",              "Debt Service",          500,  "Weekly",  "",  "Active"],
+            ["US Renewables",          "Debt Service",           "",  "Weekly",  "",  "Active"],
+            ["EW",                     "Debt Service",           "",  "Weekly",  "",  "Active"],
+            ["F&M",                    "Debt Service",           "",  "Weekly",  "",  "Active"],
+            ["TK Properties",          "Debt Service",           "",  "Weekly",  "",  "Active"],
+            # Monthly debt
+            ["QuickBooks Loan",        "Debt Service",         4929,  "Monthly", 29,  "Active"],
+            ["QuickBooks 2nd Loan",    "Debt Service",         3169,  "Monthly", 29,  "Active"],
+            ["Amex",                   "Debt Service",           "",  "Monthly", 29,  "Active"],
+            ["Lowest Credit Card",     "Debt Service",           "",  "Monthly", 29,  "Active"],
+            ["Ink Card",               "Debt Service",           "",  "Monthly", 29,  "Active"],
+            # OpEx
+            ["Virtual Mailboxes",      "Office & Operating",   120,  "Monthly",  5,  "Active"],
+            ["ATT Bill",               "Office & Operating",   650,  "Monthly", 12,  "Active"],
+            ["Quickbooks",             "Subscriptions",         690,  "Monthly", 19,  "Active"],
+            ["Canon Printer",          "Office & Operating",   350,  "Monthly", 21,  "Active"],
+            ["BBB",                    "Subscriptions",          59,  "Monthly", 20,  "Active"],
+            ["Aurora Solar",           "Subscriptions",        6667,  "Monthly",  1,  "Active"],
+            ["Office365 Business",     "Subscriptions",         115,  "Monthly",  8,  "Active"],
+            ["Zoho One",               "Subscriptions",        1045,  "Monthly",  1,  "Active"],
+            ["Google Workspace",       "Subscriptions",        1100,  "Monthly", 31,  "Active"],
+            ["Sirius Radio",           "Subscriptions",          27,  "Monthly", 25,  "Active"],
+            ["Site Capture",           "Subscriptions",         565,  "Monthly", 25,  "Active"],
+            ["Adobe Services",         "Subscriptions",         395,  "Monthly", 19,  "Active"],
+            ["Energytoolbase",         "Subscriptions",         249,  "Monthly", 18,  "Active"],
+            ["Duns and Bradstreet",    "Subscriptions",          42,  "Monthly", 14,  "Active"],
+            ["Nav.com",                "Subscriptions",         128,  "Monthly", 11,  "Active"],
+            ["Zapier",                 "Subscriptions",          31,  "Monthly",  6,  "Active"],
+            ["Loom.com",               "Subscriptions",          54,  "Monthly",  3,  "Active"],
+            ["ChatGPT",                "Subscriptions",          82,  "Monthly",  5,  "Active"],
+            ["Anthropic",              "Subscriptions",         228,  "Monthly",  2,  "Active"],
+            # Fleet
+            ["GMC Sierra 2020",        "Fleet",               712.54, "Monthly", 24,  "Active"],
+            ["Chevy Silverado 2016",   "Fleet",               521.38, "Monthly", 15,  "Active"],
+            ["GMC Savana 2020",        "Fleet",               881.82, "Monthly", 15,  "Active"],
+            ["Ford Transit 2023",      "Fleet",              1230.12, "Monthly", 14,  "Active"],
+            ["Ford Transit 2021",      "Fleet",               873.88, "Monthly", 15,  "Active"],
+            ["Ford Ranger 2024",       "Fleet",               846.45, "Monthly", 12,  "Active"],
+            ["Ford Transit 2024",      "Fleet",              1124.00, "Monthly", 12,  "Active"],
+            ["Ford F-350 2024",        "Fleet",              1557.31, "Monthly",  7,  "Active"],
+            ["Ford Escape 2019",       "Fleet",               507.59, "Monthly", 10,  "Active"],
+            ["Forklift",               "Fleet",               901.00, "Monthly", 30,  "Active"],
+        ]
+        value_data.append({"range": "Config!A1", "values": config_rows})
 
         # ---- Expenses tab — pre-populate from existing Cash Flow sheet -------
         exp_headers = ["Week", "Category", "Description", "Amount",
