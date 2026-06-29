@@ -4421,6 +4421,11 @@ def _write_weekly_payments_tab(svc, rows: list[dict]) -> None:
                 if lending_status not in CASHFLOW_LR_DRAW_PAID_STATUSES:
                     add_event(draw_date_str, "LR 80% Draw", draw_amt, draw_date_str, comm1_amt)
                 add_event(final_date_str, "LR 20% Final", final_amt, final_date_str, comm2_amt)
+                # DC holdback: $0.25/watt, 25 days after activation (LR 20% Final)
+                if system_watts:
+                    holdback_date_str = (datetime.date.fromisoformat(final_date_str) + datetime.timedelta(days=25)).isoformat()
+                    holdback_amt = round(system_watts * 0.25, 2)
+                    add_event(holdback_date_str, "LR DC Holdback", holdback_amt)
             except (ValueError, TypeError):
                 pass
 
@@ -5240,6 +5245,7 @@ _REVENUE_KNOWN_CATEGORIES = {
     "CF M1", "CF M2",
     "SE M1", "SE M2", "SE M3",
     "Cash Deposit", "Cash Progress", "Cash Final",
+    "LR DC Holdback",
     "Manual",
 }
 _REVENUE_SKIP = {"CT Green Estates", "Cash Materials", "Subcontractor", "SolarInsure"}
