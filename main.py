@@ -6430,12 +6430,10 @@ async def dashboard_create(request: Request):
         # Helper: date math
         # ------------------------------------------------------------------ #
         today = datetime.date.today()
-        days_until_monday = (7 - today.weekday()) % 7
-        if days_until_monday == 0:
-            days_until_monday = 7
-        next_monday = today + datetime.timedelta(days=days_until_monday)
+        # Start from the Monday of the current week (not next Monday)
+        this_monday = today - datetime.timedelta(days=today.weekday())
         num_weeks = 17
-        week_dates = [next_monday + datetime.timedelta(weeks=i) for i in range(num_weeks)]
+        week_dates = [this_monday + datetime.timedelta(weeks=i) for i in range(num_weeks)]
 
         def sheets_serial(d):
             return (d - datetime.date(1899, 12, 30)).days
