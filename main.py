@@ -6622,7 +6622,7 @@ async def dashboard_create(request: Request):
             ["Quickbooks",             "Subscriptions",         690,  "Monthly", 19,  "Active"],
             ["Canon Printer",          "Office & Operating",   350,  "Monthly", 21,  "Active"],
             ["BBB",                    "Subscriptions",          59,  "Monthly", 20,  "Active"],
-            ["Aurora Solar",           "Subscriptions",        6667,  "Monthly",  1,  "Active"],
+            ["Aurora Solar",           "Subscriptions",        4713,  "Monthly",  1,  "Active"],
             ["Office365 Business",     "Subscriptions",         115,  "Monthly",  8,  "Active"],
             ["Zoho One",               "Subscriptions",        1045,  "Monthly",  1,  "Active"],
             ["Google Workspace",       "Subscriptions",        1100,  "Monthly", 31,  "Active"],
