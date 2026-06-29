@@ -5917,6 +5917,121 @@ async def cashflow_apply_overrides():
         return {"error": str(e), "traceback": traceback.format_exc()}
 
 
+@app.post("/dashboard/apply-overrides")
+async def dashboard_apply_overrides():
+    """
+    Fast override refresh for the dashboard only.
+    Reads overrides from the original sheet, re-reads the current Pipeline tab,
+    rebuilds weekly_events, then rewrites only the Revenue tab on the dashboard.
+    Does NOT re-fetch from Zoho or Aurora. Runs in ~10-15 seconds.
+    """
+    try:
+        svc = _build_sheets_service()
+        sheets = svc.spreadsheets()
+
+        tab_name = _find_current_pipeline_tab(svc)
+        if not tab_name:
+            return {"status": "failed", "reason": "no Pipeline tab found — run cashflow/run first"}
+
+        # Apply overrides to original pipeline tab
+        overrides = _read_payment_overrides(svc)
+        if overrides:
+            _apply_overrides_to_pipeline_tab(svc, tab_name, overrides)
+
+        # Read patched pipeline tab
+        raw = sheets.values().get(
+            spreadsheetId=CASHFLOW_SHEET_ID,
+            range=f"'{tab_name}'!A1:AA200",
+            valueRenderOption="FORMATTED_VALUE",
+        ).execute().get("values", [])
+
+        if len(raw) < 2:
+            return {"status": "ok", "message": "pipeline tab empty"}
+
+        headers = raw[0]
+        def col(name):
+            try: return headers.index(name)
+            except ValueError: return None
+
+        ci = {k: col(v) for k, v in {
+            "customer": "Customer", "project_id": "Project ID",
+            "finance_type": "Finance Type", "stage": "Stage",
+            "sc": "SC / Projected SC",
+            "pay1_date": "Payment 1 Date", "pay1_amt": "Payment 1 Amt",
+            "pay2_date": "Payment 2 Date", "pay2_amt": "Payment 2 Amt",
+            "pay3_date": "Payment 3 Date", "pay3_amt": "Payment 3 Amt",
+            "comm1_date": "Comm Payout 1 Date", "comm1_amt": "Comm Payout 1 Amt",
+            "comm2_date": "Comm Payout 2 Date", "comm2_amt": "Comm Payout 2 Amt",
+            "comm3_date": "Comm Payout 3 Date", "comm3_amt": "Comm Payout 3 Amt",
+            "zoho_link": "Zoho Link",
+        }.items()}
+
+        def cell(row, key):
+            idx = ci.get(key)
+            return row[idx] if idx is not None and idx < len(row) else ""
+
+        def week_of(date_str):
+            try:
+                d = datetime.date.fromisoformat(date_str)
+                return (d - datetime.timedelta(days=d.weekday())).isoformat()
+            except (ValueError, TypeError):
+                return ""
+
+        _PTYPE_MAP = {
+            ("LR",   "pay1"): "LR/SG M1", ("LR",   "pay2"): "LR/SG M2",
+            ("SG",   "pay1"): "LR/SG M1", ("SG",   "pay2"): "LR/SG M2",
+            ("CF",   "pay1"): "CF M1",    ("CF",   "pay2"): "CF M2",
+            ("SE",   "pay1"): "SE M1",    ("SE",   "pay2"): "SE M2", ("SE", "pay3"): "SE M3",
+            ("CASH", "pay1"): "Cash Deposit", ("CASH", "pay2"): "Cash Progress", ("CASH", "pay3"): "Cash Final",
+        }
+
+        weekly_events = []
+        for row in raw[1:]:
+            if not any(row):
+                continue
+            ft = cell(row, "finance_type")
+            customer = cell(row, "customer")
+            stage = cell(row, "stage")
+            sc_display = cell(row, "sc")
+            proj_id = cell(row, "project_id")
+            zoho_link = cell(row, "zoho_link")
+
+            for slot, pay_key, comm_key in [
+                ("pay1", "pay1_date", "comm1_date"),
+                ("pay2", "pay2_date", "comm2_date"),
+                ("pay3", "pay3_date", "comm3_date"),
+            ]:
+                pay_date = cell(row, pay_key)
+                if not pay_date:
+                    continue
+                pay_amt_raw = cell(row, pay_key.replace("_date", "_amt"))
+                comm_date = cell(row, comm_key)
+                comm_amt_raw = cell(row, comm_key.replace("_date", "_amt"))
+                pay_type = _PTYPE_MAP.get((ft, slot), "Loan / Full Payment")
+                try:
+                    pay_amt = float(str(pay_amt_raw).replace("$", "").replace(",", "")) if pay_amt_raw else ""
+                except ValueError:
+                    pay_amt = pay_amt_raw
+                try:
+                    comm_amt = float(str(comm_amt_raw).replace("$", "").replace(",", "")) if comm_amt_raw else ""
+                except ValueError:
+                    comm_amt = comm_amt_raw
+
+                weekly_events.append([
+                    week_of(pay_date), pay_date, customer, ft, pay_type,
+                    pay_amt, comm_date, comm_amt, stage, sc_display, proj_id, zoho_link,
+                ])
+
+        weekly_events.sort(key=lambda r: r[1] if r[1] else "9999")
+        _write_dashboard_revenue_tab(svc, weekly_events)
+
+        return {"status": "ok", "overrides_applied": len(overrides), "revenue_rows": len(weekly_events)}
+
+    except Exception as e:
+        import traceback as _tb
+        return {"error": str(e), "traceback": _tb.format_exc()}
+
+
 @app.post("/cashflow/fix-total-cash-out")
 async def cashflow_fix_total_cash_out():
     """
