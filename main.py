@@ -5257,6 +5257,14 @@ def _write_dashboard_revenue_tab(svc, weekly_events: list) -> None:
         return
     sheets = svc.spreadsheets()
 
+    # Preserve manually-entered rows (Category="Manual") before clearing
+    existing_rev = sheets.values().get(
+        spreadsheetId=DASHBOARD_SHEET_ID,
+        range="Revenue!A2:E",
+        valueRenderOption="FORMATTED_VALUE",
+    ).execute().get("values", [])
+    manual_rev_rows = [r for r in existing_rev if len(r) > 1 and str(r[1]).strip() == "Manual"]
+
     # Clear existing data rows (keep header row 1)
     sheets.values().clear(
         spreadsheetId=DASHBOARD_SHEET_ID,
@@ -5286,14 +5294,15 @@ def _write_dashboard_revenue_tab(svc, weekly_events: list) -> None:
         category = pay_type if pay_type in _REVENUE_KNOWN_CATEGORIES else "Other"
         rows.append([week_serial, category, pay_amt, customer, pay_type])
 
-    if rows:
+    all_rev_rows = rows + manual_rev_rows
+    if all_rev_rows:
         sheets.values().update(
             spreadsheetId=DASHBOARD_SHEET_ID,
             range="Revenue!A2",
             valueInputOption="USER_ENTERED",
-            body={"values": rows},
+            body={"values": all_rev_rows},
         ).execute()
-    logger.info(f"_write_dashboard_revenue_tab: wrote {len(rows)} revenue rows")
+    logger.info(f"_write_dashboard_revenue_tab: wrote {len(rows)} revenue rows + {len(manual_rev_rows)} manual")
 
 
 def _run_cashflow_batch(projects: list[dict], tab_name: str) -> dict:
