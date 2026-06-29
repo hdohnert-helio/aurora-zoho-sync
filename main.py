@@ -7203,7 +7203,6 @@ async def dashboard_create(request: Request):
                             },
                         },
                         "position": {
-                            "newSheet": False,
                             "overlayPosition": {
                                 "anchorCell": {"sheetId": chart_sid, "rowIndex": 0, "columnIndex": 0},
                                 "offsetXPixels": 0, "offsetYPixels": 0,
