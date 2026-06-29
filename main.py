@@ -6535,7 +6535,7 @@ async def dashboard_create(request: Request):
                            for s in meta.get("sheets", [])}
 
         tab_requests = []
-        needed = ["Cash Flow", "Expenses", "Revenue", "Inputs", "Submissions", "Config"]
+        needed = ["Cash Flow", "Expenses", "Revenue", "Inputs", "Submissions", "Config", "Charts"]
         for i, title in enumerate(needed):
             if title not in existing_titles:
                 tab_requests.append({"addSheet": {"properties": {"title": title, "index": i}}})
@@ -7124,6 +7124,95 @@ async def dashboard_create(request: Request):
                 "fields": "gridProperties(frozenRowCount)",
             }
         })
+
+        # ---- Charts tab — combo chart (bars=in/out, line=closing balance) --
+        chart_sid = sheets.get("Charts")
+        if chart_sid is not None:
+            num_cols = num_weeks  # number of week columns (B through R = 17)
+            # Rows are 0-indexed in the API:
+            # Row 1 (idx 1) = week headers, Row 15 (idx 15) = Total Money In,
+            # Row 28 (idx 28) = Total Money Out, Row 33 (idx 33) = Closing Balance
+            requests.append({
+                "addChart": {
+                    "chart": {
+                        "spec": {
+                            "title": "Weekly Cash Flow",
+                            "basicChart": {
+                                "chartType": "COMBO",
+                                "legendPosition": "BOTTOM_LEGEND",
+                                "axis": [
+                                    {"position": "BOTTOM_AXIS", "title": "Week"},
+                                    {"position": "LEFT_AXIS",   "title": "Amount ($)"},
+                                ],
+                                "domains": [{
+                                    "domain": {
+                                        "sourceRange": {
+                                            "sources": [{
+                                                "sheetId": cf_sid,
+                                                "startRowIndex": 1, "endRowIndex": 2,
+                                                "startColumnIndex": 1, "endColumnIndex": 1 + num_cols,
+                                            }]
+                                        }
+                                    }
+                                }],
+                                "series": [
+                                    {
+                                        "series": {
+                                            "sourceRange": {
+                                                "sources": [{
+                                                    "sheetId": cf_sid,
+                                                    "startRowIndex": 15, "endRowIndex": 16,
+                                                    "startColumnIndex": 1, "endColumnIndex": 1 + num_cols,
+                                                }]
+                                            }
+                                        },
+                                        "targetAxis": "LEFT_AXIS",
+                                        "type": "BAR",
+                                        "color": {"red": 0.2, "green": 0.6, "blue": 0.2},
+                                    },
+                                    {
+                                        "series": {
+                                            "sourceRange": {
+                                                "sources": [{
+                                                    "sheetId": cf_sid,
+                                                    "startRowIndex": 28, "endRowIndex": 29,
+                                                    "startColumnIndex": 1, "endColumnIndex": 1 + num_cols,
+                                                }]
+                                            }
+                                        },
+                                        "targetAxis": "LEFT_AXIS",
+                                        "type": "BAR",
+                                        "color": {"red": 0.8, "green": 0.2, "blue": 0.2},
+                                    },
+                                    {
+                                        "series": {
+                                            "sourceRange": {
+                                                "sources": [{
+                                                    "sheetId": cf_sid,
+                                                    "startRowIndex": 33, "endRowIndex": 34,
+                                                    "startColumnIndex": 1, "endColumnIndex": 1 + num_cols,
+                                                }]
+                                            }
+                                        },
+                                        "targetAxis": "LEFT_AXIS",
+                                        "type": "LINE",
+                                        "color": {"red": 0.1, "green": 0.3, "blue": 0.8},
+                                    },
+                                ],
+                                "headerCount": 0,
+                            },
+                        },
+                        "position": {
+                            "newSheet": False,
+                            "overlayPosition": {
+                                "anchorCell": {"sheetId": chart_sid, "rowIndex": 0, "columnIndex": 0},
+                                "offsetXPixels": 0, "offsetYPixels": 0,
+                                "widthPixels": 900, "heightPixels": 450,
+                            },
+                        },
+                    }
+                }
+            })
 
         service.spreadsheets().batchUpdate(
             spreadsheetId=ss_id,
