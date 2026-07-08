@@ -3174,11 +3174,18 @@ SHEETS_IMPERSONATE_EMAIL = "hdohnert@helio.solar"
 COMMISSION_PPW_FLOOR = 2.50
 
 
+_SHEETS_SERVICE_CACHE = None
+
 def _build_sheets_service():
     """
     Build a Sheets API v4 client using the service account directly (no impersonation).
     The sheet must be shared with the service account email as Editor.
+    Cached as a module-level singleton to avoid rebuilding the discovery document
+    (~50MB overhead) on every request.
     """
+    global _SHEETS_SERVICE_CACHE
+    if _SHEETS_SERVICE_CACHE is not None:
+        return _SHEETS_SERVICE_CACHE
     raw = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
     if not raw:
         logger.error("GOOGLE_SERVICE_ACCOUNT_JSON env var is missing")
@@ -3192,7 +3199,8 @@ def _build_sheets_service():
         info,
         scopes=["https://www.googleapis.com/auth/spreadsheets"],
     )
-    return build("sheets", "v4", credentials=creds, cache_discovery=False)
+    _SHEETS_SERVICE_CACHE = build("sheets", "v4", credentials=creds, cache_discovery=False)
+    return _SHEETS_SERVICE_CACHE
 
 
 def _fetch_all_commission_projects(cutoff_date: str = "2026-01-01") -> list[dict]:
@@ -3260,9 +3268,12 @@ def _get_commission_data_for_project(aurora_project_id: str) -> dict:
     designs_url = f"https://api.aurorasolar.com/tenants/{tenant_id}/projects/{aurora_project_id}/designs"
     designs_resp = _aurora_get_with_retry(designs_url)
     if designs_resp.status_code != 200:
+        designs_resp.close()
         return {"error": f"designs fetch failed ({designs_resp.status_code})"}
 
-    designs = designs_resp.json().get("designs", [])
+    designs_data = designs_resp.json()
+    designs_resp.close()
+    designs = designs_data.get("designs", [])
     sold_designs = [d for d in designs if (d.get("milestone") or {}).get("milestone") == "sold"]
     if len(sold_designs) != 1:
         return {"error": f"expected 1 sold design, found {len(sold_designs)}"}
@@ -3270,16 +3281,16 @@ def _get_commission_data_for_project(aurora_project_id: str) -> dict:
     design_id = sold_designs[0].get("id")
     pricing_resp = pull_pricing(design_id)
     if pricing_resp.status_code != 200:
+        pricing_resp.close()
         return {"error": f"pricing fetch failed ({pricing_resp.status_code})"}
 
-    design_resp = pull_design(design_id)
-    summary_resp = pull_design_summary(design_id)
-    design_json = design_resp.json() if design_resp.status_code == 200 else {}
     pricing_raw = pricing_resp.json()
+    pricing_resp.close()
     pricing_json = pricing_raw.get("pricing") or pricing_raw
-    summary_json = summary_resp.json() if summary_resp.status_code == 200 else {}
 
-    fields = extract_pricing_fields(design_json, pricing_json, summary_json)
+    # design_json and summary_json are not needed for commission/cashflow calculations —
+    # all required fields (system size, pricing, adders) come from pricing_json alone.
+    fields = extract_pricing_fields({}, pricing_json, {})
 
     system_size_watts = fields.get("System_Size_STC_Watts") or 0
     base_price = float(fields.get("Base_Price") or 0)
