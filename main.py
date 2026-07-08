@@ -4756,6 +4756,16 @@ def _compute_cashflow_row(row: dict, today: datetime.date, zoho_base: str, auror
         pay_events.append([cash_materials_date, customer, finance_type, "Cash Materials", cash_materials_amt,
                            "", "", stage, sc_display, project_id, zoho_link])
 
+    # LR DC Holdback: $0.25/watt, 25 days after final payment, only if not yet fully paid
+    if finance_type == "LR" and system_watts and lending_status not in CASHFLOW_FULLY_PAID_STATUSES and payment2_date:
+        try:
+            holdback_date = (datetime.date.fromisoformat(payment2_date) + datetime.timedelta(days=25)).isoformat()
+            holdback_amt = round(system_watts * 0.25, 2)
+            pay_events.append([holdback_date, customer, finance_type, "LR DC Holdback", holdback_amt,
+                               "", "", stage, sc_display, project_id, zoho_link])
+        except (ValueError, TypeError):
+            pass
+
     # SolarInsure: $0.10/watt at final payment for non-LR projects
     if finance_type not in ("LR", "SG") and system_watts:
         si_date = payment3_date or payment2_date or payment1_date
@@ -5229,6 +5239,15 @@ def _write_dashboard_project_expenses(svc, weekly_events: list) -> int:
             except Exception:
                 serial = evt[0]
             rows.append([serial, "SolarInsure/Warranty", customer, pay_amt, "Auto", "Active", "", ""])
+
+        # CT Green Estates cost
+        if pay_type == "CT Green Estates" and pay_amt:
+            try:
+                d = datetime.date.fromisoformat(evt[1])
+                serial = _sheets_serial(d - datetime.timedelta(days=d.weekday()))
+            except Exception:
+                serial = evt[0]
+            rows.append([serial, "CT Green Estates", customer, pay_amt, "Auto", "Active", "", ""])
 
         # Commission payouts (keyed to comm_date, not pay_date)
         if comm_date and comm_amt and comm_amt != "" and comm_amt != 0:
@@ -6872,9 +6891,10 @@ async def dashboard_create(request: Request):
             formulas[16] = rev_sumif(col_letter, "LR DC Holdback")
             formulas[17] = f'=SUM({col_letter}5:{col_letter}16)'
 
-            # Expense rows 19-28; row 29 (CT Green Estates) filled by _update_cashflow_formulas
+            # Expense rows 19-29
             for row_num, cat in expense_categories.items():
                 formulas[row_num] = exp_sumif(col_letter, cat)
+            formulas[29] = exp_sumif(col_letter, "CT Green Estates")
             formulas[30] = f'=SUM({col_letter}19:{col_letter}29)'
 
             # Net / Opening / Closing
