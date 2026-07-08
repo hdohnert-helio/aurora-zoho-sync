@@ -6806,7 +6806,8 @@ async def dashboard_create(request: Request):
             13: "  Cash Progress",
             14: "  Cash Final",
             15: "  Manual Revenue",
-            16: "TOTAL MONEY IN",
+            16: "  LR DC Holdback",
+            17: "TOTAL MONEY IN",
             18: "💸 MONEY OUT",
             19: "  Payroll & Benefits",
             20: "  Subcontractor Payments",
@@ -6818,7 +6819,8 @@ async def dashboard_create(request: Request):
             26: "  Office & Operating",
             27: "  Fleet",
             28: "  Misc",
-            29: "TOTAL MONEY OUT",
+            29: "  CT Green Estates",
+            30: "TOTAL MONEY OUT",
             31: "NET CASH FLOW",
             33: "Opening Balance",
             34: "CLOSING BALANCE",
@@ -6867,15 +6869,16 @@ async def dashboard_create(request: Request):
             formulas[13] = rev_sumif(col_letter, "Cash Progress")
             formulas[14] = rev_sumif(col_letter, "Cash Final")
             formulas[15] = rev_sumif(col_letter, "Manual")
-            formulas[16] = f'=SUM({col_letter}5:{col_letter}15)'
+            formulas[16] = rev_sumif(col_letter, "LR DC Holdback")
+            formulas[17] = f'=SUM({col_letter}5:{col_letter}16)'
 
-            # Expense rows 19-28
+            # Expense rows 19-28; row 29 (CT Green Estates) filled by _update_cashflow_formulas
             for row_num, cat in expense_categories.items():
                 formulas[row_num] = exp_sumif(col_letter, cat)
-            formulas[29] = f'=SUM({col_letter}19:{col_letter}28)'
+            formulas[30] = f'=SUM({col_letter}19:{col_letter}29)'
 
             # Net / Opening / Closing
-            formulas[31] = f'={col_letter}16-{col_letter}29'
+            formulas[31] = f'={col_letter}17-{col_letter}30'
 
             if col_idx == 0:
                 formulas[33] = "=Inputs!$B$2"
@@ -6990,15 +6993,15 @@ async def dashboard_create(request: Request):
 
         # Section header rows (0-indexed: row N → idx N-1)
         requests.append(row_bg_bold(cf_sid,  3, 18, light_green))   # row 4:  MONEY IN header
-        requests.append(row_bg_bold(cf_sid, 15, 18, green_total))   # row 16: TOTAL MONEY IN
+        requests.append(row_bg_bold(cf_sid, 16, 18, green_total))   # row 17: TOTAL MONEY IN
         requests.append(row_bg_bold(cf_sid, 17, 18, light_red))     # row 18: MONEY OUT header
-        requests.append(row_bg_bold(cf_sid, 28, 18, red_total))     # row 29: TOTAL MONEY OUT
+        requests.append(row_bg_bold(cf_sid, 29, 18, red_total))     # row 30: TOTAL MONEY OUT
         requests.append(row_bg_bold(cf_sid, 30, 18, closing_bg))    # row 31: NET CASH FLOW
         requests.append(row_bg_bold(cf_sid, 33, 18, closing_bg))    # row 34: CLOSING BALANCE
 
-        # Currency format for revenue (rows 5-15=idx4-14), expenses (rows 19-28=idx18-27),
+        # Currency format for revenue (rows 5-16=idx4-15), expenses (rows 19-29=idx18-28),
         # net/balance (rows 31,33,34 = idx 30,32,33)
-        currency_rows = list(range(4, 15)) + list(range(18, 28)) + [30, 32, 33]
+        currency_rows = list(range(4, 16)) + list(range(18, 29)) + [30, 32, 33]
         for r in currency_rows:
             requests.append({
                 "repeatCell": {
