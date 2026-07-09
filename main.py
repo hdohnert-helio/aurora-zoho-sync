@@ -4909,61 +4909,60 @@ def _write_readme_tab(svc) -> None:
     """Overwrite column A of the README tab with current documentation.
     Columns B+ are left untouched so existing buttons are preserved."""
     readme_rows = [
-        ["Helio Cash Flow Model — README"],
+        ["Helio Solar — Dashboard README"],
+        [""],
+        ["HOW TO RUN:"],
+        ["  All actions are available from the Helio menu in the Google Sheets menu bar."],
+        [""],
+        ["  • Run Cash Flow — pulls fresh data from Zoho + Aurora, creates a new dated Pipeline tab,"],
+        ["    rebuilds Weekly Payments and Summary, and updates all Cash Flow formulas. Takes ~2-3 min."],
+        ["  • Apply Overrides — applies manual payment date overrides from the Overrides tab without"],
+        ["    re-fetching all data. Use for quick date tweaks between full syncs."],
+        ["  • Sync Expenses — regenerates recurring expense rows from the Config tab."],
+        ["  • Sync Submissions — promotes approved rows from the Submissions tab into Expenses."],
+        ["  • Rebuild Dashboard Structure — recreates all tab layouts and formulas. Use after structural"],
+        ["    changes or if the Cash Flow tab looks broken. Does not delete manual entries."],
         [""],
         ["TABS:"],
-        ["  • Pipeline [date] — auto-generated from Zoho + Aurora on each sync. One row per active project."],
-        ["  • Cash Flow — 16-week weekly forecast. Pulls automatically from the latest Pipeline tab."],
-        ["  • Weekly Payments — chronological list of all payment events (draws, finals, commissions, materials, CT Green)."],
-        ["  • Overrides — manually override payment dates for specific projects by Project ID (YYYY-MM-DD format)."],
-        ["  • Summary — totals and % of revenue for revenue, commissions, subs, materials, referral, and net."],
-        [""],
-        ["RUNNING A REFRESH:"],
-        ["  • Click 'Run Cash Flow' (blue button) to pull fresh data from Zoho and Aurora, create a new dated Pipeline tab,"],
-        ["    rebuild Weekly Payments and Summary, and update Cash Flow formulas. Takes ~2-3 minutes."],
-        ["  • Click 'Run Overrides' (yellow button) to apply manual date overrides from the Overrides tab without"],
-        ["    re-fetching all data. Use this for quick date tweaks between full syncs."],
-        ["  • Note: Overrides are applied automatically during every full Cash Flow run — 'Run Overrides' is only"],
-        ["    needed when you want to update dates without waiting for a full sync."],
+        ["  • Cash Flow — 17-week weekly forecast. Green = money in, Red = money out."],
+        ["  • Summary — P&L view: Revenue → Gross Profit → Operating Expenses → Net Income."],
+        ["    Use the 'Through Date' cell at the top to filter the P&L to any week."],
+        ["  • Revenue — auto-written on each Cash Flow run. Category='Manual' rows are preserved."],
+        ["  • Expenses — recurring costs from Config + project costs + approved Submissions."],
+        ["  • Inputs — set your opening balance and date here."],
+        ["  • Config — define recurring expenses (name, category, amount, frequency, billing day)."],
+        ["  • Submissions — Google Form responses. Set Status='Approved' then run Sync Submissions."],
+        ["  • Overrides — manually override payment dates by Project ID (YYYY-MM-DD format)."],
+        ["  • Pipeline [date] — auto-generated; one row per active project with all payment dates/amounts."],
+        ["  • Weekly Payments — chronological list of all payment events."],
         [""],
         ["PAYMENT LOGIC:"],
         ["  LR (Lightreach):"],
-        ["    • 80% draw ~14 days post-SC (rounded to next Monday)"],
-        ["      = Contract Price × 80% − (kW × 1000 × $1.26) for materials"],
-        ["    • 20% final ~33 days post-SC (rounded to next Monday)"],
-        ["      = Contract Price × 20% − $250 inverter warranty"],
-        ["    • Commissions: 80% paid with 80% draw, 20% paid with 20% final"],
+        ["    • 80% draw ~14 days post-SC = Contract Price × 80% − materials ($1.26/W)"],
+        ["    • 20% final ~33 days post-SC = Contract Price × 20% − $250 warranty"],
+        ["    • DC Holdback = $0.25/W, released ~25 days after 20% final"],
+        ["    • Commissions: 80% with draw, 20% with final"],
         [""],
         ["  CASH:"],
-        ["    • 20% deposit ~11 days after contract date (rounded to next Monday)"],
-        ["    • 60% progress ~5 days before SC (rounded to next Monday)"],
-        ["    • 20% final ~26 days post-SC (rounded to next Monday)"],
-        ["    • Commissions: proportional — 20% / 60% / 20%"],
-        ["    • Zoho 'Cash - 20PCT deposit paid' → removes deposit from forecast"],
-        ["    • Zoho 'Cash - 60PCT paid' → removes both deposit and progress from forecast"],
+        ["    • 20% deposit ~11 days after contract signed"],
+        ["    • 60% progress ~5 days before SC"],
+        ["    • 20% final ~7 days post-SC"],
+        ["    • Materials: $1.26/W at progress payment date"],
+        ["    • Commissions: 20% / 60% / 20%"],
         [""],
         ["  SE (Smart E-Loan):"],
-        ["    • Payment 1 (33%) ~14 days post-SC (rounded to next Monday)"],
-        ["    • Payment 2 (33%) ~33 days post-SC (rounded to next Monday)"],
-        ["    • Payment 3 (34%) ~14 days post-PTO, or SC+60 days if no PTO date yet"],
-        ["    • Commissions: proportional — 33% / 33% / 34%"],
+        ["    • Three payments of 33% / 33% / 34% at 14 / 33 / 60 days post-SC"],
+        ["    • Materials: $1.26/W at Payment 2 date"],
         [""],
         ["COSTS:"],
-        ["  • LR Materials: $1.26/W deducted directly from the 80% draw amount"],
-        ["  • Cash/SE Materials: $1.26/W cash outflow at the 60% progress / Payment 2 date"],
-        ["  • CT Green Estates: $0.25/W cash outflow at final payment date (pre-install projects only)"],
-        ["  • Subcontractor costs: pulled from Aurora project notes per project"],
+        ["  • CT Green Estates: $0.25/W at final payment date (pre-install projects only)"],
+        ["  • SolarInsure / Warranty: $0.10/W at final payment (non-LR projects)"],
+        ["  • Subcontractor: pulled from Aurora project notes per project"],
+        ["  • Commissions: above $2.50/W floor on base price + consultant $/W"],
         [""],
-        ["PRICING:"],
-        ["  • Payment amounts calculated on Final System Price (base + adders − discounts) from Aurora."],
-        ["  • Commissions calculated on Base Price only, above the $2.50/W floor."],
-        ["    Formula: max(0, (base_ppw − $2.50) × system_watts) + consultant $/W × system_watts"],
-        [""],
-        ["OVERRIDES TAB:"],
+        ["OVERRIDES:"],
         ["  • Add a row: Project ID | Payment 1 Date | Payment 2 Date | Payment 3 Date | Notes"],
-        ["  • Dates must be in YYYY-MM-DD format."],
-        ["  • Overrides are applied automatically on every full sync — no separate step needed."],
-        ["  • To remove an override, delete the row from the Overrides tab and re-run."],
+        ["  • Dates in YYYY-MM-DD format. Applied automatically on every full sync."],
     ]
 
     sheets = svc.spreadsheets()
@@ -5005,11 +5004,18 @@ def _write_summary_tab(svc, pipeline_tab_name: str) -> None:
     ).execute()
     sheet_id = resp["replies"][0]["addSheet"]["properties"]["sheetId"]
 
-    # P&L pulls from Cash Flow tab — SUM across all 17 week columns (B:R)
-    # Cash Flow row layout: 5-16=revenue, 17=TOTAL IN, 19-29=costs, 30=TOTAL OUT, 31=NET
+    # P&L pulls from Cash Flow tab filtered by "Through Date" in Summary!B2.
+    # If B2 is blank, sums all 17 weeks. Cash Flow row 2 has week-start date serials.
     cf = "Cash Flow"
+    thru = "Summary!$B$2"   # the user-editable "through date" cell
+
     def cf_sum(row):
-        return f"=SUM('{cf}'!B{row}:R{row})"
+        # SUMPRODUCT: include week column only if its date (row 2) <= through date.
+        # If through-date cell is blank, include all columns (treat as very large date).
+        return (
+            f"=SUMPRODUCT(('{cf}'!B2:R2<=IF({thru}=\"\",99999999,{thru}))"
+            f"*('{cf}'!B{row}:R{row}))"
+        )
 
     # Row references (sheet rows, 1-indexed):
     # Revenue section starts at sheet row 5 (0-idx 4), data rows:
@@ -5048,68 +5054,71 @@ def _write_summary_tab(svc, pipeline_tab_name: str) -> None:
     rows = [
         # Row 1
         ["Helio Solar — Profit & Loss", "", "", ""],
-        # Row 2
+        # Row 2 — through-date filter (user edits col B; leave blank for all weeks)
+        ["Through Date", "", "", "← Enter a week date to filter (leave blank for all weeks)"],
+        # Row 3 — blank spacer
         ["", "", "", ""],
-        # Row 3 — REVENUE section header
+        # Row 4 — REVENUE section header
         ["REVENUE", "", "", ""],
-        # Row 4 — column headers
+        # Row 5 — column headers
         ["", "Amount", "% of Revenue", ""],
-        # Rows 5-15 — revenue line items
-        ["  LR/SG M1 — 80% Draws",   cf_sum(5),  "=B5/B$17",  ""],
-        ["  LR/SG M2 — 20% Finals",  cf_sum(6),  "=B6/B$17",  ""],
-        ["  CF M1",                  cf_sum(7),  "=B7/B$17",  ""],
-        ["  CF M2",                  cf_sum(8),  "=B8/B$17",  ""],
-        ["  SE M1",                  cf_sum(9),  "=B9/B$17",  ""],
-        ["  SE M2",                  cf_sum(10), "=B10/B$17", ""],
-        ["  SE M3",                  cf_sum(11), "=B11/B$17", ""],
-        ["  Cash Deposit",           cf_sum(12), "=B12/B$17", ""],
-        ["  Cash Progress",          cf_sum(13), "=B13/B$17", ""],
-        ["  Cash Final",             cf_sum(14), "=B14/B$17", ""],
-        ["  LR DC Holdback",         cf_sum(16), "=B15/B$17", "$0.25/W released ~25 days post-activation"],
-        # Row 16
-        ["", "", "", ""],
-        # Row 17 — TOTAL REVENUE
-        ["TOTAL REVENUE",            cf_sum(17), "",           ""],
+        # Rows 6-16 — revenue line items
+        ["  LR/SG M1 — 80% Draws",   cf_sum(5),  "=B6/B$19",  ""],
+        ["  LR/SG M2 — 20% Finals",  cf_sum(6),  "=B7/B$19",  ""],
+        ["  CF M1",                  cf_sum(7),  "=B8/B$19",  ""],
+        ["  CF M2",                  cf_sum(8),  "=B9/B$19",  ""],
+        ["  SE M1",                  cf_sum(9),  "=B10/B$19", ""],
+        ["  SE M2",                  cf_sum(10), "=B11/B$19", ""],
+        ["  SE M3",                  cf_sum(11), "=B12/B$19", ""],
+        ["  Cash Deposit",           cf_sum(12), "=B13/B$19", ""],
+        ["  Cash Progress",          cf_sum(13), "=B14/B$19", ""],
+        ["  Cash Final",             cf_sum(14), "=B15/B$19", ""],
+        ["  LR DC Holdback",         cf_sum(16), "=B16/B$19", "$0.25/W released ~25 days post-activation"],
+        ["  Manual Revenue",         cf_sum(15), "=B17/B$19", ""],
         # Row 18
         ["", "", "", ""],
-        # Row 19 — COGS header
-        ["COST OF REVENUE", "", "", "Direct project costs"],
-        # Row 20 — column headers
-        ["", "Amount", "% of Revenue", ""],
-        # Rows 21-26 — COGS
-        ["  Subcontractor",          cf_sum(20), "=B21/B$17", ""],
-        ["  Materials",              cf_sum(21), "=B22/B$17", "LR estimates + Cash/SE actuals"],
-        ["  Commissions",            cf_sum(22), "=B23/B$17", "Rep + consultant payouts (incl. referrals)"],
-        ["  SolarInsure / Warranty", cf_sum(23), "=B24/B$17", "$0.10/W on non-LR projects"],
-        ["  CT Green Estates",       cf_sum(29), "=B25/B$17", "$0.25/W on pre-install projects"],
-        # Row 26
+        # Row 19 — TOTAL REVENUE
+        ["TOTAL REVENUE",            cf_sum(17), "",           ""],
+        # Row 20
         ["", "", "", ""],
-        # Row 27 — GROSS PROFIT
-        ["GROSS PROFIT",             "=B17-SUM(B21:B25)", "=B27/B$17", "Revenue minus direct project costs"],
+        # Row 21 — COGS header
+        ["COST OF REVENUE", "", "", "Direct project costs"],
+        # Row 22 — column headers
+        ["", "Amount", "% of Revenue", ""],
+        # Rows 23-27 — COGS
+        ["  Subcontractor",          cf_sum(20), "=B23/B$19", ""],
+        ["  Materials",              cf_sum(21), "=B24/B$19", "LR estimates + Cash/SE actuals"],
+        ["  Commissions",            cf_sum(22), "=B25/B$19", "Rep + consultant payouts (incl. referrals)"],
+        ["  SolarInsure / Warranty", cf_sum(23), "=B26/B$19", "$0.10/W on non-LR projects"],
+        ["  CT Green Estates",       cf_sum(29), "=B27/B$19", "$0.25/W on pre-install projects"],
         # Row 28
         ["", "", "", ""],
-        # Row 29 — OPEX header
-        ["OPERATING EXPENSES", "", "", "Overhead and fixed costs"],
-        # Row 30 — column headers
-        ["", "Amount", "% of Revenue", ""],
-        # Rows 31-36 — OpEx
-        ["  Payroll & Benefits",     cf_sum(19), "=B31/B$17", ""],
-        ["  Debt Service",           cf_sum(24), "=B32/B$17", ""],
-        ["  Subscriptions",          cf_sum(25), "=B33/B$17", ""],
-        ["  Office & Operating",     cf_sum(26), "=B34/B$17", ""],
-        ["  Fleet",                  cf_sum(27), "=B35/B$17", ""],
-        ["  Misc",                   cf_sum(28), "=B36/B$17", ""],
-        # Row 37
+        # Row 29 — GROSS PROFIT
+        ["GROSS PROFIT",             "=B19-SUM(B23:B27)", "=B29/B$19", "Revenue minus direct project costs"],
+        # Row 30
         ["", "", "", ""],
-        # Row 38 — TOTAL OPEX
-        ["TOTAL OPERATING EXPENSES", "=SUM(B31:B36)", "=B38/B$17", ""],
+        # Row 31 — OPEX header
+        ["OPERATING EXPENSES", "", "", "Overhead and fixed costs"],
+        # Row 32 — column headers
+        ["", "Amount", "% of Revenue", ""],
+        # Rows 33-38 — OpEx
+        ["  Payroll & Benefits",     cf_sum(19), "=B33/B$19", ""],
+        ["  Debt Service",           cf_sum(24), "=B34/B$19", ""],
+        ["  Subscriptions",          cf_sum(25), "=B35/B$19", ""],
+        ["  Office & Operating",     cf_sum(26), "=B36/B$19", ""],
+        ["  Fleet",                  cf_sum(27), "=B37/B$19", ""],
+        ["  Misc",                   cf_sum(28), "=B38/B$19", ""],
         # Row 39
         ["", "", "", ""],
-        # Row 40 — NET INCOME
-        ["NET INCOME",               "=B27-B38",  "=B40/B$17", "Gross Profit minus Operating Expenses"],
+        # Row 40 — TOTAL OPEX
+        ["TOTAL OPERATING EXPENSES", "=SUM(B33:B38)", "=B40/B$19", ""],
         # Row 41
         ["", "", "", ""],
-        # Row 42
+        # Row 42 — NET INCOME
+        ["NET INCOME",               "=B29-B40",  "=B42/B$19", "Gross Profit minus Operating Expenses"],
+        # Row 43
+        ["", "", "", ""],
+        # Row 44
         ["Active Projects",          f"=COUNTA('{p}'!A2:A)", "", ""],
     ]
 
@@ -5154,19 +5163,30 @@ def _write_summary_tab(svc, pipeline_tab_name: str) -> None:
         {"repeatCell": {"range": {"sheetId": sheet_id, "startRowIndex": 0, "endRowIndex": 1, "startColumnIndex": 0, "endColumnIndex": 4},
             "cell": {"userEnteredFormat": {"textFormat": {"bold": True, "fontSize": 14}}},
             "fields": "userEnteredFormat.textFormat"}},
-        # Section headers (0-indexed)
-        section_hdr(2,  dark_green),   # REVENUE       (sheet row 3)
-        section_hdr(18, dark_red),     # COST OF REVENUE (sheet row 19)
-        section_hdr(28, dark_blue),    # OPERATING EXPENSES (sheet row 29)
+        # Through-date label (row 1 = 0-idx 1) — highlight col A label
+        {"repeatCell": {"range": {"sheetId": sheet_id, "startRowIndex": 1, "endRowIndex": 2, "startColumnIndex": 0, "endColumnIndex": 1},
+            "cell": {"userEnteredFormat": {"textFormat": {"bold": True}}},
+            "fields": "userEnteredFormat.textFormat"}},
+        # Through-date value cell (B2 = 0-idx row 1 col 1) — yellow highlight + date format
+        {"repeatCell": {"range": {"sheetId": sheet_id, "startRowIndex": 1, "endRowIndex": 2, "startColumnIndex": 1, "endColumnIndex": 2},
+            "cell": {"userEnteredFormat": {
+                "backgroundColor": {"red": 1.0, "green": 0.95, "blue": 0.60},
+                "numberFormat": {"type": "DATE", "pattern": "m/d/yyyy"},
+            }},
+            "fields": "userEnteredFormat(backgroundColor,numberFormat)"}},
+        # Section headers (0-indexed): REVENUE=row4(idx3), COGS=row21(idx20), OPEX=row31(idx30)
+        section_hdr(3,  dark_green),
+        section_hdr(20, dark_red),
+        section_hdr(30, dark_blue),
         # Column sub-headers
-        col_hdr(3),   # row 4
-        col_hdr(19),  # row 20
-        col_hdr(29),  # row 30
+        col_hdr(4),   # row 5
+        col_hdr(21),  # row 22
+        col_hdr(31),  # row 32
         # Subtotal / key rows (0-indexed)
-        subtotal_row(16, mid_green),   # TOTAL REVENUE  (sheet row 17)
-        subtotal_row(26, mid_green),   # GROSS PROFIT   (sheet row 27)
-        subtotal_row(37, mid_blue),    # TOTAL OPEX     (sheet row 38)
-        subtotal_row(39, gold),        # NET INCOME     (sheet row 40)
+        subtotal_row(18, mid_green),   # TOTAL REVENUE  (sheet row 19)
+        subtotal_row(28, mid_green),   # GROSS PROFIT   (sheet row 29)
+        subtotal_row(39, mid_blue),    # TOTAL OPEX     (sheet row 40)
+        subtotal_row(41, gold),        # NET INCOME     (sheet row 42)
         # Currency format col B
         {"repeatCell": {"range": {"sheetId": sheet_id, "startRowIndex": 3, "endRowIndex": 43, "startColumnIndex": 1, "endColumnIndex": 2},
             "cell": {"userEnteredFormat": {"numberFormat": {"type": "CURRENCY", "pattern": '"$"#,##0.00'}}},
