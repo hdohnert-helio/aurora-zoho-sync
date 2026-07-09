@@ -4965,7 +4965,16 @@ def _write_readme_tab(svc) -> None:
         ["  • To remove an override, delete the row from the Overrides tab and re-run."],
     ]
 
-    svc.spreadsheets().values().update(
+    sheets = svc.spreadsheets()
+    # Create README tab if it doesn't exist
+    existing_tabs = {s["properties"]["title"] for s in sheets.get(spreadsheetId=CASHFLOW_SHEET_ID).execute().get("sheets", [])}
+    if CASHFLOW_README_TAB not in existing_tabs:
+        sheets.batchUpdate(
+            spreadsheetId=CASHFLOW_SHEET_ID,
+            body={"requests": [{"addSheet": {"properties": {"title": CASHFLOW_README_TAB}}}]},
+        ).execute()
+
+    sheets.values().update(
         spreadsheetId=CASHFLOW_SHEET_ID,
         range=f"'{CASHFLOW_README_TAB}'!A1:A{len(readme_rows)}",
         valueInputOption="RAW",
