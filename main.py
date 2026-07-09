@@ -4720,6 +4720,7 @@ def _compute_cashflow_row(row: dict, today: datetime.date, zoho_base: str, auror
         zoho_link, aurora_link,
         ct_green_date, ct_green_amt,
         cash_materials_date, cash_materials_amt,
+        round(system_watts * 0.10, 2) if (finance_type not in ("LR", "SG") and system_watts) else "",
     ]
 
     PAYMENT_TYPE_MAP = {
@@ -5017,8 +5018,10 @@ def _write_summary_tab(svc, pipeline_tab_name: str) -> None:
         ["Total Subcontractor", f"=SUMIF('{p}'!C2:C,\"<>\",'{p}'!P2:P)",  "=B6/B4",   "Subcontractor payments"],
         ["Total Materials",     f"=SUMIF('{p}'!C2:C,\"<>\",'{p}'!O2:O)+SUMIF('{p}'!C2:C,\"<>\",'{p}'!AE2:AE)", "=B7/B4", "LR materials est + Cash/SE materials"],
         ["Total Referral",      f"=SUMIF('{p}'!C2:C,\"<>\",'{p}'!R2:R)",  "=B8/B4",   "Referral payouts"],
+        ["Total CT Green",      f"=SUMIF('{p}'!C2:C,\"<>\",'{p}'!AC2:AC)", "=B9/B4",  "CT Green Estates ($0.25/W, pre-install projects)"],
+        ["Total SolarInsure",   f"=SUMIF('{p}'!C2:C,\"<>\",'{p}'!AF2:AF)", "=B10/B4", "Warranty fee ($0.10/W, non-LR projects)"],
         ["", "", "", ""],
-        ["Net Revenue",         f"=B4-B5-B6-B7-B8",                       "=B10/B4",  "Revenue minus all costs above"],
+        ["Net Revenue",         f"=B4-B5-B6-B7-B8-B9-B10",               "=B12/B4",  "Revenue minus all costs above"],
         ["", "", "", ""],
         ["Project Count",       f"=COUNTA('{p}'!A2:A)",                    "",         "Active pipeline projects"],
     ]
@@ -5041,16 +5044,16 @@ def _write_summary_tab(svc, pipeline_tab_name: str) -> None:
             "cell": {"userEnteredFormat": {"textFormat": {"bold": True},
                      "backgroundColor": {"red": 0.22, "green": 0.46, "blue": 0.64}}},
             "fields": "userEnteredFormat.textFormat,userEnteredFormat.backgroundColor"}},
-        # Currency format for column B (rows 4-12)
-        {"repeatCell": {"range": {"sheetId": sheet_id, "startRowIndex": 3, "endRowIndex": 12, "startColumnIndex": 1, "endColumnIndex": 2},
+        # Currency format for column B (rows 4-14)
+        {"repeatCell": {"range": {"sheetId": sheet_id, "startRowIndex": 3, "endRowIndex": 14, "startColumnIndex": 1, "endColumnIndex": 2},
             "cell": {"userEnteredFormat": {"numberFormat": {"type": "CURRENCY", "pattern": "$#,##0.00"}}},
             "fields": "userEnteredFormat.numberFormat"}},
-        # Percentage format for column C (rows 4-12)
-        {"repeatCell": {"range": {"sheetId": sheet_id, "startRowIndex": 3, "endRowIndex": 12, "startColumnIndex": 2, "endColumnIndex": 3},
+        # Percentage format for column C (rows 4-14)
+        {"repeatCell": {"range": {"sheetId": sheet_id, "startRowIndex": 3, "endRowIndex": 14, "startColumnIndex": 2, "endColumnIndex": 3},
             "cell": {"userEnteredFormat": {"numberFormat": {"type": "PERCENT", "pattern": "0.0%"}}},
             "fields": "userEnteredFormat.numberFormat"}},
-        # Net Revenue bold
-        {"repeatCell": {"range": {"sheetId": sheet_id, "startRowIndex": 9, "endRowIndex": 10, "startColumnIndex": 0, "endColumnIndex": 3},
+        # Net Revenue bold (now row index 11 = sheet row 12)
+        {"repeatCell": {"range": {"sheetId": sheet_id, "startRowIndex": 11, "endRowIndex": 12, "startColumnIndex": 0, "endColumnIndex": 3},
             "cell": {"userEnteredFormat": {"textFormat": {"bold": True}}},
             "fields": "userEnteredFormat.textFormat"}},
         # Column widths
@@ -5395,6 +5398,7 @@ def _run_cashflow_batch(projects: list[dict], tab_name: str) -> dict:
         "Zoho Link", "Aurora Link",
         "CT Green Date", "CT Green Amt",
         "Cash Materials Date", "Cash Materials Amt",
+        "SolarInsure Amt",
     ]
     sheets.values().update(
         spreadsheetId=CASHFLOW_SHEET_ID,
