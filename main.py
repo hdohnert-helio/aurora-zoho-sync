@@ -5005,53 +5005,112 @@ def _write_summary_tab(svc, pipeline_tab_name: str) -> None:
     ).execute()
     sheet_id = resp["replies"][0]["addSheet"]["properties"]["sheetId"]
 
-    # Pull all figures from the Cash Flow tab (sum across all 17 week columns B:R)
-    # Cash Flow row layout (after dashboard rebuild):
-    #   5-16 = revenue rows, 17 = TOTAL MONEY IN
-    #   19-29 = cost rows,   30 = TOTAL MONEY OUT, 31 = NET CASH FLOW
+    # P&L pulls from Cash Flow tab — SUM across all 17 week columns (B:R)
+    # Cash Flow row layout: 5-16=revenue, 17=TOTAL IN, 19-29=costs, 30=TOTAL OUT, 31=NET
     cf = "Cash Flow"
     def cf_sum(row):
         return f"=SUM('{cf}'!B{row}:R{row})"
 
+    # Row references (sheet rows, 1-indexed):
+    # Revenue section starts at sheet row 5 (0-idx 4), data rows:
+    #   5=LR/SG M1, 6=LR/SG M2, 7=CF M1, 8=CF M2, 9=SE M1, 10=SE M2, 11=SE M3
+    #   12=Cash Deposit, 13=Cash Progress, 14=Cash Final, 15=Manual, 16=LR DC Holdback
+    #   17=TOTAL MONEY IN
+    # Cost rows: 19=Payroll, 20=Subcontractor, 21=Materials, 22=Commissions
+    #            23=SolarInsure, 24=Debt, 25=Subscriptions, 26=Office, 27=Fleet, 28=Misc, 29=CT Green
+    #            30=TOTAL MONEY OUT, 31=NET
+
+    # P&L sheet row layout (1-indexed for formula references):
+    # 1  = title
+    # 2  = blank
+    # 3  = REVENUE header
+    # 4  = col headers
+    # 5-15 = revenue line items
+    # 16 = blank
+    # 17 = TOTAL REVENUE         ← B17
+    # 18 = blank
+    # 19 = COST OF REVENUE header
+    # 20 = col headers
+    # 21-26 = COGS line items
+    # 27 = blank
+    # 28 = GROSS PROFIT          ← B28 = B17 - sum(B21:B26)
+    # 29 = blank
+    # 30 = OPERATING EXPENSES header
+    # 31 = col headers
+    # 32-37 = OpEx line items
+    # 38 = blank
+    # 39 = TOTAL OPERATING EXPENSES ← B39
+    # 40 = blank
+    # 41 = NET INCOME            ← B41 = B28 - B39
+    # 42 = blank
+    # 43 = Project Count
+
     rows = [
-        ["Helio Cash Flow Summary", "", "", ""],
+        # Row 1
+        ["Helio Solar — Profit & Loss", "", "", ""],
+        # Row 2
         ["", "", "", ""],
-        ["— REVENUE —", "", "", ""],
-        ["Metric", "Amount", "% of Total In", "Notes"],
-        ["  LR/SG M1 (80% draws)",    cf_sum(5),  "=B5/B$19",  "LR/SG first payment draws"],
-        ["  LR/SG M2 (20% finals)",   cf_sum(6),  "=B6/B$19",  "LR/SG final payments"],
-        ["  CF M1",                   cf_sum(7),  "=B7/B$19",  ""],
-        ["  CF M2",                   cf_sum(8),  "=B8/B$19",  ""],
-        ["  SE M1",                   cf_sum(9),  "=B9/B$19",  ""],
-        ["  SE M2",                   cf_sum(10), "=B10/B$19", ""],
-        ["  SE M3",                   cf_sum(11), "=B11/B$19", ""],
-        ["  Cash Deposit",            cf_sum(12), "=B12/B$19", ""],
-        ["  Cash Progress",           cf_sum(13), "=B13/B$19", ""],
-        ["  Cash Final",              cf_sum(14), "=B14/B$19", ""],
-        ["  Manual Revenue",          cf_sum(15), "=B15/B$19", "Manually entered revenue"],
-        ["  LR DC Holdback",          cf_sum(16), "=B16/B$19", "$0.25/W released 25 days after activation"],
+        # Row 3 — REVENUE section header
+        ["REVENUE", "", "", ""],
+        # Row 4 — column headers
+        ["", "Amount", "% of Revenue", ""],
+        # Rows 5-15 — revenue line items
+        ["  LR/SG M1 — 80% Draws",   cf_sum(5),  "=B5/B$17",  ""],
+        ["  LR/SG M2 — 20% Finals",  cf_sum(6),  "=B6/B$17",  ""],
+        ["  CF M1",                  cf_sum(7),  "=B7/B$17",  ""],
+        ["  CF M2",                  cf_sum(8),  "=B8/B$17",  ""],
+        ["  SE M1",                  cf_sum(9),  "=B9/B$17",  ""],
+        ["  SE M2",                  cf_sum(10), "=B10/B$17", ""],
+        ["  SE M3",                  cf_sum(11), "=B11/B$17", ""],
+        ["  Cash Deposit",           cf_sum(12), "=B12/B$17", ""],
+        ["  Cash Progress",          cf_sum(13), "=B13/B$17", ""],
+        ["  Cash Final",             cf_sum(14), "=B14/B$17", ""],
+        ["  LR DC Holdback",         cf_sum(16), "=B15/B$17", "$0.25/W released ~25 days post-activation"],
+        # Row 16
         ["", "", "", ""],
-        ["TOTAL REVENUE",             cf_sum(17), "",           ""],
+        # Row 17 — TOTAL REVENUE
+        ["TOTAL REVENUE",            cf_sum(17), "",           ""],
+        # Row 18
         ["", "", "", ""],
-        ["— COSTS —", "", "", ""],
-        ["Metric", "Amount", "% of Total In", "Notes"],
-        ["  Payroll & Benefits",      cf_sum(19), "=B22/B$19", ""],
-        ["  Subcontractor",           cf_sum(20), "=B23/B$19", ""],
-        ["  Materials",               cf_sum(21), "=B24/B$19", ""],
-        ["  Commissions",             cf_sum(22), "=B25/B$19", ""],
-        ["  SolarInsure / Warranty",  cf_sum(23), "=B26/B$19", ""],
-        ["  Debt Service",            cf_sum(24), "=B27/B$19", ""],
-        ["  Subscriptions",           cf_sum(25), "=B28/B$19", ""],
-        ["  Office & Operating",      cf_sum(26), "=B29/B$19", ""],
-        ["  Fleet",                   cf_sum(27), "=B30/B$19", ""],
-        ["  Misc",                    cf_sum(28), "=B31/B$19", ""],
-        ["  CT Green Estates",        cf_sum(29), "=B32/B$19", "$0.25/W on pre-install jobs"],
+        # Row 19 — COGS header
+        ["COST OF REVENUE", "", "", "Direct project costs"],
+        # Row 20 — column headers
+        ["", "Amount", "% of Revenue", ""],
+        # Rows 21-26 — COGS
+        ["  Subcontractor",          cf_sum(20), "=B21/B$17", ""],
+        ["  Materials",              cf_sum(21), "=B22/B$17", "LR estimates + Cash/SE actuals"],
+        ["  Commissions",            cf_sum(22), "=B23/B$17", "Rep + consultant payouts (incl. referrals)"],
+        ["  SolarInsure / Warranty", cf_sum(23), "=B24/B$17", "$0.10/W on non-LR projects"],
+        ["  CT Green Estates",       cf_sum(29), "=B25/B$17", "$0.25/W on pre-install projects"],
+        # Row 26
         ["", "", "", ""],
-        ["TOTAL COSTS",               cf_sum(30), "",           ""],
+        # Row 27 — GROSS PROFIT
+        ["GROSS PROFIT",             "=B17-SUM(B21:B25)", "=B27/B$17", "Revenue minus direct project costs"],
+        # Row 28
         ["", "", "", ""],
-        ["NET CASH FLOW",             cf_sum(31), "",           "Total Revenue minus Total Costs"],
+        # Row 29 — OPEX header
+        ["OPERATING EXPENSES", "", "", "Overhead and fixed costs"],
+        # Row 30 — column headers
+        ["", "Amount", "% of Revenue", ""],
+        # Rows 31-36 — OpEx
+        ["  Payroll & Benefits",     cf_sum(19), "=B31/B$17", ""],
+        ["  Debt Service",           cf_sum(24), "=B32/B$17", ""],
+        ["  Subscriptions",          cf_sum(25), "=B33/B$17", ""],
+        ["  Office & Operating",     cf_sum(26), "=B34/B$17", ""],
+        ["  Fleet",                  cf_sum(27), "=B35/B$17", ""],
+        ["  Misc",                   cf_sum(28), "=B36/B$17", ""],
+        # Row 37
         ["", "", "", ""],
-        ["Project Count",             f"=COUNTA('{p}'!A2:A)", "", "Active pipeline projects"],
+        # Row 38 — TOTAL OPEX
+        ["TOTAL OPERATING EXPENSES", "=SUM(B31:B36)", "=B38/B$17", ""],
+        # Row 39
+        ["", "", "", ""],
+        # Row 40 — NET INCOME
+        ["NET INCOME",               "=B27-B38",  "=B40/B$17", "Gross Profit minus Operating Expenses"],
+        # Row 41
+        ["", "", "", ""],
+        # Row 42
+        ["Active Projects",          f"=COUNTA('{p}'!A2:A)", "", ""],
     ]
 
     sheets.values().update(
@@ -5062,53 +5121,69 @@ def _write_summary_tab(svc, pipeline_tab_name: str) -> None:
     ).execute()
 
     # Formatting
-    green_hdr  = {"red": 0.18, "green": 0.49, "blue": 0.20}
-    red_hdr    = {"red": 0.60, "green": 0.15, "blue": 0.15}
-    blue_hdr   = {"red": 0.22, "green": 0.46, "blue": 0.64}
-    white_text = {"red": 1.0,  "green": 1.0,  "blue": 1.0}
-    total_rows_0idx = [18, 33, 35]   # TOTAL REVENUE=row19, TOTAL COSTS=row34, NET=row36 (0-indexed)
+    # Colors
+    dark_green  = {"red": 0.13, "green": 0.37, "blue": 0.20}   # Revenue header
+    dark_red    = {"red": 0.50, "green": 0.13, "blue": 0.13}   # COGS header
+    dark_blue   = {"red": 0.17, "green": 0.35, "blue": 0.55}   # OpEx header
+    mid_green   = {"red": 0.72, "green": 0.88, "blue": 0.75}   # Gross Profit row
+    mid_blue    = {"red": 0.68, "green": 0.80, "blue": 0.93}   # Total OpEx row
+    gold        = {"red": 1.00, "green": 0.88, "blue": 0.40}   # Net Income row
+    white       = {"red": 1.0,  "green": 1.0,  "blue": 1.0}
+    col_hdr_bg  = {"red": 0.85, "green": 0.85, "blue": 0.85}
 
-    def hdr_req(row_0, color):
-        return {"repeatCell": {"range": {"sheetId": sheet_id, "startRowIndex": row_0, "endRowIndex": row_0+1, "startColumnIndex": 0, "endColumnIndex": 4},
-            "cell": {"userEnteredFormat": {"textFormat": {"bold": True, "foregroundColor": white_text}, "backgroundColor": color}},
+    def section_hdr(row_0, bg):
+        return {"repeatCell": {
+            "range": {"sheetId": sheet_id, "startRowIndex": row_0, "endRowIndex": row_0+1, "startColumnIndex": 0, "endColumnIndex": 4},
+            "cell": {"userEnteredFormat": {"textFormat": {"bold": True, "fontSize": 11, "foregroundColor": white}, "backgroundColor": bg}},
+            "fields": "userEnteredFormat(textFormat,backgroundColor)"}}
+
+    def col_hdr(row_0):
+        return {"repeatCell": {
+            "range": {"sheetId": sheet_id, "startRowIndex": row_0, "endRowIndex": row_0+1, "startColumnIndex": 0, "endColumnIndex": 4},
+            "cell": {"userEnteredFormat": {"textFormat": {"bold": True}, "backgroundColor": col_hdr_bg}},
+            "fields": "userEnteredFormat(textFormat,backgroundColor)"}}
+
+    def subtotal_row(row_0, bg):
+        return {"repeatCell": {
+            "range": {"sheetId": sheet_id, "startRowIndex": row_0, "endRowIndex": row_0+1, "startColumnIndex": 0, "endColumnIndex": 3},
+            "cell": {"userEnteredFormat": {"textFormat": {"bold": True}, "backgroundColor": bg}},
             "fields": "userEnteredFormat(textFormat,backgroundColor)"}}
 
     format_requests = [
-        # Title
+        # Title (row 0)
         {"repeatCell": {"range": {"sheetId": sheet_id, "startRowIndex": 0, "endRowIndex": 1, "startColumnIndex": 0, "endColumnIndex": 4},
             "cell": {"userEnteredFormat": {"textFormat": {"bold": True, "fontSize": 14}}},
             "fields": "userEnteredFormat.textFormat"}},
-        # Section headers: "— REVENUE —" (row 2), "— COSTS —" (row 20)
-        hdr_req(2, green_hdr),
-        hdr_req(20, red_hdr),
-        # Column headers (rows 3 and 21)
-        {"repeatCell": {"range": {"sheetId": sheet_id, "startRowIndex": 3, "endRowIndex": 4, "startColumnIndex": 0, "endColumnIndex": 4},
-            "cell": {"userEnteredFormat": {"textFormat": {"bold": True}, "backgroundColor": blue_hdr}},
-            "fields": "userEnteredFormat(textFormat,backgroundColor)"}},
-        {"repeatCell": {"range": {"sheetId": sheet_id, "startRowIndex": 21, "endRowIndex": 22, "startColumnIndex": 0, "endColumnIndex": 4},
-            "cell": {"userEnteredFormat": {"textFormat": {"bold": True}, "backgroundColor": blue_hdr}},
-            "fields": "userEnteredFormat(textFormat,backgroundColor)"}},
-        # Currency format for col B (all data rows)
-        {"repeatCell": {"range": {"sheetId": sheet_id, "startRowIndex": 3, "endRowIndex": 40, "startColumnIndex": 1, "endColumnIndex": 2},
-            "cell": {"userEnteredFormat": {"numberFormat": {"type": "CURRENCY", "pattern": "$#,##0.00"}}},
+        # Section headers (0-indexed)
+        section_hdr(2,  dark_green),   # REVENUE       (sheet row 3)
+        section_hdr(18, dark_red),     # COST OF REVENUE (sheet row 19)
+        section_hdr(28, dark_blue),    # OPERATING EXPENSES (sheet row 29)
+        # Column sub-headers
+        col_hdr(3),   # row 4
+        col_hdr(19),  # row 20
+        col_hdr(29),  # row 30
+        # Subtotal / key rows (0-indexed)
+        subtotal_row(16, mid_green),   # TOTAL REVENUE  (sheet row 17)
+        subtotal_row(26, mid_green),   # GROSS PROFIT   (sheet row 27)
+        subtotal_row(37, mid_blue),    # TOTAL OPEX     (sheet row 38)
+        subtotal_row(39, gold),        # NET INCOME     (sheet row 40)
+        # Currency format col B
+        {"repeatCell": {"range": {"sheetId": sheet_id, "startRowIndex": 3, "endRowIndex": 43, "startColumnIndex": 1, "endColumnIndex": 2},
+            "cell": {"userEnteredFormat": {"numberFormat": {"type": "CURRENCY", "pattern": '"$"#,##0.00'}}},
             "fields": "userEnteredFormat.numberFormat"}},
-        # Percentage format for col C
-        {"repeatCell": {"range": {"sheetId": sheet_id, "startRowIndex": 3, "endRowIndex": 40, "startColumnIndex": 2, "endColumnIndex": 3},
+        # Percentage format col C
+        {"repeatCell": {"range": {"sheetId": sheet_id, "startRowIndex": 3, "endRowIndex": 43, "startColumnIndex": 2, "endColumnIndex": 3},
             "cell": {"userEnteredFormat": {"numberFormat": {"type": "PERCENT", "pattern": "0.0%"}}},
             "fields": "userEnteredFormat.numberFormat"}},
-        # Bold totals: TOTAL REVENUE (row 18=0idx), TOTAL COSTS (row 33=0idx), NET (row 35=0idx)
-        *[{"repeatCell": {"range": {"sheetId": sheet_id, "startRowIndex": r, "endRowIndex": r+1, "startColumnIndex": 0, "endColumnIndex": 3},
-            "cell": {"userEnteredFormat": {"textFormat": {"bold": True}}},
-            "fields": "userEnteredFormat.textFormat"}} for r in total_rows_0idx],
         # Column widths
         {"updateDimensionProperties": {"range": {"sheetId": sheet_id, "dimension": "COLUMNS", "startIndex": 0, "endIndex": 1},
-            "properties": {"pixelSize": 220}, "fields": "pixelSize"}},
+            "properties": {"pixelSize": 230}, "fields": "pixelSize"}},
         {"updateDimensionProperties": {"range": {"sheetId": sheet_id, "dimension": "COLUMNS", "startIndex": 1, "endIndex": 2},
             "properties": {"pixelSize": 150}, "fields": "pixelSize"}},
         {"updateDimensionProperties": {"range": {"sheetId": sheet_id, "dimension": "COLUMNS", "startIndex": 2, "endIndex": 3},
             "properties": {"pixelSize": 120}, "fields": "pixelSize"}},
         {"updateDimensionProperties": {"range": {"sheetId": sheet_id, "dimension": "COLUMNS", "startIndex": 3, "endIndex": 4},
-            "properties": {"pixelSize": 280}, "fields": "pixelSize"}},
+            "properties": {"pixelSize": 260}, "fields": "pixelSize"}},
     ]
     sheets.batchUpdate(spreadsheetId=CASHFLOW_SHEET_ID, body={"requests": format_requests}).execute()
     logger.info("_write_summary_tab: Summary tab written")
