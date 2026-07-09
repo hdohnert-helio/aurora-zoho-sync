@@ -3775,8 +3775,8 @@ async def debug_run():
 #   payment dates and amounts by finance type, and writes a Pipeline tab to
 #   the cash flow Google Sheet.
 #
-CASHFLOW_SHEET_ID = "15diQy50zSxuYVl6VINDb-4HOnLuT1xa1J2QtZAS65rM"
-DASHBOARD_SHEET_ID = "1ktCKriA4W97Cxy-bubTD2zSP8W1X8fP52BLXvElkp5g"
+CASHFLOW_SHEET_ID = "1ktCKriA4W97Cxy-bubTD2zSP8W1X8fP52BLXvElkp5g"
+DASHBOARD_SHEET_ID = CASHFLOW_SHEET_ID  # same file — all tabs live together
 CASHFLOW_MATERIALS_PPW = 1.26  # LR materials estimate $/W
 CASHFLOW_LR_WARRANTY = 250.00  # LR warranty deduction from 20% final
 
