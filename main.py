@@ -5001,29 +5001,57 @@ def _write_summary_tab(svc, pipeline_tab_name: str) -> None:
 
     resp = sheets.batchUpdate(
         spreadsheetId=CASHFLOW_SHEET_ID,
-        body={"requests": [{"addSheet": {"properties": {"title": CASHFLOW_SUMMARY_TAB, "gridProperties": {"columnCount": 3, "rowCount": 20}}}}]}
+        body={"requests": [{"addSheet": {"properties": {"title": CASHFLOW_SUMMARY_TAB, "gridProperties": {"columnCount": 4, "rowCount": 45}}}}]}
     ).execute()
     sheet_id = resp["replies"][0]["addSheet"]["properties"]["sheetId"]
 
-    # Formulas — Pipeline columns:
-    #   H = Total Revenue, S = Total Commission, P = Subcontractor Cost
-    #   O = Materials est (LR), AE = Cash Materials (CASH/SE), R = Referral Payout
-    # Column C = % of revenue (blank for Revenue and Net Revenue rows)
+    # Pull all figures from the Cash Flow tab (sum across all 17 week columns B:R)
+    # Cash Flow row layout (after dashboard rebuild):
+    #   5-16 = revenue rows, 17 = TOTAL MONEY IN
+    #   19-29 = cost rows,   30 = TOTAL MONEY OUT, 31 = NET CASH FLOW
+    cf = "Cash Flow"
+    def cf_sum(row):
+        return f"=SUM('{cf}'!B{row}:R{row})"
+
     rows = [
-        ["Helio Pipeline Summary", "", "", ""],
+        ["Helio Cash Flow Summary", "", "", ""],
         ["", "", "", ""],
-        ["Metric", "Amount", "% of Revenue", "Notes"],
-        ["Total Revenue",       f"=SUMIF('{p}'!C2:C,\"<>\",'{p}'!H2:H)",  "",          "Contract price (base + adders - discounts)"],
-        ["Total Commissions",   f"=SUMIF('{p}'!C2:C,\"<>\",'{p}'!S2:S)",  "=B5/B4",   "Rep + consultant commissions"],
-        ["Total Subcontractor", f"=SUMIF('{p}'!C2:C,\"<>\",'{p}'!P2:P)",  "=B6/B4",   "Subcontractor payments"],
-        ["Total Materials",     f"=SUMIF('{p}'!C2:C,\"<>\",'{p}'!O2:O)+SUMIF('{p}'!C2:C,\"<>\",'{p}'!AE2:AE)", "=B7/B4", "LR materials est + Cash/SE materials"],
-        ["Total Referral",      f"=SUMIF('{p}'!C2:C,\"<>\",'{p}'!R2:R)",  "=B8/B4",   "Referral payouts"],
-        ["Total CT Green",      f"=SUMIF('{p}'!C2:C,\"<>\",'{p}'!AC2:AC)", "=B9/B4",  "CT Green Estates ($0.25/W, pre-install projects)"],
-        ["Total SolarInsure",   f"=SUMIF('{p}'!C2:C,\"<>\",'{p}'!AF2:AF)", "=B10/B4", "Warranty fee ($0.10/W, non-LR projects)"],
+        ["— REVENUE —", "", "", ""],
+        ["Metric", "Amount", "% of Total In", "Notes"],
+        ["  LR/SG M1 (80% draws)",    cf_sum(5),  "=B5/B$19",  "LR/SG first payment draws"],
+        ["  LR/SG M2 (20% finals)",   cf_sum(6),  "=B6/B$19",  "LR/SG final payments"],
+        ["  CF M1",                   cf_sum(7),  "=B7/B$19",  ""],
+        ["  CF M2",                   cf_sum(8),  "=B8/B$19",  ""],
+        ["  SE M1",                   cf_sum(9),  "=B9/B$19",  ""],
+        ["  SE M2",                   cf_sum(10), "=B10/B$19", ""],
+        ["  SE M3",                   cf_sum(11), "=B11/B$19", ""],
+        ["  Cash Deposit",            cf_sum(12), "=B12/B$19", ""],
+        ["  Cash Progress",           cf_sum(13), "=B13/B$19", ""],
+        ["  Cash Final",              cf_sum(14), "=B14/B$19", ""],
+        ["  Manual Revenue",          cf_sum(15), "=B15/B$19", "Manually entered revenue"],
+        ["  LR DC Holdback",          cf_sum(16), "=B16/B$19", "$0.25/W released 25 days after activation"],
         ["", "", "", ""],
-        ["Net Revenue",         f"=B4-B5-B6-B7-B8-B9-B10",               "=B12/B4",  "Revenue minus all costs above"],
+        ["TOTAL REVENUE",             cf_sum(17), "",           ""],
         ["", "", "", ""],
-        ["Project Count",       f"=COUNTA('{p}'!A2:A)",                    "",         "Active pipeline projects"],
+        ["— COSTS —", "", "", ""],
+        ["Metric", "Amount", "% of Total In", "Notes"],
+        ["  Payroll & Benefits",      cf_sum(19), "=B22/B$19", ""],
+        ["  Subcontractor",           cf_sum(20), "=B23/B$19", ""],
+        ["  Materials",               cf_sum(21), "=B24/B$19", ""],
+        ["  Commissions",             cf_sum(22), "=B25/B$19", ""],
+        ["  SolarInsure / Warranty",  cf_sum(23), "=B26/B$19", ""],
+        ["  Debt Service",            cf_sum(24), "=B27/B$19", ""],
+        ["  Subscriptions",           cf_sum(25), "=B28/B$19", ""],
+        ["  Office & Operating",      cf_sum(26), "=B29/B$19", ""],
+        ["  Fleet",                   cf_sum(27), "=B30/B$19", ""],
+        ["  Misc",                    cf_sum(28), "=B31/B$19", ""],
+        ["  CT Green Estates",        cf_sum(29), "=B32/B$19", "$0.25/W on pre-install jobs"],
+        ["", "", "", ""],
+        ["TOTAL COSTS",               cf_sum(30), "",           ""],
+        ["", "", "", ""],
+        ["NET CASH FLOW",             cf_sum(31), "",           "Total Revenue minus Total Costs"],
+        ["", "", "", ""],
+        ["Project Count",             f"=COUNTA('{p}'!A2:A)", "", "Active pipeline projects"],
     ]
 
     sheets.values().update(
@@ -5034,37 +5062,53 @@ def _write_summary_tab(svc, pipeline_tab_name: str) -> None:
     ).execute()
 
     # Formatting
+    green_hdr  = {"red": 0.18, "green": 0.49, "blue": 0.20}
+    red_hdr    = {"red": 0.60, "green": 0.15, "blue": 0.15}
+    blue_hdr   = {"red": 0.22, "green": 0.46, "blue": 0.64}
+    white_text = {"red": 1.0,  "green": 1.0,  "blue": 1.0}
+    total_rows_0idx = [18, 33, 35]   # TOTAL REVENUE=row19, TOTAL COSTS=row34, NET=row36 (0-indexed)
+
+    def hdr_req(row_0, color):
+        return {"repeatCell": {"range": {"sheetId": sheet_id, "startRowIndex": row_0, "endRowIndex": row_0+1, "startColumnIndex": 0, "endColumnIndex": 4},
+            "cell": {"userEnteredFormat": {"textFormat": {"bold": True, "foregroundColor": white_text}, "backgroundColor": color}},
+            "fields": "userEnteredFormat(textFormat,backgroundColor)"}}
+
     format_requests = [
-        # Title row bold + large
+        # Title
         {"repeatCell": {"range": {"sheetId": sheet_id, "startRowIndex": 0, "endRowIndex": 1, "startColumnIndex": 0, "endColumnIndex": 4},
             "cell": {"userEnteredFormat": {"textFormat": {"bold": True, "fontSize": 14}}},
             "fields": "userEnteredFormat.textFormat"}},
-        # Header row bold + background
-        {"repeatCell": {"range": {"sheetId": sheet_id, "startRowIndex": 2, "endRowIndex": 3, "startColumnIndex": 0, "endColumnIndex": 4},
-            "cell": {"userEnteredFormat": {"textFormat": {"bold": True},
-                     "backgroundColor": {"red": 0.22, "green": 0.46, "blue": 0.64}}},
-            "fields": "userEnteredFormat.textFormat,userEnteredFormat.backgroundColor"}},
-        # Currency format for column B (rows 4-14)
-        {"repeatCell": {"range": {"sheetId": sheet_id, "startRowIndex": 3, "endRowIndex": 14, "startColumnIndex": 1, "endColumnIndex": 2},
+        # Section headers: "— REVENUE —" (row 2), "— COSTS —" (row 20)
+        hdr_req(2, green_hdr),
+        hdr_req(20, red_hdr),
+        # Column headers (rows 3 and 21)
+        {"repeatCell": {"range": {"sheetId": sheet_id, "startRowIndex": 3, "endRowIndex": 4, "startColumnIndex": 0, "endColumnIndex": 4},
+            "cell": {"userEnteredFormat": {"textFormat": {"bold": True}, "backgroundColor": blue_hdr}},
+            "fields": "userEnteredFormat(textFormat,backgroundColor)"}},
+        {"repeatCell": {"range": {"sheetId": sheet_id, "startRowIndex": 21, "endRowIndex": 22, "startColumnIndex": 0, "endColumnIndex": 4},
+            "cell": {"userEnteredFormat": {"textFormat": {"bold": True}, "backgroundColor": blue_hdr}},
+            "fields": "userEnteredFormat(textFormat,backgroundColor)"}},
+        # Currency format for col B (all data rows)
+        {"repeatCell": {"range": {"sheetId": sheet_id, "startRowIndex": 3, "endRowIndex": 40, "startColumnIndex": 1, "endColumnIndex": 2},
             "cell": {"userEnteredFormat": {"numberFormat": {"type": "CURRENCY", "pattern": "$#,##0.00"}}},
             "fields": "userEnteredFormat.numberFormat"}},
-        # Percentage format for column C (rows 4-14)
-        {"repeatCell": {"range": {"sheetId": sheet_id, "startRowIndex": 3, "endRowIndex": 14, "startColumnIndex": 2, "endColumnIndex": 3},
+        # Percentage format for col C
+        {"repeatCell": {"range": {"sheetId": sheet_id, "startRowIndex": 3, "endRowIndex": 40, "startColumnIndex": 2, "endColumnIndex": 3},
             "cell": {"userEnteredFormat": {"numberFormat": {"type": "PERCENT", "pattern": "0.0%"}}},
             "fields": "userEnteredFormat.numberFormat"}},
-        # Net Revenue bold (now row index 11 = sheet row 12)
-        {"repeatCell": {"range": {"sheetId": sheet_id, "startRowIndex": 11, "endRowIndex": 12, "startColumnIndex": 0, "endColumnIndex": 3},
+        # Bold totals: TOTAL REVENUE (row 18=0idx), TOTAL COSTS (row 33=0idx), NET (row 35=0idx)
+        *[{"repeatCell": {"range": {"sheetId": sheet_id, "startRowIndex": r, "endRowIndex": r+1, "startColumnIndex": 0, "endColumnIndex": 3},
             "cell": {"userEnteredFormat": {"textFormat": {"bold": True}}},
-            "fields": "userEnteredFormat.textFormat"}},
+            "fields": "userEnteredFormat.textFormat"}} for r in total_rows_0idx],
         # Column widths
         {"updateDimensionProperties": {"range": {"sheetId": sheet_id, "dimension": "COLUMNS", "startIndex": 0, "endIndex": 1},
-            "properties": {"pixelSize": 200}, "fields": "pixelSize"}},
+            "properties": {"pixelSize": 220}, "fields": "pixelSize"}},
         {"updateDimensionProperties": {"range": {"sheetId": sheet_id, "dimension": "COLUMNS", "startIndex": 1, "endIndex": 2},
             "properties": {"pixelSize": 150}, "fields": "pixelSize"}},
         {"updateDimensionProperties": {"range": {"sheetId": sheet_id, "dimension": "COLUMNS", "startIndex": 2, "endIndex": 3},
             "properties": {"pixelSize": 120}, "fields": "pixelSize"}},
         {"updateDimensionProperties": {"range": {"sheetId": sheet_id, "dimension": "COLUMNS", "startIndex": 3, "endIndex": 4},
-            "properties": {"pixelSize": 320}, "fields": "pixelSize"}},
+            "properties": {"pixelSize": 280}, "fields": "pixelSize"}},
     ]
     sheets.batchUpdate(spreadsheetId=CASHFLOW_SHEET_ID, body={"requests": format_requests}).execute()
     logger.info("_write_summary_tab: Summary tab written")
