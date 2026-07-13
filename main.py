@@ -3275,6 +3275,9 @@ def _get_commission_data_for_project(aurora_project_id: str) -> dict:
     designs_resp.close()
     designs = designs_data.get("designs", [])
     sold_designs = [d for d in designs if (d.get("milestone") or {}).get("milestone") == "sold"]
+    if not sold_designs:
+        # Aurora updates milestone from "sold" → "installed" once job is completed
+        sold_designs = [d for d in designs if (d.get("milestone") or {}).get("milestone") == "installed"]
     if len(sold_designs) != 1:
         return {"error": f"expected 1 sold design, found {len(sold_designs)}"}
 
