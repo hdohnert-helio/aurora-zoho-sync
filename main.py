@@ -4691,11 +4691,10 @@ def _compute_cashflow_row(row: dict, today: datetime.date, zoho_base: str, auror
         cash_materials_date = payment2_date
         cash_materials_amt = round(system_watts * CASHFLOW_MATERIALS_PPW, 2)
 
-    # CT Green Estates cost: $0.25/W, due at final payment, only for pre-install jobs
+    # CT Green Estates cost: $0.25/W, paid once project is fully paid (activation/final)
+    # Show for any project not yet in a fully-paid status
     ct_green_date = ct_green_amt = ""
-    is_pre_install = stage in CASHFLOW_PIPELINE_STAGES
-    if is_pre_install and system_watts:
-        # Final payment date by finance type
+    if system_watts and lending_status not in CASHFLOW_FULLY_PAID_STATUSES:
         if finance_type == "LR":
             final_date_for_ct = payment2_date
         elif finance_type in ("CASH", "SE"):
