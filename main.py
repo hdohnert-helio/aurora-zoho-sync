@@ -7396,8 +7396,8 @@ async def dashboard_create(request: Request):
                                             "sourceRange": {
                                                 "sources": [{
                                                     "sheetId": cf_sid,
-                                                    "startRowIndex": 15, "endRowIndex": 16,
-                                                    "startColumnIndex": 1, "endColumnIndex": 1 + num_cols,
+                                                    "startRowIndex": 16, "endRowIndex": 17,
+                                                    "startColumnIndex": 0, "endColumnIndex": 1 + num_cols,
                                                 }]
                                             }
                                         },
@@ -7410,8 +7410,8 @@ async def dashboard_create(request: Request):
                                             "sourceRange": {
                                                 "sources": [{
                                                     "sheetId": cf_sid,
-                                                    "startRowIndex": 28, "endRowIndex": 29,
-                                                    "startColumnIndex": 1, "endColumnIndex": 1 + num_cols,
+                                                    "startRowIndex": 29, "endRowIndex": 30,
+                                                    "startColumnIndex": 0, "endColumnIndex": 1 + num_cols,
                                                 }]
                                             }
                                         },
@@ -7425,7 +7425,7 @@ async def dashboard_create(request: Request):
                                                 "sources": [{
                                                     "sheetId": cf_sid,
                                                     "startRowIndex": 33, "endRowIndex": 34,
-                                                    "startColumnIndex": 1, "endColumnIndex": 1 + num_cols,
+                                                    "startColumnIndex": 0, "endColumnIndex": 1 + num_cols,
                                                 }]
                                             }
                                         },
@@ -7434,7 +7434,7 @@ async def dashboard_create(request: Request):
                                         "color": {"red": 0.1, "green": 0.3, "blue": 0.8},
                                     },
                                 ],
-                                "headerCount": 0,
+                                "headerCount": 1,
                             },
                         },
                         "position": {
