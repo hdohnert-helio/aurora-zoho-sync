@@ -4002,6 +4002,8 @@ def _write_cashflow_tab(svc, tab_name: str, rows: list[dict]) -> None:
         aurora_link = f'=HYPERLINK("{aurora_base}{aurora_id}","Aurora")' if aurora_id else ""
 
         finance_type = row.get("finance_type", "")
+        if finance_type == "PPA":
+            finance_type = "LR"
         lending_status = row.get("lending_status", "")
         stage = row.get("stage", "")
         sc_date_str = row.get("substantial_completion", "")
@@ -4369,6 +4371,8 @@ def _write_weekly_payments_tab(svc, rows: list[dict]) -> None:
 
     for row in rows:
         finance_type = row.get("finance_type", "")
+        if finance_type == "PPA":
+            finance_type = "LR"
         lending_status = row.get("lending_status", "")
         stage = row.get("stage", "")
         sc_date_str = row.get("substantial_completion", "")
@@ -4550,6 +4554,8 @@ def _compute_cashflow_row(row: dict, today: datetime.date, zoho_base: str, auror
     aurora_link = f'=HYPERLINK("{aurora_base}{aurora_id}","Aurora")' if aurora_id else ""
 
     finance_type = row.get("finance_type", "")
+    if finance_type == "PPA":
+        finance_type = "LR"  # Lightreach is a PPA product — treat identically
     lending_status = row.get("lending_status", "")
     stage = row.get("stage", "")
     sc_date_str = row.get("substantial_completion", "")
