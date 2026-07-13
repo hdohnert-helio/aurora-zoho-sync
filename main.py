@@ -4702,7 +4702,8 @@ def _compute_cashflow_row(row: dict, today: datetime.date, zoho_base: str, auror
     ct_green_date = ct_green_amt = ""
     if system_watts and lending_status not in CASHFLOW_FULLY_PAID_STATUSES:
         if finance_type == "LR":
-            final_date_for_ct = payment2_date
+            # Use activation payment date; fall back to SC date if activation not yet scheduled
+            final_date_for_ct = payment2_date or effective_sc_str
         elif finance_type in ("CASH", "SE"):
             final_date_for_ct = payment3_date
         else:
