@@ -6155,7 +6155,7 @@ async def dashboard_apply_overrides():
         # Read patched pipeline tab
         raw = sheets.values().get(
             spreadsheetId=CASHFLOW_SHEET_ID,
-            range=f"'{tab_name}'!A1:AA200",
+            range=f"'{tab_name}'!A1:AE200",
             valueRenderOption="FORMATTED_VALUE",
         ).execute().get("values", [])
 
@@ -6171,6 +6171,7 @@ async def dashboard_apply_overrides():
             "customer": "Customer", "project_id": "Project ID",
             "finance_type": "Finance Type", "stage": "Stage",
             "sc": "SC / Projected SC",
+            "kw": "kW",
             "pay1_date": "Payment 1 Date", "pay1_amt": "Payment 1 Amt",
             "pay2_date": "Payment 2 Date", "pay2_amt": "Payment 2 Amt",
             "pay3_date": "Payment 3 Date", "pay3_amt": "Payment 3 Amt",
@@ -6235,6 +6236,22 @@ async def dashboard_apply_overrides():
                     week_of(pay_date), pay_date, customer, ft, pay_type,
                     pay_amt, comm_date, comm_amt, stage, sc_display, proj_id, zoho_link,
                 ])
+
+            # LR DC Holdback: $0.25/W, 25 days after payment2
+            pay2_date = cell(row, "pay2_date")
+            if ft == "LR" and pay2_date:
+                try:
+                    kw_raw = cell(row, "kw")
+                    system_watts = round(float(str(kw_raw).replace(",", "")) * 1000) if kw_raw else 0
+                    if system_watts:
+                        holdback_date = (datetime.date.fromisoformat(pay2_date) + datetime.timedelta(days=25)).isoformat()
+                        holdback_amt = round(system_watts * 0.25, 2)
+                        weekly_events.append([
+                            week_of(holdback_date), holdback_date, customer, ft, "LR DC Holdback",
+                            holdback_amt, "", "", stage, sc_display, proj_id, zoho_link,
+                        ])
+                except (ValueError, TypeError):
+                    pass
 
         weekly_events.sort(key=lambda r: r[1] if r[1] else "9999")
         _write_dashboard_revenue_tab(svc, weekly_events)
