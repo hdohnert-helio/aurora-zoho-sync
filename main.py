@@ -5571,9 +5571,10 @@ def _run_cashflow_batch(projects: list[dict], tab_name: str) -> dict:
         logger.info(f"cashflow_batch: fetching {p['aurora_project_id']} ({p['customer']})")
         aurora_data = _get_commission_data_for_project(p["aurora_project_id"])
         if "error" in aurora_data:
-            logger.info(f"cashflow_batch: skipping {p['customer']} — {aurora_data['error']}")
-            gc.collect()
-            continue
+            # Fall back to Zoho data rather than skipping — _compute_cashflow_row
+            # has Zoho fallbacks for system_watts, base_price, and contract_price
+            logger.info(f"cashflow_batch: no Aurora sold design for {p['customer']} ({aurora_data['error']}) — using Zoho data")
+            aurora_data = {}
 
         proj_id = p.get("project_id", "")
         pov = overrides.get(proj_id, {})
