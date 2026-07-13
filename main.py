@@ -3865,7 +3865,8 @@ def _fetch_all_cashflow_projects(cutoff_date: str = "2026-01-01") -> list[dict]:
     fields = (
         "Name,Project_ID,Aurora_Project_ID,Sales_Representative,Owner,"
         "Project_Stage,Project_Created_Date,Substantial_Completion,"
-        "Lending_Status,System_kW_DC,Base_Price,Price_Per_Watt,Utility_PTO"
+        "Lending_Status,System_kW_DC,Base_Price,Price_Per_Watt,Utility_PTO,"
+        "ICA_Contingent_Approval"
     )
     criteria = f"(Project_Created_Date:greater_equal:{cutoff_date})"
     results = []
@@ -3917,6 +3918,7 @@ def _fetch_all_cashflow_projects(cutoff_date: str = "2026-01-01") -> list[dict]:
                 "base_price_zoho": float(r.get("Base_Price") or 0),
                 "price_per_watt_zoho": float(r.get("Price_Per_Watt") or 0),
                 "pto_date": (r.get("Utility_PTO") or "").strip(),
+                "ica_contingent_approval": (r.get("ICA_Contingent_Approval") or "").strip(),
             })
         info = resp.json().get("info") or {}
         if not info.get("more_records"):
@@ -4660,15 +4662,27 @@ def _compute_cashflow_row(row: dict, today: datetime.date, zoho_base: str, auror
     elif finance_type == "SE" and effective_sc_str:
         try:
             sc = datetime.date.fromisoformat(effective_sc_str)
-            payment1_date = _next_monday_on_or_after(sc + datetime.timedelta(days=14)).isoformat()
+            # Payment 1 (33%): loan closes ~10 days after project creation
+            if created_date_str:
+                created = datetime.date.fromisoformat(created_date_str)
+                payment1_date = (created + datetime.timedelta(days=10)).isoformat()
+            else:
+                payment1_date = (sc - datetime.timedelta(days=60)).isoformat()
             payment1_amt = round(contract_price * 0.33, 2)
-            payment2_date = _next_monday_on_or_after(sc + datetime.timedelta(days=33)).isoformat()
-            payment2_amt = round(contract_price * 0.33, 2)
             comm_payout1_date = payment1_date
             comm_payout1_amt = round(total_commission * 0.33 + referral_flat, 2)
+            # Payment 2 (33%): ICA contingent approval + 10 days
+            # Use actual ICA date if available; project as SC - 28 days otherwise
+            ica_date_str = row.get("ica_contingent_approval", "")
+            if ica_date_str:
+                ica = datetime.date.fromisoformat(ica_date_str)
+            else:
+                ica = sc - datetime.timedelta(days=28)
+            payment2_date = (ica + datetime.timedelta(days=10)).isoformat()
+            payment2_amt = round(contract_price * 0.33, 2)
             comm_payout2_date = payment2_date
             comm_payout2_amt = round(total_commission * 0.33, 2)
-            # Payment 3: PTO + 14 days → next Monday; fall back to SC + 60 if no PTO
+            # Payment 3 (34%): PTO + 14 days → next Monday; fall back to SC + 60 if no PTO
             pto_date_str = row.get("pto_date", "")
             if pto_date_str:
                 pto = datetime.date.fromisoformat(pto_date_str)
