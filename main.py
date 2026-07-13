@@ -4292,9 +4292,17 @@ def _read_payment_overrides(svc) -> dict:
         return {}
 
     def valid_date(s):
+        s = (s or "").strip()
+        # Try ISO format first (YYYY-MM-DD)
         try:
-            datetime.date.fromisoformat(s.strip())
-            return s.strip()
+            datetime.date.fromisoformat(s)
+            return s
+        except (ValueError, AttributeError):
+            pass
+        # Fall back to M/D/YYYY (Google Sheets default date display)
+        try:
+            d = datetime.datetime.strptime(s, "%m/%d/%Y").date()
+            return d.isoformat()
         except (ValueError, AttributeError):
             return None
 
