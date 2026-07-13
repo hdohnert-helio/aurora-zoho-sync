@@ -5568,14 +5568,13 @@ def _run_cashflow_batch(projects: list[dict], tab_name: str) -> dict:
 
     total = 0
     overrides_applied = 0
-    weekly_events = []  # list of 12-field lists — small footprint
+    weekly_events = []
+    pipeline_rows = []
 
     for p in projects:
         logger.info(f"cashflow_batch: fetching {p['aurora_project_id']} ({p['customer']})")
         aurora_data = _get_commission_data_for_project(p["aurora_project_id"])
         if "error" in aurora_data:
-            # Fall back to Zoho data rather than skipping — _compute_cashflow_row
-            # has Zoho fallbacks for system_watts, base_price, and contract_price
             logger.info(f"cashflow_batch: no Aurora sold design for {p['customer']} ({aurora_data['error']}) — using Zoho data")
             aurora_data = {}
 
@@ -5584,27 +5583,21 @@ def _run_cashflow_batch(projects: list[dict], tab_name: str) -> dict:
         if pov:
             overrides_applied += 1
 
-        # Combine project + aurora data into one temp row dict, process it,
-        # then discard — never accumulate into a list of full rows
         row = {**p, "data": aurora_data, "payment_overrides": pov}
         pipeline_row, pay_events = _compute_cashflow_row(row, today, zoho_base, aurora_base)
-        del row, aurora_data
-        gc.collect()
-
-        # Append pipeline row immediately
-        sheets.values().append(
-            spreadsheetId=CASHFLOW_SHEET_ID,
-            range=f"'{tab_name}'!A1",
-            valueInputOption="USER_ENTERED",
-            insertDataOption="INSERT_ROWS",
-            body={"values": [pipeline_row]},
-        ).execute()
-
-        # Accumulate only minimal weekly event tuples
+        pipeline_rows.append(pipeline_row)
         for evt in pay_events:
             weekly_events.append([week_of(evt[0])] + evt)
-
         total += 1
+
+    # Write all pipeline rows in one request to avoid Sheets write-rate limits
+    if pipeline_rows:
+        sheets.values().update(
+            spreadsheetId=CASHFLOW_SHEET_ID,
+            range=f"'{tab_name}'!A2",
+            valueInputOption="USER_ENTERED",
+            body={"values": pipeline_rows},
+        ).execute()
 
     # Apply Pipeline tab formatting
     dollar_fmt = {"numberFormat": {"type": "CURRENCY", "pattern": '"$"#,##0.00'}}
