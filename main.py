@@ -5346,14 +5346,19 @@ def _write_dashboard_expenses(svc) -> int:
                    if len(r) > 4 and str(r[4]).strip() == "No"
                    and (len(r) < 2 or r[1] not in _PROJECT_CATS
                         or (len(r) > 6 and str(r[6]).strip()))]  # has email = came from Submissions
+    # Preserve Auto project rows (commissions, materials, etc.) so sync-expenses doesn't lose them.
+    # _write_dashboard_project_expenses will clear and replace these when a full cashflow runs.
+    auto_project_rows = [r for r in existing
+                         if len(r) > 4 and str(r[4]).strip() == "Auto"
+                         and len(r) > 1 and r[1] in _PROJECT_CATS]
 
-    # Clear and rewrite auto rows, then append preserved manual rows
+    # Clear and rewrite auto rows, then append preserved manual and project rows
     sheets.values().clear(
         spreadsheetId=DASHBOARD_SHEET_ID,
         range="Expenses!A2:H",
     ).execute()
 
-    all_rows = rows + manual_rows
+    all_rows = rows + manual_rows + auto_project_rows
     if all_rows:
         sheets.values().update(
             spreadsheetId=DASHBOARD_SHEET_ID,
@@ -5385,6 +5390,26 @@ def _write_dashboard_project_expenses(svc, weekly_events: list) -> int:
                    project_id, zoho_link]
     """
     sheets = _build_sheets_service().spreadsheets()
+
+    # Remove stale Auto project rows before appending fresh ones to prevent duplicates
+    _PROJECT_CATS = {"Commissions", "Materials", "SolarInsure/Warranty", "Subcontractor", "Subcontractor Payments"}
+    existing = sheets.values().get(
+        spreadsheetId=DASHBOARD_SHEET_ID,
+        range="Expenses!A2:H",
+        valueRenderOption="FORMATTED_VALUE",
+    ).execute().get("values", [])
+    kept = [r for r in existing
+            if not (len(r) > 4 and str(r[4]).strip() == "Auto"
+                    and len(r) > 1 and r[1] in _PROJECT_CATS)]
+    sheets.values().clear(spreadsheetId=DASHBOARD_SHEET_ID, range="Expenses!A2:H").execute()
+    if kept:
+        sheets.values().update(
+            spreadsheetId=DASHBOARD_SHEET_ID,
+            range="Expenses!A2",
+            valueInputOption="USER_ENTERED",
+            body={"values": kept},
+        ).execute()
+
     rows = []
 
     for evt in weekly_events:
