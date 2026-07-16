@@ -13,6 +13,7 @@ from googleapiclient.errors import HttpError
 
 import logging
 import sys
+import gc
 
 logging.basicConfig(
     level=logging.INFO,
@@ -1702,7 +1703,12 @@ def health_check():
 # ------------------------
 # Get Zoho Access Token
 # ------------------------
+_ZOHO_TOKEN_CACHE: dict = {"token": None, "expires_at": 0}
+
 def get_zoho_access_token():
+    now = time.time()
+    if _ZOHO_TOKEN_CACHE["token"] and now < _ZOHO_TOKEN_CACHE["expires_at"]:
+        return _ZOHO_TOKEN_CACHE["token"]
     url = "https://accounts.zoho.com/oauth/v2/token"
     payload = {
         "grant_type": "refresh_token",
@@ -1710,9 +1716,15 @@ def get_zoho_access_token():
         "client_secret": os.getenv("ZOHO_CLIENT_SECRET"),
         "refresh_token": os.getenv("ZOHO_REFRESH_TOKEN"),
     }
-
     response = requests.post(url, data=payload)
-    return response.json().get("access_token")
+    response.close()
+    data = response.json()
+    token = data.get("access_token")
+    if token:
+        # Zoho tokens last 1 hour; refresh after 55 minutes to be safe
+        _ZOHO_TOKEN_CACHE["token"] = token
+        _ZOHO_TOKEN_CACHE["expires_at"] = now + 3300
+    return token
 
 
 # ------------------------
@@ -5903,9 +5915,11 @@ async def cashflow_run(request: Request):
         result = _run_cashflow_batch(projects, tab_name)
         result["project_count"] = len(projects)
         result["cutoff_date"] = cutoff
+        gc.collect()
         return result
     except Exception as e:
         import traceback
+        gc.collect()
         return {
             "error": str(e),
             "traceback": traceback.format_exc(),
@@ -7496,9 +7510,11 @@ async def dashboard_sync_expenses():
     try:
         svc = _build_sheets_service()
         n = _write_dashboard_expenses(svc)
+        gc.collect()
         return {"status": "ok", "rows_written": n}
     except Exception as e:
         import traceback as _tb
+        gc.collect()
         return {"error": str(e), "traceback": _tb.format_exc()}
 
 
