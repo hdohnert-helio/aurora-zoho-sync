@@ -5341,7 +5341,7 @@ def _write_dashboard_expenses(svc) -> int:
         valueRenderOption="FORMATTED_VALUE",
     ).execute().get("values", [])
     # Never preserve project-calculated categories unless they came from Submissions (have email in col G)
-    _PROJECT_CATS = {"Commissions", "Materials", "SolarInsure/Warranty", "Subcontractor", "Subcontractor Payments"}
+    _PROJECT_CATS = {"Commissions", "Materials", "SolarInsure/Warranty", "Subcontractor", "Subcontractor Payments", "CT Green Estates"}
     manual_rows = [r for r in existing
                    if len(r) > 4 and str(r[4]).strip() == "No"
                    and (len(r) < 2 or r[1] not in _PROJECT_CATS
@@ -5392,7 +5392,7 @@ def _write_dashboard_project_expenses(svc, weekly_events: list) -> int:
     sheets = _build_sheets_service().spreadsheets()
 
     # Remove stale Auto project rows before appending fresh ones to prevent duplicates
-    _PROJECT_CATS = {"Commissions", "Materials", "SolarInsure/Warranty", "Subcontractor", "Subcontractor Payments"}
+    _PROJECT_CATS = {"Commissions", "Materials", "SolarInsure/Warranty", "Subcontractor", "Subcontractor Payments", "CT Green Estates"}
     existing = sheets.values().get(
         spreadsheetId=DASHBOARD_SHEET_ID,
         range="Expenses!A2:H",
