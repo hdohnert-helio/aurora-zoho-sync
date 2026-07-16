@@ -4142,7 +4142,7 @@ def _write_cashflow_tab(svc, tab_name: str, rows: list[dict]) -> None:
             except (ValueError, TypeError):
                 pass
 
-        # Apply manual payment date overrides (from Overrides tab)
+        # Apply manual payment date and amount overrides (from Overrides tab)
         pov = row.get("payment_overrides", {})
         if pov.get("payment1"):
             payment1_date = pov["payment1"]
@@ -4153,6 +4153,12 @@ def _write_cashflow_tab(svc, tab_name: str, rows: list[dict]) -> None:
         if pov.get("payment3"):
             payment3_date = pov["payment3"]
             comm_payout3_date = pov["payment3"]
+        if pov.get("amount1") is not None:
+            payment1_amt = pov["amount1"]
+        if pov.get("amount2") is not None:
+            payment2_amt = pov["amount2"]
+        if pov.get("amount3") is not None:
+            payment3_amt = pov["amount3"]
 
         notes_col = subcontractor_notes
 
@@ -4260,8 +4266,8 @@ def _ensure_overrides_tab(svc) -> None:
         range=f"'{CASHFLOW_OVERRIDES_TAB}'!A1",
         valueInputOption="USER_ENTERED",
         body={"values": [
-            ["Project ID", "Customer", "Payment 1 Date", "Payment 2 Date", "Payment 3 Date", "Notes"],
-            ["# Example: PROJ-1234", "", "2026-08-01", "", "", "LR draw delayed — paid week of 8/1"],
+            ["Project ID", "Customer", "Payment 1 Date", "Payment 2 Date", "Payment 3 Date", "Notes", "Payment 1 Amt", "Payment 2 Amt", "Payment 3 Amt"],
+            ["# Example: PROJ-1234", "", "2026-08-01", "", "", "LR draw delayed — paid week of 8/1", "", "", ""],
         ]},
     ).execute()
 
@@ -4300,7 +4306,7 @@ def _read_payment_overrides(svc) -> dict:
     try:
         data = sheets.values().get(
             spreadsheetId=CASHFLOW_SHEET_ID,
-            range=f"'{CASHFLOW_OVERRIDES_TAB}'!A2:E200",
+            range=f"'{CASHFLOW_OVERRIDES_TAB}'!A2:I200",
             valueRenderOption="FORMATTED_VALUE",
         ).execute().get("values", [])
     except Exception:
@@ -4335,6 +4341,17 @@ def _read_payment_overrides(svc) -> dict:
             entry["payment2"] = valid_date(row[3])
         if len(row) > 4 and valid_date(row[4]):
             entry["payment3"] = valid_date(row[4])
+        def parse_amt(s):
+            try:
+                return float(str(s or "").replace("$", "").replace(",", "").strip())
+            except (ValueError, AttributeError):
+                return None
+        if len(row) > 6 and parse_amt(row[6]) is not None:
+            entry["amount1"] = parse_amt(row[6])
+        if len(row) > 7 and parse_amt(row[7]) is not None:
+            entry["amount2"] = parse_amt(row[7])
+        if len(row) > 8 and parse_amt(row[8]) is not None:
+            entry["amount3"] = parse_amt(row[8])
         if entry:
             overrides[proj_id] = entry
             logger.info(f"_read_payment_overrides: {proj_id} → {entry}")
@@ -4718,7 +4735,7 @@ def _compute_cashflow_row(row: dict, today: datetime.date, zoho_base: str, auror
         except (ValueError, TypeError):
             pass
 
-    # Apply manual payment date overrides
+    # Apply manual payment date and amount overrides
     if pov.get("payment1"):
         payment1_date = pov["payment1"]
         comm_payout1_date = pov["payment1"]
@@ -4728,6 +4745,12 @@ def _compute_cashflow_row(row: dict, today: datetime.date, zoho_base: str, auror
     if pov.get("payment3"):
         payment3_date = pov["payment3"]
         comm_payout3_date = pov["payment3"]
+    if pov.get("amount1") is not None:
+        payment1_amt = pov["amount1"]
+    if pov.get("amount2") is not None:
+        payment2_amt = pov["amount2"]
+    if pov.get("amount3") is not None:
+        payment3_amt = pov["amount3"]
 
     # Cash materials cost: $1.26/W at 60% progress (Cash) or Payment 2 (SE) date
     cash_materials_date = cash_materials_amt = ""
