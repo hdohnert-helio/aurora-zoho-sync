@@ -2462,6 +2462,95 @@ async def aurora_milestone_created_webhook(request: Request):
 
 
 # ------------------------
+# LightReach requirement/milestone log helpers
+#
+# LightReach exposes no explicit "rejected" event — approval/rejection state
+# comes through as a status value on requirementStatusChanged/requirementCompleted
+# (per checklist item) and milestoneStatusChanged/milestoneAchieved (per M0/M1/M2
+# milestone). Field names below are extracted defensively (multiple candidate
+# keys) since we haven't seen a confirmed sample payload for every event type;
+# LightReach_Raw_Payload always retains the ground truth if a key guess is wrong.
+# ------------------------
+LIGHTREACH_LOG_MAX_CHARS = 31000  # stay under the 32000-char large-textarea limit
+
+
+def _extract_requirement_fields(body):
+    req = body.get("requirement") or body.get("stipulation") or {}
+    if not isinstance(req, dict):
+        req = {}
+    code = (
+        req.get("code") or req.get("id") or req.get("key")
+        or body.get("requirementCode") or body.get("requirementId") or ""
+    )
+    name = (
+        req.get("name") or req.get("description") or req.get("type")
+        or body.get("requirementName") or body.get("requirementDescription") or ""
+    )
+    status = (
+        req.get("status") or body.get("status") or body.get("requirementStatus")
+        or body.get("state") or ""
+    )
+    reason = (
+        req.get("reason") or req.get("comment") or req.get("notes")
+        or body.get("reason") or body.get("rejectionReason") or body.get("comment") or ""
+    )
+    return str(code), str(name), str(status), str(reason)
+
+
+def _extract_milestone_fields(body):
+    ms = body.get("milestone") or body.get("newMilestone") or {}
+    ms_name_from_dict = ms.get("name") or ms.get("type") if isinstance(ms, dict) else None
+    name = (
+        ms_name_from_dict
+        or (ms if isinstance(ms, str) else None)
+        or body.get("milestoneName") or body.get("name") or ""
+    )
+    status = (
+        (ms.get("status") if isinstance(ms, dict) else None)
+        or body.get("status") or body.get("milestoneStatus") or body.get("state") or ""
+    )
+    reason = (
+        (ms.get("reason") if isinstance(ms, dict) else None)
+        or body.get("reason") or body.get("rejectionReason") or body.get("comment") or ""
+    )
+    return str(name), str(status), str(reason)
+
+
+def _get_install_field(access_token, api_domain, install_id, field_api_name):
+    """Fetch a single field's current value from an Install record (for append-only logs)."""
+    try:
+        resp = requests.get(
+            f"{api_domain}/crm/v2/Installs/{install_id}",
+            headers={"Authorization": f"Zoho-oauthtoken {access_token}"},
+            params={"fields": field_api_name},
+        )
+        if resp.status_code == 200:
+            records = resp.json().get("data", [])
+            if records:
+                return records[0].get(field_api_name)
+    except Exception:
+        logger.exception(f"Failed to fetch {field_api_name} for Install id={install_id}")
+    return None
+
+
+def _append_log_entry(current_value, entry, max_chars=LIGHTREACH_LOG_MAX_CHARS):
+    """Parse an existing JSON-array field value, append entry, and re-serialize —
+    dropping the oldest entries first if the result would exceed max_chars."""
+    try:
+        log = json.loads(current_value) if current_value else []
+        if not isinstance(log, list):
+            log = []
+    except Exception:
+        log = []
+    log.append(entry)
+    serialized = json.dumps(log)
+    while len(serialized) > max_chars and log:
+        log.pop(0)
+        serialized = json.dumps(log)
+    return serialized
+
+
+# ------------------------
 # Webhook: LightReach (Palmetto) — Contract Signed & Status Events
 # ------------------------
 @app.post("/webhook/lightreach")
@@ -2626,7 +2715,7 @@ async def lightreach_webhook(request: Request):
             update_fields["LightReach_Stipulation_Action_Needed"] = False
             update_fields["LightReach_Outstanding_Stipulations"] = ""
 
-        elif event_type in ("stipulationCleared", "requirementCompleted", "requirementStatusChanged"):
+        elif event_type == "stipulationCleared":
             stip = body.get("stipulation") or body.get("requirement") or {}
             stip_name = (
                 stip.get("name") or stip.get("description")
@@ -2635,18 +2724,41 @@ async def lightreach_webhook(request: Request):
             if stip_name:
                 logger.info(f"LightReach {event_type}: {stip_name}")
 
-        elif event_type == "milestoneAchieved":
-            milestone = (
-                body.get("newMilestone")
-                or body.get("milestone")
-                or body.get("milestoneName")
-                or body.get("name")
-                or ""
+        elif event_type in ("requirementCompleted", "requirementStatusChanged"):
+            # Per-item (M0/M1/M2 checklist row) status — this is the closest signal
+            # LightReach gives us to "rejected"; no dedicated reject event exists.
+            req_code, req_name, req_status, req_reason = _extract_requirement_fields(body)
+            if not req_status and event_type == "requirementCompleted":
+                req_status = "completed"
+            logger.info(
+                f"LightReach {event_type}: code={req_code} name={req_name} "
+                f"status={req_status} reason={req_reason}"
             )
-            if isinstance(milestone, dict):
-                milestone = milestone.get("name") or milestone.get("type") or ""
-            logger.info(f"LightReach milestone achieved: {milestone}")
-            milestone_l = str(milestone).lower()
+            if req_name or req_code:
+                current_log = _get_install_field(
+                    access_token, api_domain, install_id, "LightReach_RequirementLog"
+                )
+                entry = {
+                    "event": event_type,
+                    "code": req_code,
+                    "name": req_name,
+                    "status": req_status,
+                    "reason": req_reason,
+                    "at": timestamp_now,
+                }
+                update_fields["LightReach_RequirementLog"] = _append_log_entry(current_log, entry)
+
+        elif event_type in ("milestoneAchieved", "milestoneStatusChanged"):
+            # Per-milestone (M0/M1/M2) status — same caveat as above: LightReach
+            # gives no dedicated reject event, so "rejected"/"conditional" would
+            # show up here as a status value rather than a distinct event type.
+            ms_name, ms_status, ms_reason = _extract_milestone_fields(body)
+            if not ms_status and event_type == "milestoneAchieved":
+                ms_status = "achieved"
+            logger.info(
+                f"LightReach {event_type}: milestone={ms_name} status={ms_status} reason={ms_reason}"
+            )
+            milestone_l = ms_name.lower()
             if (
                 "ntp" in milestone_l
                 or "noticetoproceed" in milestone_l
@@ -2654,6 +2766,19 @@ async def lightreach_webhook(request: Request):
             ):
                 update_fields["LightReach_NTP_Granted_At"] = timestamp_now
                 logger.info(f"LightReach NTP granted for Install id={install_id}")
+
+            if ms_name:
+                current_log = _get_install_field(
+                    access_token, api_domain, install_id, "LightReach_MilestoneLog"
+                )
+                entry = {
+                    "event": event_type,
+                    "milestone": ms_name,
+                    "status": ms_status,
+                    "reason": ms_reason,
+                    "at": timestamp_now,
+                }
+                update_fields["LightReach_MilestoneLog"] = _append_log_entry(current_log, entry)
 
         update_resp = requests.put(
             f"{api_domain}/crm/v2/Installs",
