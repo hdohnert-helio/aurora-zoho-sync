@@ -5378,9 +5378,7 @@ def _write_dashboard_expenses(svc) -> int:
     # Never preserve project-calculated categories unless they came from Submissions (have email in col G)
     _PROJECT_CATS = {"Commissions", "Materials", "SolarInsure/Warranty", "Subcontractor", "Subcontractor Payments", "CT Green Estates"}
     manual_rows = [r for r in existing
-                   if len(r) > 4 and str(r[4]).strip() == "No"
-                   and (len(r) < 2 or r[1] not in _PROJECT_CATS
-                        or (len(r) > 6 and str(r[6]).strip()))]  # has email = came from Submissions
+                   if len(r) > 4 and str(r[4]).strip() == "No"]
     # Preserve Auto project rows (commissions, materials, etc.) so sync-expenses doesn't lose them.
     # _write_dashboard_project_expenses will clear and replace these when a full cashflow runs.
     auto_project_rows = [r for r in existing
