@@ -3986,7 +3986,15 @@ CASHFLOW_SHEET_ID = "1ktCKriA4W97Cxy-bubTD2zSP8W1X8fP52BLXvElkp5g"
 DASHBOARD_SHEET_ID = CASHFLOW_SHEET_ID  # same file — all tabs live together
 CASHFLOW_MATERIALS_PPW = 1.26  # LR materials estimate $/W
 CASHFLOW_LR_WARRANTY = 250.00  # LR warranty deduction from 20% final
-CASHFLOW_LR_HOLDBACK_PPW = 0.20  # LR DC holdback: $0.20/W (~25 days after activation payment)
+CASHFLOW_LR_HOLDBACK_PPW = 0.20        # LR DC holdback: $0.20/W for projects created on/after 2026-03-06
+CASHFLOW_LR_HOLDBACK_PPW_LEGACY = 0.05 # $0.05/W for projects created before 2026-03-06
+CASHFLOW_LR_HOLDBACK_CUTOFF = "2026-03-06"
+
+def _lr_holdback_ppw(created_date_str: str) -> float:
+    """Return the correct holdback $/W based on project creation date."""
+    if created_date_str and created_date_str < CASHFLOW_LR_HOLDBACK_CUTOFF:
+        return CASHFLOW_LR_HOLDBACK_PPW_LEGACY
+    return CASHFLOW_LR_HOLDBACK_PPW
 
 CASHFLOW_INSTALLED_STAGES = {
     "Energized", "PTO", "Inspection", "Witness Test / PTO"
@@ -4674,10 +4682,10 @@ def _write_weekly_payments_tab(svc, rows: list[dict]) -> None:
                 if lending_status not in CASHFLOW_LR_DRAW_PAID_STATUSES:
                     add_event(draw_date_str, "LR 80% Draw", draw_amt, draw_date_str, comm1_amt)
                 add_event(final_date_str, "LR 20% Final", final_amt, final_date_str, comm2_amt)
-                # DC holdback: $0.20/watt, 25 days after activation — only if not yet activated
+                # DC holdback: 25 days after activation — only if not yet activated
                 if system_watts and lending_status not in CASHFLOW_FULLY_PAID_STATUSES:
                     holdback_date_str = (datetime.date.fromisoformat(final_date_str) + datetime.timedelta(days=25)).isoformat()
-                    holdback_amt = round(system_watts * CASHFLOW_LR_HOLDBACK_PPW, 2)
+                    holdback_amt = round(system_watts * _lr_holdback_ppw(created_date_str), 2)
                     add_event(holdback_date_str, "LR DC Holdback", holdback_amt)
             except (ValueError, TypeError):
                 pass
@@ -4987,6 +4995,7 @@ def _compute_cashflow_row(row: dict, today: datetime.date, zoho_base: str, auror
         ct_green_date, ct_green_amt,
         cash_materials_date, cash_materials_amt,
         round(system_watts * 0.10, 2) if (finance_type not in ("LR", "SG") and system_watts) else "",
+        created_date_str,
     ]
 
     PAYMENT_TYPE_MAP = {
@@ -5023,11 +5032,11 @@ def _compute_cashflow_row(row: dict, today: datetime.date, zoho_base: str, auror
         pay_events.append([cash_materials_date, customer, finance_type, "Cash Materials", cash_materials_amt,
                            "", "", stage, sc_display, project_id, zoho_link])
 
-    # LR DC Holdback: $0.25/watt, 25 days after final payment, only if not yet fully paid
+    # LR DC Holdback: 25 days after final payment, only if not yet fully paid
     if finance_type == "LR" and system_watts and lending_status not in CASHFLOW_FULLY_PAID_STATUSES and payment2_date:
         try:
             holdback_date = (datetime.date.fromisoformat(payment2_date) + datetime.timedelta(days=25)).isoformat()
-            holdback_amt = round(system_watts * CASHFLOW_LR_HOLDBACK_PPW, 2)
+            holdback_amt = round(system_watts * _lr_holdback_ppw(created_date_str), 2)
             pay_events.append([holdback_date, customer, finance_type, "LR DC Holdback", holdback_amt,
                                "", "", stage, sc_display, project_id, zoho_link])
         except (ValueError, TypeError):
@@ -5827,6 +5836,7 @@ def _run_cashflow_batch(projects: list[dict], tab_name: str) -> dict:
         "CT Green Date", "CT Green Amt",
         "Cash Materials Date", "Cash Materials Amt",
         "SolarInsure Amt",
+        "Created Date",
     ]
     sheets.values().update(
         spreadsheetId=CASHFLOW_SHEET_ID,
@@ -6480,6 +6490,7 @@ async def dashboard_apply_overrides():
             "comm2_date": "Comm Payout 2 Date", "comm2_amt": "Comm Payout 2 Amt",
             "comm3_date": "Comm Payout 3 Date", "comm3_amt": "Comm Payout 3 Amt",
             "zoho_link": "Zoho Link",
+            "created_date": "Created Date",
         }.items()}
 
         def cell(row, key):
@@ -6546,7 +6557,8 @@ async def dashboard_apply_overrides():
                     system_watts = round(float(str(kw_raw).replace(",", "")) * 1000) if kw_raw else 0
                     if system_watts:
                         holdback_date = (datetime.date.fromisoformat(pay2_date) + datetime.timedelta(days=25)).isoformat()
-                        holdback_amt = round(system_watts * CASHFLOW_LR_HOLDBACK_PPW, 2)
+                        created_date_str = cell(row, "created_date")
+                        holdback_amt = round(system_watts * _lr_holdback_ppw(created_date_str), 2)
                         weekly_events.append([
                             week_of(holdback_date), holdback_date, customer, ft, "LR DC Holdback",
                             holdback_amt, "", "", stage, sc_display, proj_id, zoho_link,
