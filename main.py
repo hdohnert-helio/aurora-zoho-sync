@@ -4458,8 +4458,8 @@ def _ensure_overrides_tab(svc) -> None:
         range=f"'{CASHFLOW_OVERRIDES_TAB}'!A1",
         valueInputOption="USER_ENTERED",
         body={"values": [
-            ["Project ID", "Customer", "Payment 1 Date", "Payment 2 Date", "Payment 3 Date", "Notes", "Payment 1 Amt", "Payment 2 Amt", "Payment 3 Amt"],
-            ["# Example: PROJ-1234", "", "2026-08-01", "", "", "LR draw delayed — paid week of 8/1", "", "", ""],
+            ["Project ID", "Customer", "Payment 1 Date", "Payment 2 Date", "Payment 3 Date", "Notes", "Payment 1 Amt", "Payment 2 Amt", "Payment 3 Amt", "Materials Actual"],
+            ["# Example: PROJ-1234", "", "2026-08-01", "", "", "LR draw delayed — paid week of 8/1", "", "", "", ""],
         ]},
     ).execute()
 
@@ -4492,13 +4492,14 @@ def _read_payment_overrides(svc) -> dict:
     Read the Overrides tab and return a dict keyed by project_id:
       {project_id: {"payment1": "YYYY-MM-DD", "payment2": "YYYY-MM-DD", "payment3": "YYYY-MM-DD"}}
     Only populated keys are included. Rows starting with '#' are skipped.
-    Columns: A=Project ID, B=Customer (ignored), C=Payment 1, D=Payment 2, E=Payment 3, F=Notes
+    Columns: A=Project ID, B=Customer (ignored), C=Payment 1, D=Payment 2, E=Payment 3, F=Notes,
+             G=Payment 1 Amt, H=Payment 2 Amt, I=Payment 3 Amt, J=Materials Actual
     """
     sheets = svc.spreadsheets()
     try:
         data = sheets.values().get(
             spreadsheetId=CASHFLOW_SHEET_ID,
-            range=f"'{CASHFLOW_OVERRIDES_TAB}'!A2:I200",
+            range=f"'{CASHFLOW_OVERRIDES_TAB}'!A2:J200",
             valueRenderOption="FORMATTED_VALUE",
         ).execute().get("values", [])
     except Exception:
@@ -4544,6 +4545,8 @@ def _read_payment_overrides(svc) -> dict:
             entry["amount2"] = parse_amt(row[7])
         if len(row) > 8 and parse_amt(row[8]) is not None:
             entry["amount3"] = parse_amt(row[8])
+        if len(row) > 9 and parse_amt(row[9]) is not None:
+            entry["materials"] = parse_amt(row[9])
         if entry:
             overrides[proj_id] = entry
             logger.info(f"_read_payment_overrides: {proj_id} → {entry}")
@@ -4814,6 +4817,8 @@ def _compute_cashflow_row(row: dict, today: datetime.date, zoho_base: str, auror
     subcontractor_total = d.get("subcontractor_total", 0)
     subcontractor_notes = d.get("subcontractor_notes", "")
     materials_est = round(system_watts * CASHFLOW_MATERIALS_PPW, 2) if system_watts and finance_type == "LR" else ""
+    if pov.get("materials") is not None:
+        materials_est = pov["materials"]
 
     is_projected_sc = False
     effective_sc_str = sc_date_str
@@ -4948,7 +4953,7 @@ def _compute_cashflow_row(row: dict, today: datetime.date, zoho_base: str, auror
     cash_materials_date = cash_materials_amt = ""
     if finance_type in ("CASH", "SE") and system_watts and payment2_date:
         cash_materials_date = payment2_date
-        cash_materials_amt = round(system_watts * CASHFLOW_MATERIALS_PPW, 2)
+        cash_materials_amt = pov["materials"] if pov.get("materials") is not None else round(system_watts * CASHFLOW_MATERIALS_PPW, 2)
 
     # CT Green Estates cost: $0.25/W, paid once project is fully paid (activation/final)
     # Only applies to projects with SC date after 2026-06-08 (CT Green contract start)
