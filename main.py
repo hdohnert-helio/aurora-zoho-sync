@@ -2584,6 +2584,46 @@ def _append_log_entry(current_value, entry_or_entries, max_chars=LIGHTREACH_LOG_
     return serialized
 
 
+def _upsert_overrides_materials(proj_id: str, customer: str, materials_actual: float) -> None:
+    """
+    Write or update the Materials Actual (col J) in the Dashboard Overrides tab for proj_id.
+    If a row for proj_id already exists, updates col J in place.
+    If not, appends a new row.
+    """
+    svc = _build_sheets_service()
+    if not svc:
+        raise RuntimeError("Could not build Sheets service")
+    sheets = svc.spreadsheets()
+
+    data = sheets.values().get(
+        spreadsheetId=CASHFLOW_SHEET_ID,
+        range=f"'{CASHFLOW_OVERRIDES_TAB}'!A2:J200",
+        valueRenderOption="FORMATTED_VALUE",
+    ).execute().get("values", [])
+
+    for i, row in enumerate(data):
+        if row and str(row[0]).strip() == proj_id:
+            # Update col J on existing row
+            sheets.values().update(
+                spreadsheetId=CASHFLOW_SHEET_ID,
+                range=f"'{CASHFLOW_OVERRIDES_TAB}'!J{i + 2}",
+                valueInputOption="USER_ENTERED",
+                body={"values": [[materials_actual]]},
+            ).execute()
+            logger.info(f"_upsert_overrides_materials: updated row {i+2} for {proj_id} → {materials_actual}")
+            return
+
+    # Not found — append new row
+    next_row = len(data) + 2
+    sheets.values().update(
+        spreadsheetId=CASHFLOW_SHEET_ID,
+        range=f"'{CASHFLOW_OVERRIDES_TAB}'!A{next_row}:J{next_row}",
+        valueInputOption="USER_ENTERED",
+        body={"values": [[proj_id, customer, "", "", "", "Auto-updated by LightReach directPayEvent", "", "", "", materials_actual]]},
+    ).execute()
+    logger.info(f"_upsert_overrides_materials: appended row {next_row} for {proj_id} → {materials_actual}")
+
+
 # ------------------------
 # Webhook: LightReach (Palmetto) — Contract Signed & Status Events
 # ------------------------
@@ -2846,6 +2886,49 @@ async def lightreach_webhook(request: Request):
                     "at": timestamp_now,
                 }
                 update_fields["LightReach_MilestoneLog"] = _append_log_entry(current_log, entry)
+
+        elif event_type == "directPayEvent":
+            # Payout events: MATERIALS_INVOICE, INSTALL_APPROVED, DC_HOLDBACK, etc.
+            # Try multiple field name patterns since LightReach payload structure is not fully documented.
+            pay_event_type = (
+                body.get("payoutEvent") or body.get("payEventType") or body.get("eventSubType")
+                or body.get("payEvent") or body.get("type") or ""
+            ).upper().replace(" ", "_")
+            amount_raw = (
+                body.get("amount") or body.get("payoutAmount") or body.get("netAmount")
+                or (body.get("payout") or {}).get("amount")
+            )
+            try:
+                amount = float(str(amount_raw).replace("$", "").replace(",", "")) if amount_raw is not None else None
+            except (ValueError, TypeError):
+                amount = None
+
+            logger.info(f"LightReach directPayEvent: pay_event_type={pay_event_type} amount={amount} raw={json.dumps(body)}")
+
+            update_fields["LightReach_Finance_Status"] = f"directPayEvent:{pay_event_type}"
+
+            if pay_event_type == "MATERIALS_INVOICE" and amount is not None and install_id:
+                # Look up project_id from Zoho Install so we can update the Overrides tab
+                proj_id_resp = requests.get(
+                    f"{api_domain}/crm/v2/Installs/{install_id}",
+                    headers=headers,
+                )
+                proj_id = None
+                if proj_id_resp.status_code == 200:
+                    rec = proj_id_resp.json().get("data", [{}])[0]
+                    proj_id = rec.get("Project_ID") or rec.get("Zoho_Project_ID") or rec.get("Name")
+                    customer_name = rec.get("Account_Name", {})
+                    if isinstance(customer_name, dict):
+                        customer_name = customer_name.get("name", "")
+
+                if proj_id:
+                    try:
+                        _upsert_overrides_materials(proj_id, customer_name or "", abs(amount))
+                        logger.info(f"LightReach directPayEvent: wrote materials actual ${abs(amount)} for {proj_id}")
+                    except Exception as e:
+                        logger.error(f"LightReach directPayEvent: failed to write Overrides tab: {e}")
+                else:
+                    logger.warning(f"LightReach directPayEvent: could not resolve project_id for install {install_id}")
 
         update_resp = requests.put(
             f"{api_domain}/crm/v2/Installs",
