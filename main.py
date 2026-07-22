@@ -4228,9 +4228,10 @@ def _write_pipeline_tab(svc, sheet_id: str, rows: list[list], title: str = "Pipe
         "properties": {"sheetId": tab_id, "gridProperties": {"frozenRowCount": 2}},
         "fields": "gridProperties.frozenRowCount",
     }})
-    # Color status rows
+    # Color status rows — status is at fixed index 15 (Commission Status column)
+    STATUS_COL = 15
     for i, row in enumerate(rows):
-        status = row[-1] if row else ""
+        status = row[STATUS_COL] if len(row) > STATUS_COL else ""
         if not status:
             continue
         color = ({"red": 0.85, "green": 0.93, "blue": 0.83} if status == "Commission Paid ✓"
