@@ -4951,9 +4951,11 @@ def _compute_cashflow_row(row: dict, today: datetime.date, zoho_base: str, auror
         cash_materials_amt = round(system_watts * CASHFLOW_MATERIALS_PPW, 2)
 
     # CT Green Estates cost: $0.25/W, paid once project is fully paid (activation/final)
-    # Show for any project not yet in a fully-paid status
+    # Only applies to projects with SC date after 2026-06-08 (CT Green contract start)
     ct_green_date = ct_green_amt = ""
-    if system_watts and lending_status not in CASHFLOW_FULLY_PAID_STATUSES:
+    _ct_green_cutoff = "2026-06-08"
+    _sc_for_ct = effective_sc_str or ""
+    if system_watts and lending_status not in CASHFLOW_FULLY_PAID_STATUSES and _sc_for_ct > _ct_green_cutoff:
         if finance_type == "LR":
             # Use activation payment date; fall back to SC date if activation not yet scheduled
             final_date_for_ct = payment2_date or effective_sc_str
