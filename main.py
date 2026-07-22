@@ -3316,11 +3316,18 @@ async def get_commissions(request: Request):
             results.append({"project_id": project_id, "error": "no designs found"})
             continue
 
-        sold_designs = [d for d in designs if (d.get("milestone") or {}).get("milestone") == "sold"]
-        if len(sold_designs) != 1:
-            results.append({"project_id": project_id, "error": f"expected 1 sold design, found {len(sold_designs)}"})
+        def pick_design(designs):
+            for ms in ("permission_to_operate", "installed", "sold"):
+                matches = [d for d in designs if (d.get("milestone") or {}).get("milestone") == ms]
+                if matches:
+                    return matches[0]
+            return None
+
+        chosen = pick_design(designs)
+        if not chosen:
+            results.append({"project_id": project_id, "error": "no usable design found (tried PTO, installed, sold)"})
             continue
-        design_id = sold_designs[0].get("id")
+        design_id = chosen.get("id")
 
         pricing_resp = pull_pricing(design_id)
         if pricing_resp.status_code != 200:
@@ -3407,13 +3414,20 @@ async def debug_pricing(request: Request):
     if not designs:
         return {"error": "no designs found", "raw": designs_resp.json()}
 
-    sold_designs = [d for d in designs if (d.get("milestone") or {}).get("milestone") == "sold"]
-    if len(sold_designs) != 1:
-        return {"error": f"expected 1 sold design, found {len(sold_designs)}", "designs": [
+    def pick_design(designs):
+        for ms in ("permission_to_operate", "installed", "sold"):
+            matches = [d for d in designs if (d.get("milestone") or {}).get("milestone") == ms]
+            if matches:
+                return matches[0]
+        return None
+
+    chosen = pick_design(designs)
+    if not chosen:
+        return {"error": "no usable design found (tried PTO, installed, sold)", "designs": [
             {"id": d.get("id"), "milestone": (d.get("milestone") or {}).get("milestone"), "updated_at": d.get("updated_at")}
             for d in designs
         ]}
-    design_id = sold_designs[0].get("id")
+    design_id = chosen.get("id")
 
     pricing_resp = pull_pricing(design_id)
     return {
@@ -3502,7 +3516,7 @@ def _fetch_all_commission_projects(cutoff_date: str = "2026-01-01") -> list[dict
     api_domain = os.getenv("ZOHO_API_DOMAIN")
     headers = {"Authorization": f"Zoho-oauthtoken {token}"}
 
-    fields = "Name,Project_ID,Aurora_Project_ID,Sales_Representative,Owner,Project_Stage,Project_Created_Date,Commissions_Paid,Commissions_Fully_Paid"
+    fields = "Name,Project_ID,Aurora_Project_ID,Sales_Representative,Owner,Project_Stage,Project_Created_Date,Commissions_Paid,Commissions_Fully_Paid,Substantial_Completion,Anticipated_Substantial_Completion_Date,Lending_Status"
 
     criteria = f"(Project_Created_Date:greater_equal:{cutoff_date})"
     results = []
@@ -3536,6 +3550,8 @@ def _fetch_all_commission_projects(cutoff_date: str = "2026-01-01") -> list[dict
                 "stage": (r.get("Project_Stage") or "").strip(),
                 "created_date": (r.get("Project_Created_Date") or "").strip(),
                 "commissions_paid": r.get("Commissions_Paid") or "",
+                "install_date": (r.get("Substantial_Completion") or r.get("Anticipated_Substantial_Completion_Date") or "").strip(),
+                "finance_type": _classify_finance_type(r.get("Lending_Status") or ""),
             })
         info = resp.json().get("info") or {}
         if not info.get("more_records"):
@@ -3561,14 +3577,18 @@ def _get_commission_data_for_project(aurora_project_id: str) -> dict:
     designs_data = designs_resp.json()
     designs_resp.close()
     designs = designs_data.get("designs", [])
-    sold_designs = [d for d in designs if (d.get("milestone") or {}).get("milestone") == "sold"]
-    if not sold_designs:
-        # Aurora updates milestone from "sold" → "installed" once job is completed
-        sold_designs = [d for d in designs if (d.get("milestone") or {}).get("milestone") == "installed"]
-    if len(sold_designs) != 1:
-        return {"error": f"expected 1 sold design, found {len(sold_designs)}"}
+    def pick_design(designs):
+        for ms in ("permission_to_operate", "installed", "sold"):
+            matches = [d for d in designs if (d.get("milestone") or {}).get("milestone") == ms]
+            if matches:
+                return matches[0]
+        return None
 
-    design_id = sold_designs[0].get("id")
+    chosen = pick_design(designs)
+    if not chosen:
+        return {"error": "no usable design found (tried PTO, installed, sold)"}
+
+    design_id = chosen.get("id")
     pricing_resp = pull_pricing(design_id)
     if pricing_resp.status_code != 200:
         pricing_resp.close()
@@ -4052,6 +4072,218 @@ async def debug_run():
         return {"status": "ok", "tab": tab_name, "aurora_data": data}
     except Exception as e:
         return {"error": f"unexpected: {e}"}
+
+
+# ============================================================================
+# Commissions Pipeline Tab — rebuild on demand
+# ============================================================================
+
+DOUG_SHEET_ID = "1eDbMfrWzhOv9sS0yrhoOKSEsPg_dkXHIeqfSm_KqNLQ"
+
+DOUG_TIFFANY_EMAILS = {"tiffany.v@myheliosolar.com", "douglas.h@gohelioenergy.com"}
+
+def _is_doug_tiffany(project: dict) -> bool:
+    owner = (project.get("owner") or "").lower()
+    rep   = (project.get("rep")   or "").lower()
+    return (
+        "hoffman" in owner or "doug" in owner or
+        "vilayphonh" in owner or "tiffany" in owner or
+        "hoffman" in rep or "doug" in rep or
+        "vilayphonh" in rep or "tiffany" in rep
+    )
+
+def _scan_paid_tranches(svc, sheet_id: str) -> dict:
+    """Return {project_id: set of run-pct strings} from all Payroll tabs."""
+    meta = svc.spreadsheets().get(spreadsheetId=sheet_id).execute()
+    paid = {}
+    for s in meta["sheets"]:
+        title = s["properties"]["title"]
+        if not title.startswith("Payroll"):
+            continue
+        result = svc.spreadsheets().values().get(
+            spreadsheetId=sheet_id, range=f"'{title}'!A1:U50"
+        ).execute()
+        for row in result.get("values", [])[2:]:
+            if len(row) <= 4:
+                continue
+            pid = str(row[4]).strip()
+            pct = str(row[20]).strip() if len(row) > 20 else ""
+            if pid.startswith("PROJ-") and pct:
+                paid.setdefault(pid, set()).add(pct)
+    return paid
+
+def _commission_status(pid: str, finance_type: str, paid_map: dict) -> str:
+    tranches = paid_map.get(pid, set())
+    if not tranches:
+        return ""
+    has_80  = any("80"  in t for t in tranches)
+    has_20  = any("20"  in t for t in tranches)
+    has_100 = any("100" in t for t in tranches)
+    ft = str(finance_type).upper()
+    if "CASH" in ft or "SE" in ft:
+        return "Commission Paid ✓" if (has_100 or has_20) else ""
+    if has_20:
+        return "Commission Paid ✓"
+    if has_80:
+        return "Install Comm Paid ✓"
+    return ""
+
+def _build_pipeline_rows(projects: list[dict], paid_map: dict) -> list[list]:
+    """Build data rows for the Pipeline tab from a list of commission projects."""
+    rows = []
+    for p in projects:
+        pid        = p.get("project_id", "")
+        stage      = p.get("stage", "")
+        ft         = p.get("finance_type", "")
+        install_dt = p.get("install_date", "")
+        data       = p.get("data", {})
+
+        if "error" in data:
+            rows.append([p.get("customer", ""), pid, ft, stage, install_dt,
+                         "", "", "", "", "", "", "", "", "", f"ERROR: {data['error']}"])
+            continue
+
+        sw   = data.get("system_size_watts", 0) or 0
+        skw  = round(sw / 1000, 3) if sw else ""
+        bp   = data.get("base_price", 0) or 0
+        bppw = round(bp / sw, 4) if sw else ""
+        floor_val = 2.50
+        bpf  = round(bppw - floor_val, 4) if bppw else ""
+        bc   = round(bpf * sw, 2) if bpf and sw else ""
+        cppw = data.get("consultant_comp_ppw", 0) or 0
+        cc   = round(cppw * sw, 2) if cppw and sw else ""
+        tc   = round((bc or 0) + (cc or 0), 2)
+
+        status = _commission_status(pid, ft, paid_map)
+
+        rows.append([
+            p.get("customer", ""), pid, ft, stage, install_dt,
+            sw, skw, bp, bppw, floor_val, bpf, bc, cppw, cc, tc,
+            status,
+        ])
+    return rows
+
+def _write_pipeline_tab(svc, sheet_id: str, rows: list[list], title: str = "Pipeline") -> None:
+    """Create or replace a Pipeline tab in the given sheet."""
+    # Ensure tab exists
+    meta = svc.spreadsheets().get(spreadsheetId=sheet_id).execute()
+    existing = {s["properties"]["title"]: s["properties"]["sheetId"] for s in meta["sheets"]}
+
+    requests = []
+    if title in existing:
+        requests.append({"deleteSheet": {"sheetId": existing[title]}})
+    requests.append({"addSheet": {"properties": {"title": title, "index": 0}}})
+    svc.spreadsheets().batchUpdate(spreadsheetId=sheet_id, body={"requests": requests}).execute()
+
+    headers = [
+        "Customer", "Project ID", "Finance Type", "Stage", "Install Date (Actual or Projected)",
+        "System (W)", "System (kW)",
+        "Base Price ($)", "Base PPW ($/W)", "PPW Floor", "Base PPW − Floor", "Base Commission",
+        "Consultant PPW", "Consultant Commission", "Total Commission",
+        "Commission Status",
+    ]
+
+    all_rows = [["Commission Pipeline — updated automatically"], headers] + rows
+    svc.spreadsheets().values().update(
+        spreadsheetId=sheet_id,
+        range=f"'{title}'!A1",
+        valueInputOption="USER_ENTERED",
+        body={"values": all_rows},
+    ).execute()
+
+    # Get real sheetId after recreation
+    meta2 = svc.spreadsheets().get(spreadsheetId=sheet_id).execute()
+    tab_id = next(s["properties"]["sheetId"] for s in meta2["sheets"] if s["properties"]["title"] == title)
+
+    fmt_reqs = []
+    # Title row merge + bold
+    fmt_reqs.append({"mergeCells": {
+        "range": {"sheetId": tab_id, "startRowIndex": 0, "endRowIndex": 1,
+                  "startColumnIndex": 0, "endColumnIndex": len(headers)},
+        "mergeType": "MERGE_ALL",
+    }})
+    fmt_reqs.append({"repeatCell": {
+        "range": {"sheetId": tab_id, "startRowIndex": 0, "endRowIndex": 2,
+                  "startColumnIndex": 0, "endColumnIndex": len(headers)},
+        "cell": {"userEnteredFormat": {"textFormat": {"bold": True}}},
+        "fields": "userEnteredFormat.textFormat.bold",
+    }})
+    # Freeze first two rows
+    fmt_reqs.append({"updateSheetProperties": {
+        "properties": {"sheetId": tab_id, "gridProperties": {"frozenRowCount": 2}},
+        "fields": "gridProperties.frozenRowCount",
+    }})
+    # Color status rows
+    for i, row in enumerate(rows):
+        status = row[-1] if row else ""
+        if not status:
+            continue
+        color = ({"red": 0.85, "green": 0.93, "blue": 0.83} if status == "Commission Paid ✓"
+                 else {"red": 1.0, "green": 0.95, "blue": 0.6})
+        fmt_reqs.append({"repeatCell": {
+            "range": {"sheetId": tab_id, "startRowIndex": i + 2, "endRowIndex": i + 3,
+                      "startColumnIndex": 0, "endColumnIndex": len(headers)},
+            "cell": {"userEnteredFormat": {"backgroundColor": color}},
+            "fields": "userEnteredFormat.backgroundColor",
+        }})
+
+    svc.spreadsheets().batchUpdate(spreadsheetId=sheet_id, body={"requests": fmt_reqs}).execute()
+
+
+@app.post("/commissions/update-pipeline")
+async def update_pipeline():
+    """
+    Rebuild the Pipeline tab on both the main commissions sheet and Doug's sheet.
+    Pulls all active pipeline projects from Zoho, fetches Aurora pricing (PTO → installed → sold),
+    and auto-marks paid status by scanning existing Payroll tabs.
+    Returns counts of projects written and any errors.
+    """
+    try:
+        svc = _build_sheets_service()
+        if not svc:
+            return {"status": "error", "reason": "could not build Sheets service"}
+
+        projects = _fetch_all_commission_projects(cutoff_date="2026-01-01")
+        if not projects:
+            return {"status": "error", "reason": "no projects returned from Zoho"}
+
+        # Separate Doug/Tiffany
+        main_projects = [p for p in projects if not _is_doug_tiffany(p)]
+        doug_projects  = [p for p in projects if _is_doug_tiffany(p)]
+
+        # Fetch Aurora data for each
+        errors = []
+        for p in projects:
+            data = _get_commission_data_for_project(p["aurora_project_id"])
+            p["data"] = data
+            if "error" in data:
+                errors.append({"project_id": p["project_id"], "error": data["error"]})
+
+        # Fetch install date from Zoho (Substantial_Completion or Anticipated)
+        # It's already embedded in project from _fetch_all_commission_projects if present.
+        # Fall back to blank.
+
+        # Scan paid tranches
+        main_paid = _scan_paid_tranches(svc, COMMISSION_SHEET_ID)
+        doug_paid  = _scan_paid_tranches(svc, DOUG_SHEET_ID)
+
+        # Build and write main Pipeline tab
+        main_rows = _build_pipeline_rows(main_projects, main_paid)
+        _write_pipeline_tab(svc, COMMISSION_SHEET_ID, main_rows, "Pipeline")
+
+        # Build and write Doug's Pipeline tab
+        doug_rows = _build_pipeline_rows(doug_projects, doug_paid)
+        _write_pipeline_tab(svc, DOUG_SHEET_ID, doug_rows, "Pipeline")
+
+        return {
+            "status": "ok",
+            "main_sheet_rows": len(main_rows),
+            "doug_sheet_rows": len(doug_rows),
+            "errors": errors,
+        }
+    except Exception as e:
+        logger.exception("update_pipeline failed")
+        return {"status": "error", "reason": str(e)}
 
 
 # ============================================================================
