@@ -3641,8 +3641,12 @@ def _get_commission_data_for_project(aurora_project_id: str) -> dict:
 
     final_system_price = float(fields.get("Final_System_Price") or 0)
 
+    design_milestone = (chosen.get("milestone") or {}).get("milestone", "")
+    milestone_label = {"permission_to_operate": "PTO", "installed": "Installed", "sold": "Sold"}.get(design_milestone, design_milestone)
+
     return {
         "design_id": design_id,
+        "design_milestone": milestone_label,
         "system_size_watts": system_size_watts,
         "base_price": base_price,
         "final_system_price": final_system_price,
@@ -4130,17 +4134,28 @@ def _commission_status(pid: str, finance_type: str, paid_map: dict) -> str:
 
 def _build_pipeline_rows(projects: list[dict], paid_map: dict) -> list[list]:
     """Build data rows for the Pipeline tab from a list of commission projects."""
+    tenant_id = os.getenv("AURORA_TENANT_ID", "")
     rows = []
     for p in projects:
         pid        = p.get("project_id", "")
+        aurora_id  = p.get("aurora_project_id", "")
+        zoho_id    = p.get("zoho_record_id", "")
         stage      = p.get("stage", "")
         ft         = p.get("finance_type", "")
         install_dt = p.get("install_date", "")
         data       = p.get("data", {})
 
+        zoho_url   = (f'=HYPERLINK("https://crm.zoho.com/crm/heliosolar/tab/CustomModule6/{zoho_id}","Zoho ↗")'
+                      if zoho_id else "")
+        design_id  = data.get("design_id", "")
+        aurora_url = (f'=HYPERLINK("https://v2.aurorasolar.com/tenants/{tenant_id}/projects/{aurora_id}/designs/{design_id}","Aurora ↗")'
+                      if aurora_id and design_id else "")
+        milestone  = data.get("design_milestone", "")
+
         if "error" in data:
             rows.append([p.get("customer", ""), pid, ft, stage, install_dt,
-                         "", "", "", "", "", "", "", "", "", f"ERROR: {data['error']}"])
+                         "", "", "", "", "", "", "", "", "", f"ERROR: {data['error']}",
+                         milestone, zoho_url, aurora_url])
             continue
 
         sw   = data.get("system_size_watts", 0) or 0
@@ -4159,7 +4174,7 @@ def _build_pipeline_rows(projects: list[dict], paid_map: dict) -> list[list]:
         rows.append([
             p.get("customer", ""), pid, ft, stage, install_dt,
             sw, skw, bp, bppw, floor_val, bpf, bc, cppw, cc, tc,
-            status,
+            status, milestone, zoho_url, aurora_url,
         ])
     return rows
 
@@ -4180,7 +4195,7 @@ def _write_pipeline_tab(svc, sheet_id: str, rows: list[list], title: str = "Pipe
         "System (W)", "System (kW)",
         "Base Price ($)", "Base PPW ($/W)", "PPW Floor", "Base PPW − Floor", "Base Commission",
         "Consultant PPW", "Consultant Commission", "Total Commission",
-        "Commission Status",
+        "Commission Status", "Design Used", "Zoho Record", "Aurora Design",
     ]
 
     all_rows = [["Commission Pipeline — updated automatically"], headers] + rows
