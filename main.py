@@ -3535,22 +3535,44 @@ def _fetch_all_commission_projects(cutoff_date: str = "2026-01-01") -> list[dict
             aurora_id = (r.get("Aurora_Project_ID") or "").strip()
             if not aurora_id:
                 continue
-            # Skip projects that are fully paid off
+            stage = (r.get("Project_Stage") or "").strip()
+            # Skip cancelled, on-hold, and fully-paid projects
             if r.get("Commissions_Fully_Paid"):
+                continue
+            if stage.lower() in ("cancelled", "canceled", "on hold", "lost"):
                 continue
             owner_obj = r.get("Owner")
             owner_name = (owner_obj.get("name") or "").strip() if isinstance(owner_obj, dict) else ""
+            rep_obj = r.get("Sales_Representative")
+            rep_name = (rep_obj.get("name") or "").strip() if isinstance(rep_obj, dict) else (rep_obj or "").strip()
+            # Determine install date: actual SC > anticipated > stage-based projection
+            actual_sc = (r.get("Substantial_Completion") or "").strip()
+            anticipated = (r.get("Anticipated_Substantial_Completion_Date") or "").strip()
+            if actual_sc:
+                install_date = actual_sc
+                install_date_type = "Actual"
+            elif anticipated:
+                install_date = anticipated
+                install_date_type = "Projected"
+            elif stage in CASHFLOW_STAGE_DAYS_TO_SC:
+                days = CASHFLOW_STAGE_DAYS_TO_SC[stage]
+                install_date = (datetime.date.today() + datetime.timedelta(days=days)).isoformat()
+                install_date_type = "Projected"
+            else:
+                install_date = ""
+                install_date_type = ""
             results.append({
                 "customer": (r.get("Name") or "").strip(),
                 "project_id": (r.get("Project_ID") or "").strip(),
                 "zoho_record_id": r.get("id") or "",
                 "aurora_project_id": aurora_id,
-                "rep": (r.get("Sales_Representative") or "").strip(),
+                "rep": rep_name,
                 "owner": owner_name,
-                "stage": (r.get("Project_Stage") or "").strip(),
+                "stage": stage,
                 "created_date": (r.get("Project_Created_Date") or "").strip(),
                 "commissions_paid": r.get("Commissions_Paid") or "",
-                "install_date": (r.get("Substantial_Completion") or r.get("Anticipated_Substantial_Completion_Date") or "").strip(),
+                "install_date": install_date,
+                "install_date_type": install_date_type,
                 "finance_type": _classify_finance_type(r.get("Lending_Status") or ""),
             })
         info = resp.json().get("info") or {}
@@ -4140,22 +4162,24 @@ def _build_pipeline_rows(projects: list[dict], paid_map: dict) -> list[list]:
         pid        = p.get("project_id", "")
         aurora_id  = p.get("aurora_project_id", "")
         zoho_id    = p.get("zoho_record_id", "")
+        rep        = p.get("rep", "")
         stage      = p.get("stage", "")
         ft         = p.get("finance_type", "")
         install_dt = p.get("install_date", "")
+        date_type  = p.get("install_date_type", "")
         data       = p.get("data", {})
 
         zoho_url   = (f'=HYPERLINK("https://crm.zoho.com/crm/heliosolar/tab/CustomModule6/{zoho_id}","Zoho ↗")'
                       if zoho_id else "")
         design_id  = data.get("design_id", "")
-        aurora_url = (f'=HYPERLINK("https://v2.aurorasolar.com/tenants/{tenant_id}/projects/{aurora_id}/designs/{design_id}","Aurora ↗")'
+        aurora_url = (f'=HYPERLINK("https://v2.aurorasolar.com/projects/{aurora_id}/designs/{design_id}/cad","Aurora ↗")'
                       if aurora_id and design_id else "")
         milestone  = data.get("design_milestone", "")
 
         if "error" in data:
-            rows.append([p.get("customer", ""), pid, ft, stage, install_dt,
-                         "", "", "", "", "", "", "", "", "", f"ERROR: {data['error']}",
-                         milestone, zoho_url, aurora_url])
+            rows.append([p.get("customer", ""), pid, ft, rep, stage, install_dt, date_type,
+                         "", "", "", "", "", "", "", "", f"ERROR: {data['error']}",
+                         "", zoho_url, aurora_url])
             continue
 
         sw   = data.get("system_size_watts", 0) or 0
@@ -4172,7 +4196,7 @@ def _build_pipeline_rows(projects: list[dict], paid_map: dict) -> list[list]:
         status = _commission_status(pid, ft, paid_map)
 
         rows.append([
-            p.get("customer", ""), pid, ft, stage, install_dt,
+            p.get("customer", ""), pid, ft, rep, stage, install_dt, date_type,
             sw, skw, bp, bppw, floor_val, bpf, bc, cppw, cc, tc,
             status, milestone, zoho_url, aurora_url,
         ])
@@ -4191,7 +4215,8 @@ def _write_pipeline_tab(svc, sheet_id: str, rows: list[list], title: str = "Pipe
     svc.spreadsheets().batchUpdate(spreadsheetId=sheet_id, body={"requests": requests}).execute()
 
     headers = [
-        "Customer", "Project ID", "Finance Type", "Stage", "Install Date (Actual or Projected)",
+        "Customer", "Project ID", "Finance Type", "Sales Rep", "Stage",
+        "Install Date", "Actual / Projected",
         "System (W)", "System (kW)",
         "Base Price ($)", "Base PPW ($/W)", "PPW Floor", "Base PPW − Floor", "Base Commission",
         "Consultant PPW", "Consultant Commission", "Total Commission",
@@ -4228,8 +4253,8 @@ def _write_pipeline_tab(svc, sheet_id: str, rows: list[list], title: str = "Pipe
         "properties": {"sheetId": tab_id, "gridProperties": {"frozenRowCount": 2}},
         "fields": "gridProperties.frozenRowCount",
     }})
-    # Color status rows — status is at fixed index 15 (Commission Status column)
-    STATUS_COL = 15
+    # Color status rows — status is at fixed index 17 (Commission Status column)
+    STATUS_COL = 17
     for i, row in enumerate(rows):
         status = row[STATUS_COL] if len(row) > STATUS_COL else ""
         if not status:
