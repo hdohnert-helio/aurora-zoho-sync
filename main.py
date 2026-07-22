@@ -6168,50 +6168,91 @@ def _find_current_pipeline_tab(svc) -> str | None:
 
 def _apply_overrides_to_pipeline_tab(svc, tab_name: str, overrides: dict) -> dict:
     """
-    Patch payment date and commission date cells in an existing Pipeline tab
-    for any project listed in overrides.
+    Patch payment date, payment amount, and commission date cells in an existing
+    Pipeline tab for any project listed in overrides.
 
     Pipeline columns (1-indexed):
-      B=2  Project ID
-      I=9  Payment 1 Date   T=20 Comm Payout 1 Date
-      K=11 Payment 2 Date   V=22 Comm Payout 2 Date
-      M=13 Payment 3 Date   X=24 Comm Payout 3 Date
+      B=2  Project ID       C=3  Finance Type    H=8  Contract Price   F=6  kW
+      I=9  Payment 1 Date   J=10 Payment 1 Amt   T=20 Comm Payout 1 Date
+      K=11 Payment 2 Date   L=12 Payment 2 Amt   V=22 Comm Payout 2 Date
+      M=13 Payment 3 Date   N=14 Payment 3 Amt   X=24 Comm Payout 3 Date
     """
     sheets = svc.spreadsheets()
 
-    # Read project IDs (col B) to find row numbers
-    col_b = sheets.values().get(
+    # Read full pipeline to get project IDs, finance type, contract price, and kW
+    raw = sheets.values().get(
         spreadsheetId=CASHFLOW_SHEET_ID,
-        range=f"'{tab_name}'!B1:B200",
+        range=f"'{tab_name}'!A1:Z200",
         valueRenderOption="FORMATTED_VALUE",
     ).execute().get("values", [])
 
-    # Build {project_id: sheet_row_number (1-indexed)}
-    proj_row = {}
-    for i, cell in enumerate(col_b):
-        val = cell[0].strip() if cell else ""
-        if val and val != "Project ID":
-            proj_row[val] = i + 1
+    if not raw:
+        return {"patched": [], "cells_updated": 0}
 
-    # payment key → (date col letter, comm col letter)
+    headers = raw[0]
+    def _ci(name):
+        try:
+            return headers.index(name)
+        except ValueError:
+            return None
+
+    ci_proj   = _ci("Project ID")
+    ci_fin    = _ci("Finance Type")
+    ci_price  = _ci("Total Revenue")
+    ci_kw     = _ci("kW")
+
+    def _parse_currency(s):
+        try:
+            return float(str(s or "").replace("$", "").replace(",", "").strip())
+        except (ValueError, AttributeError):
+            return None
+
+    # Build {project_id: (row_number_1indexed, finance_type, contract_price, system_watts)}
+    proj_info = {}
+    for i, row in enumerate(raw[1:], start=2):
+        pid = row[ci_proj].strip() if ci_proj is not None and len(row) > ci_proj else ""
+        if not pid or pid == "Project ID":
+            continue
+        fin   = row[ci_fin].strip()   if ci_fin   is not None and len(row) > ci_fin   else ""
+        price = _parse_currency(row[ci_price])  if ci_price is not None and len(row) > ci_price else None
+        kw    = _parse_currency(row[ci_kw])     if ci_kw    is not None and len(row) > ci_kw    else None
+        proj_info[pid] = (i, fin, price, kw * 1000 if kw else None)
+
+    # payment key → (date col, amt col, comm date col)
     PAY_COLS = {
-        "payment1": ("I", "T"),
-        "payment2": ("K", "V"),
-        "payment3": ("M", "X"),
+        "payment1": ("I", "J", "T"),
+        "payment2": ("K", "L", "V"),
+        "payment3": ("M", "N", "X"),
     }
 
     updates = []
     patched = []
     for proj_id, pov in overrides.items():
-        row_num = proj_row.get(proj_id)
-        if not row_num:
+        info = proj_info.get(proj_id)
+        if not info:
             logger.warning(f"apply_overrides: {proj_id} not found in {tab_name}")
             continue
-        for key, (pay_col, comm_col) in PAY_COLS.items():
+        row_num, finance_type, contract_price, system_watts = info
+
+        # Date overrides
+        for key, (pay_col, amt_col, comm_col) in PAY_COLS.items():
             if pov.get(key):
                 date_val = pov[key]
-                updates.append({"range": f"'{tab_name}'!{pay_col}{row_num}",  "values": [[date_val]]})
+                updates.append({"range": f"'{tab_name}'!{pay_col}{row_num}", "values": [[date_val]]})
                 updates.append({"range": f"'{tab_name}'!{comm_col}{row_num}", "values": [[date_val]]})
+
+        # Payment amount overrides
+        for key, (pay_col, amt_col, comm_col) in PAY_COLS.items():
+            amt_key = key.replace("payment", "amount")
+            if pov.get(amt_key) is not None:
+                updates.append({"range": f"'{tab_name}'!{amt_col}{row_num}", "values": [[pov[amt_key]]]})
+
+        # Materials override — recalculate LR draw amount
+        if pov.get("materials") is not None and contract_price and finance_type == "LR":
+            mat = pov["materials"]
+            new_draw = round(contract_price * 0.8 - mat, 2)
+            updates.append({"range": f"'{tab_name}'!J{row_num}", "values": [[new_draw]]})
+
         patched.append(proj_id)
 
     if updates:
