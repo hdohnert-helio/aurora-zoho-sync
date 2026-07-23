@@ -4213,8 +4213,8 @@ async def sync_commissions_to_zoho():
                 continue
 
             payload = {"data": [{
-                "Commissions_Paid": str(paid_amt),
-                "Commission_Remaining": str(remaining),
+                "Commission_Paid_Amount": paid_amt,
+                "Commission_Remaining": remaining,
                 "Commissions_Fully_Paid": fully_paid,
             }]}
             resp = requests.put(
@@ -4514,11 +4514,18 @@ async def update_pipeline():
         del doug_rows
         gc.collect()
 
+        # Sync paid amounts back to Zoho automatically
+        zoho_sync = await sync_commissions_to_zoho()
+        zoho_updated = zoho_sync.get("updated", 0)
+        zoho_errors = zoho_sync.get("errors", [])
+
         return {
             "status": "ok",
             "main_sheet_rows": main_count,
             "doug_sheet_rows": doug_count,
             "errors": errors,
+            "zoho_synced": zoho_updated,
+            "zoho_errors": zoho_errors,
         }
     except Exception as e:
         logger.exception("update_pipeline failed")
