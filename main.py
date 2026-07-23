@@ -8472,6 +8472,115 @@ async def dashboard_sync_submissions():
         return {"error": str(e), "traceback": _tb.format_exc()}
 
 
+# ------------------------
+# Property Lookup (Enformion)
+# ------------------------
+
+ENFORMION_URL = "https://devapi.enformion.com/PropertyV2Search"
+ENFORMION_NAME = "a83bcbebb55947dab820216f748ecc22"
+ENFORMION_PASSWORD = "40501a8f5d71479bbe9d0e1b952bce1d"
+
+def _lookup_property(address_line1: str, address_line2: str) -> dict:
+    resp = requests.post(
+        ENFORMION_URL,
+        headers={
+            "galaxy-ap-name": ENFORMION_NAME,
+            "galaxy-ap-password": ENFORMION_PASSWORD,
+            "galaxy-search-type": "PropertyV2",
+            "Content-Type": "application/json",
+        },
+        json={"AddressLine1": address_line1, "AddressLine2": address_line2, "Page": 1, "ResultsPerPage": 1},
+        timeout=15,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    records = data.get("propertyV2Records", [])
+    if not records:
+        return {}
+    summary = records[0].get("property", {}).get("summary", {})
+    details = summary.get("propertyDetails", {})
+    value = summary.get("propertyValue", {})
+    addr = summary.get("address", {})
+    owners = summary.get("currentOwners", [])
+    meta = summary.get("currentOwnerMetaData", {})
+    price_histories = summary.get("priceHistories", [])
+    purchase = summary.get("purchasePrice", {})
+
+    owner_names = ", ".join(o.get("name", {}).get("fullName", "") for o in owners if o.get("name", {}).get("fullName"))
+
+    last_sale_price = purchase.get("price")
+    last_sale_date = purchase.get("date")
+    if price_histories:
+        ph = sorted(price_histories, key=lambda x: x.get("date") or "", reverse=True)
+        last_sale_price = last_sale_price or ph[0].get("price")
+        last_sale_date = last_sale_date or ph[0].get("date")
+
+    # Parse date to YYYY-MM-DD for Zoho
+    zoho_date = None
+    if last_sale_date:
+        try:
+            zoho_date = datetime.datetime.strptime(last_sale_date, "%m/%d/%Y").strftime("%Y-%m-%d")
+        except Exception:
+            zoho_date = None
+
+    return {
+        "Property_Type": details.get("type", ""),
+        "Year_Built": int(details["yearBuilt"]) if details.get("yearBuilt") and details["yearBuilt"].isdigit() else None,
+        "Bedrooms": int(details["beds"]) if details.get("beds") and str(details["beds"]).isdigit() else None,
+        "Bathrooms": float(details["baths"]) if details.get("baths") else None,
+        "Square_Footage": int(details["livingArea"]) if details.get("livingArea") and str(details["livingArea"]).isdigit() else None,
+        "Lot_Size_sqft": int(details["lotSize"]) if details.get("lotSize") and str(details["lotSize"]).isdigit() else None,
+        "County": addr.get("county", ""),
+        "Current_Owners": owner_names,
+        "Owner_Occupied": meta.get("ownerOccupancyCode") == "O",
+        "Last_Sale_Price": last_sale_price,
+        "Last_Sale_Date": zoho_date,
+    }
+
+
+@app.post("/property/lookup")
+async def property_lookup(request: Request):
+    """Look up property data for a Zoho Install record and write it back."""
+    try:
+        body = await request.json()
+        zoho_id = body.get("zoho_id")
+        if not zoho_id:
+            return {"error": "zoho_id required"}
+
+        token = _get_zoho_access_token()
+        api_domain = _get_zoho_api_domain(token)
+        zoho_headers = {"Authorization": f"Zoho-oauthtoken {token}", "Content-Type": "application/json"}
+
+        # Fetch the Install record to get the address
+        r = requests.get(f"{api_domain}/crm/v7/Installs/{zoho_id}", headers=zoho_headers)
+        r.raise_for_status()
+        record = r.json().get("data", [{}])[0]
+
+        address_line1 = record.get("Property_Address", "") or record.get("Address", "") or record.get("Name", "")
+        city = record.get("City", "") or ""
+        state = record.get("State", "") or ""
+        zip_code = record.get("Zip", "") or record.get("Zip_Code", "") or ""
+        address_line2 = f"{city}, {state} {zip_code}".strip(", ")
+
+        if not address_line1:
+            return {"error": "No address found on Install record", "record_fields": list(record.keys())}
+
+        prop = _lookup_property(address_line1, address_line2)
+        if not prop:
+            return {"error": "No property match found", "address": f"{address_line1}, {address_line2}"}
+
+        # Write back to Zoho
+        payload = {"data": [{k: v for k, v in prop.items() if v is not None}]}
+        update = requests.put(f"{api_domain}/crm/v7/Installs/{zoho_id}", headers=zoho_headers, json=payload)
+        update.raise_for_status()
+
+        return {"status": "ok", "zoho_id": zoho_id, "address": f"{address_line1}, {address_line2}", "data": prop}
+
+    except Exception as e:
+        import traceback as _tb
+        return {"error": str(e), "traceback": _tb.format_exc()}
+
+
 @app.get("/debug/read-tab")
 async def debug_read_tab(sheet_id: str, tab: str, range_: str = "A1:Z200"):
     """Read raw values from any tab of any sheet the service account can access."""
