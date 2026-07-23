@@ -4517,6 +4517,25 @@ def _build_pipeline_rows(projects: list[dict], paid_map: dict) -> list[list]:
         ])
     return rows
 
+def _read_pipeline_statuses(svc, sheet_id: str, title: str = "Pipeline") -> dict:
+    """Read {project_id: commission_status} from current pipeline tab before refresh."""
+    try:
+        result = svc.spreadsheets().values().get(
+            spreadsheetId=sheet_id,
+            range=f"'{title}'!A1:R300",
+            valueRenderOption="FORMATTED_VALUE",
+        ).execute()
+        statuses = {}
+        for row in result.get("values", [])[2:]:  # skip title + header rows
+            proj_id = row[1] if len(row) > 1 else ""
+            status = row[17] if len(row) > 17 else ""
+            if proj_id and status:
+                statuses[proj_id] = status
+        return statuses
+    except Exception:
+        return {}
+
+
 def _write_pipeline_tab(svc, sheet_id: str, rows: list[list], title: str = "Pipeline") -> None:
     """Create or replace a Pipeline tab in the given sheet."""
     # Ensure tab exists
@@ -4610,6 +4629,12 @@ async def update_pipeline():
         gc.collect()
 
         errors = []
+        STATUS_COL = 17
+        PROJ_ID_COL = 1
+
+        # Read existing manual statuses before any writes so they survive the refresh
+        main_existing_statuses = _read_pipeline_statuses(svc, COMMISSION_SHEET_ID, "Pipeline")
+        doug_existing_statuses = _read_pipeline_statuses(svc, DOUG_SHEET_ID, "Pipeline")
 
         # ── Main sheet: fetch Aurora data one project at a time, free after use ──
         main_paid = _scan_paid_tranches(svc, COMMISSION_SHEET_ID)
@@ -4621,8 +4646,12 @@ async def update_pipeline():
         main_all_rows = _build_pipeline_rows(main_projects, main_paid)
         del main_projects, main_paid
         gc.collect()
-        # Split: active vs fully paid (status == "Commission Paid ✓" or Zoho flag)
-        STATUS_COL = 17
+        # Restore any custom statuses that the auto-scanner didn't set
+        for r in main_all_rows:
+            proj_id = r[PROJ_ID_COL] if len(r) > PROJ_ID_COL else ""
+            if proj_id and not r[STATUS_COL] and proj_id in main_existing_statuses:
+                r[STATUS_COL] = main_existing_statuses[proj_id]
+        # Split: active vs fully paid
         main_active = [r for r in main_all_rows if r[STATUS_COL] != "Commission Paid ✓"]
         main_paid_rows = [r for r in main_all_rows if r[STATUS_COL] == "Commission Paid ✓"]
         del main_all_rows
@@ -4642,6 +4671,11 @@ async def update_pipeline():
         doug_all_rows = _build_pipeline_rows(doug_projects, doug_paid)
         del doug_projects, doug_paid
         gc.collect()
+        # Restore any custom statuses that the auto-scanner didn't set
+        for r in doug_all_rows:
+            proj_id = r[PROJ_ID_COL] if len(r) > PROJ_ID_COL else ""
+            if proj_id and not r[STATUS_COL] and proj_id in doug_existing_statuses:
+                r[STATUS_COL] = doug_existing_statuses[proj_id]
         doug_active = [r for r in doug_all_rows if r[STATUS_COL] != "Commission Paid ✓"]
         doug_paid_rows = [r for r in doug_all_rows if r[STATUS_COL] == "Commission Paid ✓"]
         del doug_all_rows
