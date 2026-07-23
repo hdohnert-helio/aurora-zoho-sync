@@ -4097,6 +4097,125 @@ async def lookup_reps(project_ids: str = ""):
     return results
 
 
+@app.post("/commissions/sync-to-zoho")
+async def sync_commissions_to_zoho():
+    """
+    Scan all Payroll tabs on both sheets, calculate paid/remaining amounts
+    per project from Aurora pricing, and write back to Zoho:
+      - Commissions_Paid  → dollar amount paid so far
+      - Commission_Remaining → dollar amount still owed
+      - Commissions_Fully_Paid → true when all tranches paid
+    """
+    try:
+        svc = _build_sheets_service()
+        if not svc:
+            return {"status": "error", "reason": "could not build Sheets service"}
+
+        token = get_zoho_access_token()
+        if not token:
+            return {"status": "error", "reason": "could not get Zoho token"}
+
+        api_domain = os.getenv("ZOHO_API_DOMAIN")
+        zoho_headers = {
+            "Authorization": f"Zoho-oauthtoken {token}",
+            "Content-Type": "application/json",
+        }
+
+        # Scan both sheets for paid tranches
+        main_paid = _scan_paid_tranches(svc, COMMISSION_SHEET_ID)
+        doug_paid = _scan_paid_tranches(svc, DOUG_SHEET_ID)
+        all_paid = {**main_paid}
+        for pid, tranches in doug_paid.items():
+            all_paid.setdefault(pid, set()).update(tranches)
+
+        if not all_paid:
+            return {"status": "ok", "updated": 0, "message": "no paid projects found"}
+
+        # Fetch Aurora pricing for each paid project to get dollar amounts
+        # We need Zoho record IDs — fetch from Zoho by project ID
+        projects = _fetch_all_commission_projects(cutoff_date="2025-01-01")
+        proj_map = {p["project_id"]: p for p in projects}
+
+        updated = []
+        errors = []
+
+        for pid, tranches in all_paid.items():
+            project = proj_map.get(pid)
+            if not project:
+                errors.append({"project_id": pid, "error": "not found in Zoho fetch"})
+                continue
+
+            # Get commission total from Aurora
+            aurora_data = _get_commission_data_for_project(project["aurora_project_id"])
+            gc.collect()
+            if "error" in aurora_data:
+                errors.append({"project_id": pid, "error": aurora_data["error"]})
+                continue
+
+            sw = aurora_data.get("system_size_watts", 0) or 0
+            bp = aurora_data.get("base_price", 0) or 0
+            bppw = bp / sw if sw else 0
+            bpf = max(bppw - 2.50, 0)
+            bc = bpf * sw
+            cppw = aurora_data.get("consultant_comp_ppw", 0) or 0
+            cc = cppw * sw
+            total_commission = round(bc + cc, 2)
+
+            # Determine how much has been paid based on tranches
+            has_80  = any("80"  in t for t in tranches)
+            has_20  = any("20"  in t for t in tranches)
+            has_100 = any("100" in t for t in tranches)
+            ft = project.get("finance_type", "").upper()
+
+            if "CASH" in ft or "SE" in ft:
+                paid_amt = total_commission if (has_100 or has_20) else 0.0
+                fully_paid = paid_amt >= total_commission
+            else:
+                # LR: 80% at install, 20% at activation
+                if has_20:
+                    paid_amt = total_commission
+                    fully_paid = True
+                elif has_80:
+                    paid_amt = round(total_commission * 0.80, 2)
+                    fully_paid = False
+                else:
+                    paid_amt = 0.0
+                    fully_paid = False
+
+            remaining = round(max(total_commission - paid_amt, 0), 2)
+
+            # Update Zoho
+            zoho_id = project.get("zoho_record_id")
+            if not zoho_id:
+                errors.append({"project_id": pid, "error": "no Zoho record ID"})
+                continue
+
+            payload = {"data": [{
+                "Commissions_Paid": str(paid_amt),
+                "Commission_Remaining": str(remaining),
+                "Commissions_Fully_Paid": fully_paid,
+            }]}
+            resp = requests.put(
+                f"{api_domain}/crm/v7/Installs/{zoho_id}",
+                headers=zoho_headers,
+                json=payload,
+            )
+            if resp.status_code in (200, 201):
+                updated.append({"project_id": pid, "paid": paid_amt, "remaining": remaining, "fully_paid": fully_paid})
+            else:
+                errors.append({"project_id": pid, "error": f"Zoho update failed ({resp.status_code}): {resp.text[:200]}"})
+
+        return {
+            "status": "ok",
+            "updated": len(updated),
+            "projects": updated,
+            "errors": errors,
+        }
+    except Exception as e:
+        logger.exception("sync_commissions_to_zoho failed")
+        return {"status": "error", "reason": str(e)}
+
+
 @app.get("/commissions/debug-run")
 async def debug_run():
     """Synchronous single-project commission run — surfaces errors directly."""
@@ -4149,7 +4268,8 @@ def _is_doug_tiffany(project: dict) -> bool:
     )
 
 def _scan_paid_tranches(svc, sheet_id: str) -> dict:
-    """Return {project_id: set of run-pct strings} from all Payroll tabs."""
+    """Return {project_id: set of run-pct strings} from all Payroll tabs.
+    Dynamically finds Project ID and Run % columns from the header row."""
     meta = svc.spreadsheets().get(spreadsheetId=sheet_id).execute()
     paid = {}
     for s in meta["sheets"]:
@@ -4157,13 +4277,29 @@ def _scan_paid_tranches(svc, sheet_id: str) -> dict:
         if not title.startswith("Payroll"):
             continue
         result = svc.spreadsheets().values().get(
-            spreadsheetId=sheet_id, range=f"'{title}'!A1:U50"
+            spreadsheetId=sheet_id, range=f"'{title}'!A1:Z100"
         ).execute()
-        for row in result.get("values", [])[2:]:
-            if len(row) <= 4:
+        rows = result.get("values", [])
+        # Find header row (first row containing "Project ID")
+        pid_col = pct_col = None
+        data_start = 2
+        for hi, hrow in enumerate(rows[:4]):
+            for ci, cell in enumerate(hrow):
+                cv = str(cell).strip().lower()
+                if cv == "project id":
+                    pid_col = ci
+                if "run %" in cv or cv == "run%":
+                    pct_col = ci
+            if pid_col is not None:
+                data_start = hi + 1
+                break
+        if pid_col is None:
+            pid_col, pct_col = 4, 20  # fallback to main-sheet defaults
+        for row in rows[data_start:]:
+            if len(row) <= pid_col:
                 continue
-            pid = str(row[4]).strip()
-            pct = str(row[20]).strip() if len(row) > 20 else ""
+            pid = str(row[pid_col]).strip()
+            pct = str(row[pct_col]).strip() if pct_col is not None and len(row) > pct_col else ""
             if pid.startswith("PROJ-") and pct:
                 paid.setdefault(pid, set()).add(pct)
     return paid
