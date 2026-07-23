@@ -4290,35 +4290,45 @@ async def update_pipeline():
         # Separate Doug/Tiffany
         main_projects = [p for p in projects if not _is_doug_tiffany(p)]
         doug_projects  = [p for p in projects if _is_doug_tiffany(p)]
+        del projects  # free the unsplit list immediately
+        gc.collect()
 
-        # Fetch Aurora data for each
         errors = []
-        for p in projects:
-            data = _get_commission_data_for_project(p["aurora_project_id"])
-            p["data"] = data
-            if "error" in data:
-                errors.append({"project_id": p["project_id"], "error": data["error"]})
 
-        # Fetch install date from Zoho (Substantial_Completion or Anticipated)
-        # It's already embedded in project from _fetch_all_commission_projects if present.
-        # Fall back to blank.
-
-        # Scan paid tranches
+        # ── Main sheet: fetch Aurora data one project at a time, free after use ──
         main_paid = _scan_paid_tranches(svc, COMMISSION_SHEET_ID)
-        doug_paid  = _scan_paid_tranches(svc, DOUG_SHEET_ID)
-
-        # Build and write main Pipeline tab
+        for p in main_projects:
+            p["data"] = _get_commission_data_for_project(p["aurora_project_id"])
+            if "error" in p["data"]:
+                errors.append({"project_id": p["project_id"], "error": p["data"]["error"]})
+            gc.collect()
         main_rows = _build_pipeline_rows(main_projects, main_paid)
+        del main_projects, main_paid
+        gc.collect()
         _write_pipeline_tab(svc, COMMISSION_SHEET_ID, main_rows, "Pipeline")
+        main_count = len(main_rows)
+        del main_rows
+        gc.collect()
 
-        # Build and write Doug's Pipeline tab
+        # ── Doug's sheet: same pattern ──
+        doug_paid = _scan_paid_tranches(svc, DOUG_SHEET_ID)
+        for p in doug_projects:
+            p["data"] = _get_commission_data_for_project(p["aurora_project_id"])
+            if "error" in p["data"]:
+                errors.append({"project_id": p["project_id"], "error": p["data"]["error"]})
+            gc.collect()
         doug_rows = _build_pipeline_rows(doug_projects, doug_paid)
+        del doug_projects, doug_paid
+        gc.collect()
         _write_pipeline_tab(svc, DOUG_SHEET_ID, doug_rows, "Pipeline")
+        doug_count = len(doug_rows)
+        del doug_rows
+        gc.collect()
 
         return {
             "status": "ok",
-            "main_sheet_rows": len(main_rows),
-            "doug_sheet_rows": len(doug_rows),
+            "main_sheet_rows": main_count,
+            "doug_sheet_rows": doug_count,
             "errors": errors,
         }
     except Exception as e:
