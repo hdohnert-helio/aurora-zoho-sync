@@ -4029,6 +4029,28 @@ async def debug_zoho():
     return {"env": env_check, "token": "ok", "search_status": resp.status_code, "body": resp.json()}
 
 
+@app.get("/commissions/check-zoho-fields")
+async def check_zoho_fields():
+    """List commission-related fields on the Installs module."""
+    token = get_zoho_access_token()
+    if not token:
+        return {"error": "no token"}
+    api_domain = os.getenv("ZOHO_API_DOMAIN")
+    resp = requests.get(
+        f"{api_domain}/crm/v2/settings/fields?module=Installs",
+        headers={"Authorization": f"Zoho-oauthtoken {token}"},
+    )
+    if resp.status_code != 200:
+        return {"error": f"status {resp.status_code}", "body": resp.text[:500]}
+    fields = resp.json().get("fields", [])
+    commission_fields = [
+        {"api_name": f["api_name"], "display_label": f["display_label"], "data_type": f["data_type"]}
+        for f in fields
+        if any(kw in f["api_name"].lower() for kw in ("commission", "paid", "remaining"))
+    ]
+    return {"commission_fields": commission_fields, "total_fields": len(fields)}
+
+
 @app.get("/commissions/debug-sheets")
 async def debug_sheets():
     """Write one test row to the master sheet and return any error."""
