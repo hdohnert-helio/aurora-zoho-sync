@@ -8551,23 +8551,28 @@ async def property_lookup(request: Request):
         api_domain = os.getenv("ZOHO_API_DOMAIN")
         zoho_headers = {"Authorization": f"Zoho-oauthtoken {token}", "Content-Type": "application/json"}
 
-        # Fetch the Install record to get the address
-        r = requests.get(f"{api_domain}/crm/v7/Installs/{zoho_id}", headers=zoho_headers)
-        r.raise_for_status()
-        record = r.json().get("data", [{}])[0]
+        # Allow address override in request body
+        if body.get("address_line1"):
+            address_line1 = body["address_line1"]
+            address_line2 = body.get("address_line2", "")
+        else:
+            # Fetch the Install record to get the address
+            r = requests.get(f"{api_domain}/crm/v7/Installs/{zoho_id}", headers=zoho_headers)
+            r.raise_for_status()
+            record = r.json().get("data", [{}])[0]
 
-        site_location = record.get("Site_Location", "") or ""
-        if not site_location:
-            return {"error": "No Site_Location found on Install record"}
+            site_location = record.get("Site_Location", "") or ""
+            if not site_location:
+                return {"error": "No Site_Location found on Install record"}
 
-        # Normalize: replace newlines with commas, collapse whitespace
-        site_location = re.sub(r'[\r\n]+', ', ', site_location).strip()
-        site_location = re.sub(r',\s*,', ',', site_location)
+            # Normalize: replace newlines with commas, collapse whitespace
+            site_location = re.sub(r'[\r\n]+', ', ', site_location).strip()
+            site_location = re.sub(r',\s*,', ',', site_location)
 
-        # Split on first comma: "123 Main St" / "City, ST 12345"
-        parts = site_location.split(",", 1)
-        address_line1 = parts[0].strip()
-        address_line2 = parts[1].strip() if len(parts) > 1 else ""
+            # Split on first comma: "123 Main St" / "City, ST 12345"
+            parts = site_location.split(",", 1)
+            address_line1 = parts[0].strip()
+            address_line2 = parts[1].strip() if len(parts) > 1 else ""
 
         prop = _lookup_property(address_line1, address_line2)
         if not prop:
