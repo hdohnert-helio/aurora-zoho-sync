@@ -8556,14 +8556,14 @@ async def property_lookup(request: Request):
         r.raise_for_status()
         record = r.json().get("data", [{}])[0]
 
-        address_line1 = record.get("Property_Address", "") or record.get("Address", "") or record.get("Name", "")
-        city = record.get("City", "") or ""
-        state = record.get("State", "") or ""
-        zip_code = record.get("Zip", "") or record.get("Zip_Code", "") or ""
-        address_line2 = f"{city}, {state} {zip_code}".strip(", ")
+        site_location = record.get("Site_Location", "") or ""
+        if not site_location:
+            return {"error": "No Site_Location found on Install record"}
 
-        if not address_line1:
-            return {"error": "No address found on Install record", "record_fields": list(record.keys())}
+        # Site_Location is "123 Main St, City, ST 12345" — split on first comma
+        parts = site_location.split(",", 1)
+        address_line1 = parts[0].strip()
+        address_line2 = parts[1].strip() if len(parts) > 1 else ""
 
         prop = _lookup_property(address_line1, address_line2)
         if not prop:
