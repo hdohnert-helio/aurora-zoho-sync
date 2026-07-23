@@ -15,6 +15,8 @@ import logging
 import sys
 import gc
 
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
@@ -25,6 +27,14 @@ logger = logging.getLogger(__name__)
 
 
 app = FastAPI()
+
+scheduler = AsyncIOScheduler()
+
+@app.on_event("startup")
+async def start_scheduler():
+    scheduler.add_job(update_pipeline, "cron", hour=7, minute=0)
+    scheduler.start()
+    logger.info("Scheduler started — pipeline will refresh daily at 07:00 UTC")
 
 # ------------------------
 # Internal: Create Initial Snapshot After Install Creation
