@@ -3536,9 +3536,7 @@ def _fetch_all_commission_projects(cutoff_date: str = "2026-01-01") -> list[dict
             if not aurora_id:
                 continue
             stage = (r.get("Project_Stage") or "").strip()
-            # Skip cancelled, on-hold, and fully-paid projects
-            if r.get("Commissions_Fully_Paid"):
-                continue
+            # Skip cancelled/on-hold — fully paid projects are kept and routed to Paid tab
             if stage.lower() in ("cancelled", "canceled", "on hold", "lost"):
                 continue
             owner_obj = r.get("Owner")
@@ -3571,6 +3569,7 @@ def _fetch_all_commission_projects(cutoff_date: str = "2026-01-01") -> list[dict
                 "stage": stage,
                 "created_date": (r.get("Project_Created_Date") or "").strip(),
                 "commissions_paid": r.get("Commissions_Paid") or "",
+                "fully_paid": bool(r.get("Commissions_Fully_Paid")),
                 "install_date": install_date,
                 "install_date_type": install_date_type,
                 "finance_type": _classify_finance_type(r.get("Lending_Status") or ""),
@@ -4491,12 +4490,18 @@ async def update_pipeline():
             if "error" in p["data"]:
                 errors.append({"project_id": p["project_id"], "error": p["data"]["error"]})
             gc.collect()
-        main_rows = _build_pipeline_rows(main_projects, main_paid)
+        main_all_rows = _build_pipeline_rows(main_projects, main_paid)
         del main_projects, main_paid
         gc.collect()
-        _write_pipeline_tab(svc, COMMISSION_SHEET_ID, main_rows, "Pipeline")
-        main_count = len(main_rows)
-        del main_rows
+        # Split: active vs fully paid (status == "Commission Paid ✓" or Zoho flag)
+        STATUS_COL = 17
+        main_active = [r for r in main_all_rows if r[STATUS_COL] != "Commission Paid ✓"]
+        main_paid_rows = [r for r in main_all_rows if r[STATUS_COL] == "Commission Paid ✓"]
+        del main_all_rows
+        _write_pipeline_tab(svc, COMMISSION_SHEET_ID, main_active, "Pipeline")
+        _write_pipeline_tab(svc, COMMISSION_SHEET_ID, main_paid_rows, "Paid")
+        main_count = len(main_active)
+        del main_active, main_paid_rows
         gc.collect()
 
         # ── Doug's sheet: same pattern ──
@@ -4506,12 +4511,16 @@ async def update_pipeline():
             if "error" in p["data"]:
                 errors.append({"project_id": p["project_id"], "error": p["data"]["error"]})
             gc.collect()
-        doug_rows = _build_pipeline_rows(doug_projects, doug_paid)
+        doug_all_rows = _build_pipeline_rows(doug_projects, doug_paid)
         del doug_projects, doug_paid
         gc.collect()
-        _write_pipeline_tab(svc, DOUG_SHEET_ID, doug_rows, "Pipeline")
-        doug_count = len(doug_rows)
-        del doug_rows
+        doug_active = [r for r in doug_all_rows if r[STATUS_COL] != "Commission Paid ✓"]
+        doug_paid_rows = [r for r in doug_all_rows if r[STATUS_COL] == "Commission Paid ✓"]
+        del doug_all_rows
+        _write_pipeline_tab(svc, DOUG_SHEET_ID, doug_active, "Pipeline")
+        _write_pipeline_tab(svc, DOUG_SHEET_ID, doug_paid_rows, "Paid")
+        doug_count = len(doug_active)
+        del doug_active, doug_paid_rows
         gc.collect()
 
         # Sync paid amounts back to Zoho automatically
