@@ -8560,7 +8560,11 @@ async def property_lookup(request: Request):
         if not site_location:
             return {"error": "No Site_Location found on Install record"}
 
-        # Site_Location is "123 Main St, City, ST 12345" — split on first comma
+        # Normalize: replace newlines with commas, collapse whitespace
+        site_location = re.sub(r'[\r\n]+', ', ', site_location).strip()
+        site_location = re.sub(r',\s*,', ',', site_location)
+
+        # Split on first comma: "123 Main St" / "City, ST 12345"
         parts = site_location.split(",", 1)
         address_line1 = parts[0].strip()
         address_line2 = parts[1].strip() if len(parts) > 1 else ""
