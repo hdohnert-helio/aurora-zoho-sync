@@ -4453,7 +4453,9 @@ def _scan_paid_tranches(svc, sheet_id: str) -> dict:
                 paid.setdefault(pid, set()).add(pct)
     return paid
 
-def _commission_status(pid: str, finance_type: str, paid_map: dict) -> str:
+def _commission_status(pid: str, finance_type: str, paid_map: dict, fully_paid_zoho: bool = False) -> str:
+    if fully_paid_zoho:
+        return "Commission Paid ✓"
     tranches = paid_map.get(pid, set())
     if not tranches:
         return ""
@@ -4508,7 +4510,7 @@ def _build_pipeline_rows(projects: list[dict], paid_map: dict) -> list[list]:
         cc   = round(cppw * sw, 2) if cppw and sw else ""
         tc   = round((bc or 0) + (cc or 0), 2)
 
-        status = _commission_status(pid, ft, paid_map)
+        status = _commission_status(pid, ft, paid_map, fully_paid_zoho=bool(p.get("fully_paid")))
 
         rows.append([
             p.get("customer", ""), pid, ft, rep, stage, install_dt, date_type,
@@ -4534,6 +4536,19 @@ def _read_pipeline_statuses(svc, sheet_id: str, title: str = "Pipeline") -> dict
         return statuses
     except Exception:
         return {}
+
+
+def _read_paid_project_ids(svc, sheet_id: str) -> set:
+    """Read all project IDs currently in the Paid tab so they survive a refresh."""
+    try:
+        result = svc.spreadsheets().values().get(
+            spreadsheetId=sheet_id,
+            range="Paid!B1:B300",
+            valueRenderOption="FORMATTED_VALUE",
+        ).execute()
+        return {row[0] for row in result.get("values", [])[2:] if row and row[0].startswith("PROJ-")}
+    except Exception:
+        return set()
 
 
 def _write_pipeline_tab(svc, sheet_id: str, rows: list[list], title: str = "Pipeline") -> None:
