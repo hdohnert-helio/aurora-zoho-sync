@@ -3972,7 +3972,8 @@ async def project_intake_webhook(request: Request):
             if not project_id:
                 project_id = (rec.get("Project_ID") or "").strip()
             if not rep:
-                rep = (rec.get("Sales_Representative") or "").strip()
+                rep_obj = rec.get("Sales_Representative")
+                rep = (rep_obj.get("name") or "").strip() if isinstance(rep_obj, dict) else (rep_obj or "").strip()
             if not owner:
                 owner_obj = rec.get("Owner")
                 owner = (owner_obj.get("name") or "").strip() if isinstance(owner_obj, dict) else ""
@@ -4483,7 +4484,7 @@ def _fetch_all_cashflow_projects(cutoff_date: str = "2026-01-01") -> list[dict]:
                 "project_id": (r.get("Project_ID") or "").strip(),
                 "zoho_record_id": r.get("id") or "",
                 "aurora_project_id": aurora_id,
-                "rep": (r.get("Sales_Representative") or "").strip(),
+                "rep": (r.get("Sales_Representative") or {}).get("name", "").strip() if isinstance(r.get("Sales_Representative"), dict) else (r.get("Sales_Representative") or "").strip(),
                 "owner": owner_name,
                 "stage": stage,
                 "created_date": (r.get("Project_Created_Date") or "").strip(),
