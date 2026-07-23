@@ -4066,6 +4066,37 @@ async def debug_sheets():
         return {"error": f"unexpected: {e}"}
 
 
+@app.get("/commissions/lookup-reps")
+async def lookup_reps(project_ids: str = ""):
+    """Return sales rep names for a comma-separated list of Zoho project IDs."""
+    pids = [p.strip() for p in project_ids.split(",") if p.strip()]
+    if not pids:
+        return {"error": "pass ?project_ids=PROJ-1,PROJ-2"}
+    token = get_zoho_access_token()
+    if not token:
+        return {"error": "could not get Zoho token"}
+    api_domain = os.getenv("ZOHO_API_DOMAIN")
+    headers = {"Authorization": f"Zoho-oauthtoken {token}"}
+    results = {}
+    for pid in pids:
+        url = f"{api_domain}/crm/v7/Installs/search?criteria=(Project_ID:equals:{pid})&fields=Project_ID,Sales_Representative,Owner"
+        resp = requests.get(url, headers=headers)
+        if resp.status_code == 200:
+            records = resp.json().get("data", [])
+            if records:
+                rep = records[0].get("Sales_Representative")
+                owner = records[0].get("Owner")
+                results[pid] = {
+                    "rep": rep.get("name", "") if isinstance(rep, dict) else (rep or ""),
+                    "owner": owner.get("name", "") if isinstance(owner, dict) else (owner or ""),
+                }
+            else:
+                results[pid] = {"error": "not found"}
+        else:
+            results[pid] = {"error": f"status {resp.status_code}"}
+    return results
+
+
 @app.get("/commissions/debug-run")
 async def debug_run():
     """Synchronous single-project commission run — surfaces errors directly."""
