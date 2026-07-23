@@ -3903,8 +3903,7 @@ async def commissions_run(request: Request):
     except Exception:
         body = {}
     cutoff = (body.get("cutoff_date") or "2026-01-01") if isinstance(body, dict) else "2026-01-01"
-    now_label = datetime.datetime.now(datetime.timezone.utc).strftime("%-m-%-d-%Y")
-    tab_name = f"Payroll {now_label}"
+    tab_name = f"Payroll {_payroll_friday_label()}"
     projects = _fetch_all_commission_projects(cutoff_date=cutoff)
     if not projects:
         return {"status": "no projects found", "cutoff_date": cutoff}
@@ -3926,8 +3925,7 @@ async def commissions_run_sync(request: Request):
     except Exception:
         body = {}
     cutoff = (body.get("cutoff_date") or "2026-06-01") if isinstance(body, dict) else "2026-06-01"
-    now_label = datetime.datetime.now(datetime.timezone.utc).strftime("%-m-%-d-%Y")
-    tab_name = f"Payroll {now_label}"
+    tab_name = f"Payroll {_payroll_friday_label()}"
     projects = _fetch_all_commission_projects(cutoff_date=cutoff)
     if not projects:
         return {"status": "no projects found", "cutoff_date": cutoff}
@@ -4417,6 +4415,15 @@ def _next_monday_on_or_after(d: datetime.date) -> datetime.date:
     """Return d if already Monday, else the next Monday."""
     days = (7 - d.weekday()) % 7
     return d + datetime.timedelta(days=days)
+
+
+def _payroll_friday_label() -> str:
+    """Return the Friday of the current week as M/D (e.g. '7/25')."""
+    today = datetime.date.today()
+    # weekday(): Mon=0 … Fri=4 … Sun=6
+    days_to_friday = (4 - today.weekday()) % 7
+    friday = today + datetime.timedelta(days=days_to_friday)
+    return f"{friday.month}/{friday.day}"
 
 
 def _fetch_all_cashflow_projects(cutoff_date: str = "2026-01-01") -> list[dict]:
