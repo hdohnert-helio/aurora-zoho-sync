@@ -3693,31 +3693,16 @@ def _get_commission_data_for_project(aurora_project_id: str) -> dict:
 
 def _write_commission_tab(svc, tab_name: str, rows: list[dict]) -> None:
     """
-    Add a new tab to COMMISSION_SHEET_ID and write commission data with
-    live Sheets formulas for every calculated field.
-
-    Column layout (A:P) — matches "Payroll [date]" format:
-      A  Customer
-      B  Install Owner (ES)
-      C  Sales Rep
-      D  EVP                      ← always "Fred Stevens"
-      E  Project ID
-      F  Aurora Project ID
-      G  System Size (W)          ← raw value
-      H  System Size (kW)         =G{r}/1000
-      I  Base Price ($)           ← raw value
-      J  Base Price Per Watt      =IFERROR(I{r}/G{r},0)
-      K  PPW Floor                ← constant $2.50
-      L  Base PPW - Floor         =J{r}-K{r}
-      M  Base Commission          =L{r}*G{r}
-      N  Consultant Comp PPW      ← raw value
-      O  Consultant Commission    =N{r}*G{r}
-      P  Total Comp on Deal       =M{r}+O{r}
+    Add a new tab to COMMISSION_SHEET_ID with:
+      Aurora Data (A-P), Fred's Input blanks (Q-U), Pay formulas (V-Y), Links (Z-AA).
+    Below the data: total row, Fred's Input Validation, Rep Summary (SUMIF so
+    rep-name edits propagate), Job Breakout by Deal (cell refs so row edits propagate).
     """
     sheets = svc.spreadsheets()
+    valid_rows = [r for r in rows if "error" not in r]
+    N = len(valid_rows)
 
-    # 1. Add new sheet tab
-    # Delete existing tab with same name if present
+    # ── 1. Create tab ────────────────────────────────────────────────────────
     existing = sheets.get(spreadsheetId=COMMISSION_SHEET_ID).execute()
     for s in existing.get("sheets", []):
         if s["properties"]["title"] == tab_name:
@@ -3726,142 +3711,275 @@ def _write_commission_tab(svc, tab_name: str, rows: list[dict]) -> None:
                 body={"requests": [{"deleteSheet": {"sheetId": s["properties"]["sheetId"]}}]}
             ).execute()
             break
-
-    add_sheet_body = {
-        "requests": [{
-            "addSheet": {
-                "properties": {"title": tab_name}
-            }
-        }]
-    }
-    resp = sheets.batchUpdate(spreadsheetId=COMMISSION_SHEET_ID, body=add_sheet_body).execute()
+    resp = sheets.batchUpdate(
+        spreadsheetId=COMMISSION_SHEET_ID,
+        body={"requests": [{"addSheet": {"properties": {"title": tab_name}}}]}
+    ).execute()
     sheet_id = resp["replies"][0]["addSheet"]["properties"]["sheetId"]
 
-    # 2. Build header + data rows
-    # Column layout (A=0 … T=19):
-    #  A  Project Created Date
-    #  B  Customer
-    #  C  Install Owner (ES)
-    #  D  Sales Rep
-    #  E  EVP
-    #  F  Project ID
-    #  G  Aurora Project ID
-    #  H  System Size (W)
-    #  I  System Size (kW)      =H/1000
-    #  J  Base Price ($)        $
-    #  K  Base PPW ($/W)        $ =J/H
-    #  L  PPW Floor             $ constant
-    #  M  Base PPW - Floor      $ =K-L
-    #  N  Base Commission       $ =M*H
-    #  O  Consultant PPW        $
-    #  P  Consultant Commission $ =O*H
-    #  Q  Total Comp on Deal    $ =N+P
-    #  R  Zoho Link
-    #  S  Aurora Link
-    #  T  Commissions Paid (%)
-    headers = [
-        "Project Created Date",
+    zoho_base = "https://crm.zoho.com/crm/heliosolar/tab/CustomModule6/"
+    aurora_base = "https://v2.aurorasolar.com/projects/"
+    pay_label = _payroll_friday_label()
+
+    # ── 2. Section header (row 1) + column headers (row 2) + data (rows 3..2+N) ──
+    section_row = (
+        ["Aurora Data"] + [""] * 15 +
+        ["Fred's Input"] + [""] * 3 +
+        [f"Pay on Week of {pay_label}"] + [""] * 4 +
+        [""] * 2
+    )
+    col_headers = [
         "Customer", "Install Owner (ES)", "Sales Rep", "EVP",
         "Project ID", "Aurora Project ID",
         "System Size (W)", "System Size (kW)",
         "Base Price ($)", "Base Price Per Watt ($/W)", "PPW Floor",
-        "Base PPW - Floor", "Base Commission",
-        "Consultant Comp PPW ($/W)", "Consultant Commission",
-        "Total Comp on Deal",
-        "Commissions Paid (%)", "Remaining Commission", "Zoho Link", "Aurora Link",
+        "Base PPW - Floor", "Base Commission = (Base PPW - Floor) × Size (W)",
+        "Consultant Comp PPW ($/W)", "Consultant Commissions", "Total Comp on Deal",
+        "ES Payout ($)", "EVP Payout ($)", "SR Payout ($)", "Fred's Total", "Run %",
+        "ES Payout", "SR Payout", "EVP Payout", "Total Payout",
+        "Zoho Link", "Aurora Link",
     ]
 
-    zoho_base = "https://crm.zoho.com/crm/heliosolar/tab/CustomModule6/"
-    aurora_base = "https://v2.aurorasolar.com/projects/"
-
-    value_rows = [headers]
-    for i, row in enumerate(rows, start=2):  # row 1 = header, data starts at 2
+    data_value_rows = [section_row, col_headers]
+    for i, row in enumerate(valid_rows, start=3):
         r = str(i)
-        if "error" in row:
-            value_rows.append([
-                row.get("created_date", ""), row.get("customer", ""),
-                row.get("owner", ""), row.get("rep", ""), "Fred Stevens",
-                row.get("project_id", ""), row.get("aurora_project_id", ""),
-                row.get("error", ""), "", "", "", "", "", "", "", "", "", "", "", "",
-            ])
-            continue
-
         d = row["data"]
         zoho_id = row.get("zoho_record_id", "")
         aurora_id = row.get("aurora_project_id", "")
         zoho_link = f'=HYPERLINK("{zoho_base}{zoho_id}","Zoho")' if zoho_id else ""
         aurora_link = f'=HYPERLINK("{aurora_base}{aurora_id}","Aurora")' if aurora_id else ""
-
-        value_rows.append([
-            row.get("created_date", ""),               # A — project created date
-            row.get("customer", ""),                   # B — customer
-            row.get("owner", ""),                      # C — install owner (ES)
-            row.get("rep", ""),                        # D — sales rep
-            "Fred Stevens",                            # E — EVP
-            row.get("project_id", ""),                 # F — project ID
-            aurora_id,                                 # G — aurora project ID
-            d["system_size_watts"],                    # H — raw watts
-            f"=H{r}/1000",                             # I — kW
-            d["base_price"],                           # J — raw base price
-            f"=IFERROR(J{r}/H{r},0)",                  # K — base PPW
-            COMMISSION_PPW_FLOOR,                      # L — floor
-            f"=K{r}-L{r}",                             # M — margin
-            f"=M{r}*H{r}",                             # N — base commission
-            d["consultant_comp_ppw"],                  # O — raw consultant PPW
-            f"=O{r}*H{r}",                             # P — consultant commission
-            f"=N{r}+P{r}",                             # Q — total comp on deal
-            row.get("commissions_paid", ""),           # R — commissions paid %
-            f"=Q{r}*(1-IFERROR(R{r}/100,0))",         # S — remaining commission
-            zoho_link,                                 # T — Zoho link
-            aurora_link,                               # U — Aurora link
+        data_value_rows.append([
+            row.get("customer", ""),          # A
+            row.get("owner", ""),             # B  Install Owner (ES)
+            row.get("rep", ""),               # C  Sales Rep
+            "Fred Stevens",                   # D  EVP
+            row.get("project_id", ""),        # E
+            aurora_id,                        # F
+            d["system_size_watts"],           # G
+            f"=G{r}/1000",                    # H  kW
+            d["base_price"],                  # I
+            f"=IFERROR(I{r}/G{r},0)",         # J  Base PPW
+            COMMISSION_PPW_FLOOR,             # K  floor
+            f"=J{r}-K{r}",                    # L  margin
+            f"=L{r}*G{r}",                    # M  base commission
+            d["consultant_comp_ppw"],         # N  consultant PPW
+            f"=N{r}*G{r}",                    # O  consultant commission
+            f"=M{r}+O{r}",                    # P  total comp
+            "",                               # Q  ES Payout $ (Fred fills in)
+            "",                               # R  EVP Payout $ (Fred fills in)
+            "",                               # S  SR Payout $ (Fred fills in)
+            f"=Q{r}+R{r}+S{r}",              # T  Fred's Total
+            "",                               # U  Run % (Fred fills in)
+            f"=Q{r}",                         # V  ES Payout
+            f"=S{r}",                         # W  SR Payout
+            f"=R{r}",                         # X  EVP Payout
+            f"=V{r}+W{r}+X{r}",              # Y  Total Payout
+            zoho_link,                        # Z
+            aurora_link,                      # AA
         ])
 
-    # 3. Write values (formulas go as USER_ENTERED so Sheets evaluates them)
+    last_data = 2 + N   # last data row (1-indexed)
+
+    data_value_rows.append([""] * 27)   # empty row N+3
+    data_value_rows.append([            # total row N+4
+        "Total", "", "", "", "", "",
+        f"=SUM(G3:G{last_data})", f"=SUM(H3:H{last_data})", f"=SUM(I3:I{last_data})",
+        "", "", "",
+        f"=SUM(M3:M{last_data})", "",
+        f"=SUM(O3:O{last_data})", f"=SUM(P3:P{last_data})",
+        f"=SUM(Q3:Q{last_data})", f"=SUM(R3:R{last_data})", f"=SUM(S3:S{last_data})", "", "",
+        f"=SUM(V3:V{last_data})", f"=SUM(W3:W{last_data})",
+        f"=SUM(X3:X{last_data})", f"=SUM(Y3:Y{last_data})",
+        "", "",
+    ])
+
     sheets.values().update(
         spreadsheetId=COMMISSION_SHEET_ID,
         range=f"'{tab_name}'!A1",
         valueInputOption="USER_ENTERED",
-        body={"values": value_rows},
+        body={"values": data_value_rows},
     ).execute()
 
-    # Dollar format columns: J(9), K(10), L(11), M(12), N(13), O(14), P(15), Q(16)
-    dollar_fmt = {"numberFormat": {"type": "CURRENCY", "pattern": '"$"#,##0.00'}}
-    dollar_requests = [
-        {
-            "repeatCell": {
-                "range": {
-                    "sheetId": sheet_id,
-                    "startRowIndex": 1,
-                    "startColumnIndex": col,
-                    "endColumnIndex": col + 1,
-                },
-                "cell": {"userEnteredFormat": dollar_fmt},
-                "fields": "userEnteredFormat.numberFormat",
-            }
+    # ── 3. Fred's Input Validation (row N+7 onward) ─────────────────────────
+    val_header = N + 7
+    val_data_start = N + 9
+
+    val_rows = [
+        ["Fred's Input Validation"],
+        ["Job", "Fred's Total", "Should Equal", "Difference", "Status"],
+    ]
+    for i in range(N):
+        dr = i + 3
+        vr = val_data_start + i
+        val_rows.append([
+            f"=A{dr}",
+            f"=T{dr}",
+            f"=P{dr}*U{dr}",
+            f"=B{vr}-C{vr}",
+            f'=IF(ABS(B{vr}-C{vr})<5,"\u2713 Balanced","\u26a0 Check amounts")',
+        ])
+
+    sheets.values().update(
+        spreadsheetId=COMMISSION_SHEET_ID,
+        range=f"'{tab_name}'!A{val_header}",
+        valueInputOption="USER_ENTERED",
+        body={"values": val_rows},
+    ).execute()
+
+    # ── 4. Rep Summary (row 2N+11 onward) — SUMIF so rep-name edits propagate ─
+    rep_hdr = 2 * N + 11
+    rep_data_start = 2 * N + 12
+
+    seen_reps: set = set()
+    all_reps: list = []
+    for row in valid_rows:
+        for name in [row.get("owner", ""), row.get("rep", ""), "Fred Stevens"]:
+            if name and name not in seen_reps:
+                seen_reps.add(name)
+                all_reps.append(name)
+    R = len(all_reps)
+
+    rep_rows = [["Rep", "ES Payout", "Sales Rep Payout", "EVP Payout", "Deductions", "Total"]]
+    for i, rep in enumerate(all_reps):
+        rr = rep_data_start + i
+        rep_rows.append([
+            rep,
+            f"=SUMIF(B$3:B${last_data},A{rr},V$3:V${last_data})",
+            f"=SUMIF(C$3:C${last_data},A{rr},W$3:W${last_data})",
+            f"=SUMIF(D$3:D${last_data},A{rr},X$3:X${last_data})",
+            "",
+            f"=SUM(B{rr}:D{rr})-E{rr}",
+        ])
+    rep_total = rep_data_start + R
+    rep_rows.append([
+        "Total",
+        f"=SUM(B{rep_data_start}:B{rep_total - 1})",
+        f"=SUM(C{rep_data_start}:C{rep_total - 1})",
+        f"=SUM(D{rep_data_start}:D{rep_total - 1})",
+        f"=SUM(E{rep_data_start}:E{rep_total - 1})",
+        f"=SUM(F{rep_data_start}:F{rep_total - 1})",
+    ])
+
+    sheets.values().update(
+        spreadsheetId=COMMISSION_SHEET_ID,
+        range=f"'{tab_name}'!A{rep_hdr}",
+        valueInputOption="USER_ENTERED",
+        body={"values": rep_rows},
+    ).execute()
+
+    # ── 5. Job Breakout by Deal — cell refs so row edits propagate ───────────
+    brk_hdr = rep_total + 2
+    brk_data_start = brk_hdr + 2
+    brk_last = brk_data_start + N - 1
+
+    brk_rows = [
+        ["Job Breakout by Deal"],
+        ["Job", "Run %", "ES", "ES Payout", "Sales Rep", "SR Payout", "EVP", "EVP Payout", "Total"],
+    ]
+    for i in range(N):
+        dr = i + 3
+        brk_rows.append([
+            f"=A{dr}", f"=U{dr}", f"=B{dr}", f"=V{dr}",
+            f"=C{dr}", f"=W{dr}", f"=D{dr}", f"=X{dr}", f"=Y{dr}",
+        ])
+    brk_rows.append([
+        "Total", "",
+        "", f"=SUM(D{brk_data_start}:D{brk_last})",
+        "", f"=SUM(F{brk_data_start}:F{brk_last})",
+        "", f"=SUM(H{brk_data_start}:H{brk_last})",
+        f"=SUM(I{brk_data_start}:I{brk_last})",
+    ])
+
+    sheets.values().update(
+        spreadsheetId=COMMISSION_SHEET_ID,
+        range=f"'{tab_name}'!A{brk_hdr}",
+        valueInputOption="USER_ENTERED",
+        body={"values": brk_rows},
+    ).execute()
+
+    # ── 6. Formatting ─────────────────────────────────────────────────────────
+    dark_bg = {"red": 0.12, "green": 0.12, "blue": 0.15}
+    grey_bg = {"red": 0.85, "green": 0.85, "blue": 0.85}
+    alt_bg  = {"red": 0.95, "green": 0.95, "blue": 0.95}
+    white_t = {"red": 1.0, "green": 1.0, "blue": 1.0}
+    bold_tf = {"bold": True}
+    dollar_nf = {"type": "CURRENCY", "pattern": '"$"#,##0.00'}
+    pct_nf    = {"type": "PERCENT", "pattern": "0%"}
+
+    def _fmt(r0, r1, c0, c1, bg=None, fg=None, text_fmt=None, num_fmt=None):
+        uf, fields = {}, []
+        if bg:
+            uf["backgroundColor"] = bg; fields.append("userEnteredFormat.backgroundColor")
+        if fg or text_fmt:
+            tf = {}
+            if fg: tf["foregroundColor"] = fg
+            if text_fmt: tf.update(text_fmt)
+            uf["textFormat"] = tf; fields.append("userEnteredFormat.textFormat")
+        if num_fmt:
+            uf["numberFormat"] = num_fmt; fields.append("userEnteredFormat.numberFormat")
+        if not fields:
+            return None
+        return {"repeatCell": {
+            "range": {"sheetId": sheet_id,
+                      "startRowIndex": r0, "endRowIndex": r1,
+                      "startColumnIndex": c0, "endColumnIndex": c1},
+            "cell": {"userEnteredFormat": uf},
+            "fields": ",".join(fields),
+        }}
+
+    fmt_reqs = []
+    # Section header row 1: dark bg, white bold
+    fmt_reqs.append(_fmt(0, 1, 0, 27, bg=dark_bg, fg=white_t, text_fmt=bold_tf))
+    # Col header row 2: grey bg, bold
+    fmt_reqs.append(_fmt(1, 2, 0, 27, bg=grey_bg, text_fmt=bold_tf))
+    # Freeze rows 1-2
+    fmt_reqs.append({
+        "updateSheetProperties": {
+            "properties": {"sheetId": sheet_id, "gridProperties": {"frozenRowCount": 2}},
+            "fields": "gridProperties.frozenRowCount",
         }
-        for col in [9, 10, 11, 12, 13, 14, 15, 16, 18]  # J through Q, plus S (Remaining)
-    ]
+    })
+    # Total row N+4: bold
+    fmt_reqs.append(_fmt(N + 3, N + 4, 0, 27, text_fmt=bold_tf))
+    # Dollar format data + total rows: I(8), J(9), K(10), L(11), M(12), N(13), O(14),
+    #   P(15), Q(16), R(17), S(18), V(21), W(22), X(23), Y(24)
+    for col in [8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 21, 22, 23, 24]:
+        fmt_reqs.append(_fmt(2, N + 5, col, col + 1, num_fmt=dollar_nf))
+    # Percent format U(20)
+    fmt_reqs.append(_fmt(2, N + 5, 20, 21, num_fmt=pct_nf))
 
-    # 4. Format header bold, freeze row, apply dollar formats
-    format_requests = [
-        {
-            "repeatCell": {
-                "range": {"sheetId": sheet_id, "startRowIndex": 0, "endRowIndex": 1},
-                "cell": {"userEnteredFormat": {"textFormat": {"bold": True}}},
-                "fields": "userEnteredFormat.textFormat.bold",
-            }
-        },
-        {
-            "updateSheetProperties": {
-                "properties": {"sheetId": sheet_id, "gridProperties": {"frozenRowCount": 1}},
-                "fields": "gridProperties.frozenRowCount",
-            }
-        },
-        *dollar_requests,
-    ]
-    sheets.batchUpdate(spreadsheetId=COMMISSION_SHEET_ID, body={"requests": format_requests}).execute()
-    logger.info(f"_write_commission_tab: wrote {len(rows)} rows to tab '{tab_name}'")
+    # Fred's Input Validation header / col-header rows
+    v0 = val_header - 1
+    fmt_reqs.append(_fmt(v0, v0 + 1, 0, 5, bg=dark_bg, fg=white_t, text_fmt=bold_tf))
+    fmt_reqs.append(_fmt(v0 + 1, v0 + 2, 0, 5, bg=grey_bg, text_fmt=bold_tf))
 
+    # Rep Summary header and total rows
+    rh0 = rep_hdr - 1
+    fmt_reqs.append(_fmt(rh0, rh0 + 1, 0, 6, bg=dark_bg, fg=white_t, text_fmt=bold_tf))
+    fmt_reqs.append(_fmt(rep_total - 1, rep_total, 0, 6, text_fmt=bold_tf))
+    for col in [1, 2, 3, 5]:
+        fmt_reqs.append(_fmt(rep_data_start - 1, rep_total, col, col + 1, num_fmt=dollar_nf))
+
+    # Job Breakout header, col-header, data, total
+    bh0 = brk_hdr - 1
+    fmt_reqs.append(_fmt(bh0, bh0 + 1, 0, 9, bg=dark_bg, fg=white_t, text_fmt=bold_tf))
+    fmt_reqs.append(_fmt(bh0 + 1, bh0 + 2, 0, 9, bg=grey_bg, text_fmt=bold_tf))
+    for i in range(N):
+        if i % 2 == 1:
+            fmt_reqs.append(_fmt(brk_data_start - 1 + i, brk_data_start + i, 0, 9, bg=alt_bg))
+    fmt_reqs.append(_fmt(brk_last, brk_last + 1, 0, 9, bg=dark_bg, fg=white_t, text_fmt=bold_tf))
+    for col in [3, 5, 7, 8]:
+        fmt_reqs.append(_fmt(brk_data_start - 1, brk_last + 1, col, col + 1, num_fmt=dollar_nf))
+    fmt_reqs.append(_fmt(brk_data_start - 1, brk_last, 1, 2, num_fmt=pct_nf))
+
+    sheets.batchUpdate(
+        spreadsheetId=COMMISSION_SHEET_ID,
+        body={"requests": [r for r in fmt_reqs if r is not None]}
+    ).execute()
+    logger.info(
+        f"_write_commission_tab: {N} rows -> '{tab_name}' "
+        f"(val@{val_header}, reps@{rep_hdr}, breakout@{brk_hdr})"
+    )
 
 def _run_commission_batch(projects: list[dict], tab_name: str) -> dict:
     """Core logic: fetch Aurora data for each project and write to Sheets."""
