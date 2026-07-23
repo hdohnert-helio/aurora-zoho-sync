@@ -8547,8 +8547,8 @@ async def property_lookup(request: Request):
         if not zoho_id:
             return {"error": "zoho_id required"}
 
-        token = _get_zoho_access_token()
-        api_domain = _get_zoho_api_domain(token)
+        token = get_zoho_access_token()
+        api_domain = os.getenv("ZOHO_API_DOMAIN")
         zoho_headers = {"Authorization": f"Zoho-oauthtoken {token}", "Content-Type": "application/json"}
 
         # Fetch the Install record to get the address
