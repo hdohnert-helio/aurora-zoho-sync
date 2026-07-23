@@ -4251,7 +4251,7 @@ async def sync_commissions_to_zoho():
     """
     Scan all Payroll tabs on both sheets, calculate paid/remaining amounts
     per project from Aurora pricing, and write back to Zoho:
-      - Commissions_Paid  → dollar amount paid so far
+      - Commissions_Paid  → percentage paid (80 at install, 100 when fully paid)
       - Commission_Remaining → dollar amount still owed
       - Commissions_Fully_Paid → true when all tranches paid
     """
@@ -4339,10 +4339,16 @@ async def sync_commissions_to_zoho():
                 errors.append({"project_id": pid, "error": "no Zoho record ID"})
                 continue
 
+            if "CASH" in ft or "SE" in ft:
+                pct_paid = 100 if fully_paid else 0
+            else:
+                pct_paid = 100 if fully_paid else (80 if has_80 else 0)
+
             payload = {"data": [{
                 "Commission_Paid_Amount": paid_amt,
                 "Commission_Remaining": remaining,
                 "Commissions_Fully_Paid": fully_paid,
+                "Commissions_Paid": pct_paid,
             }]}
             resp = requests.put(
                 f"{api_domain}/crm/v7/Installs/{zoho_id}",
