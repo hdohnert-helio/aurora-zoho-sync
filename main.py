@@ -3608,16 +3608,32 @@ def _get_commission_data_for_project(aurora_project_id: str) -> dict:
     designs_data = designs_resp.json()
     designs_resp.close()
     designs = designs_data.get("designs", [])
-    def pick_design(designs):
-        for ms in ("permission_to_operate", "installed", "sold"):
-            matches = [d for d in designs if (d.get("milestone") or {}).get("milestone") == ms]
-            if matches:
-                return matches[0]
-        return None
+    def get_base_price_for_design(design_id: str) -> float:
+        r = pull_pricing(design_id)
+        if r.status_code != 200:
+            r.close()
+            return 0.0
+        raw = r.json()
+        r.close()
+        pj = raw.get("pricing") or raw
+        for item in pj.get("system_price_breakdown", []):
+            if item.get("item_type") == "base_price":
+                return float(item.get("item_price") or 0)
+        return 0.0
 
-    chosen = pick_design(designs)
+    chosen = None
+    for ms in ("permission_to_operate", "installed", "sold"):
+        matches = [d for d in designs if (d.get("milestone") or {}).get("milestone") == ms]
+        if not matches:
+            continue
+        candidate = matches[0]
+        bp = get_base_price_for_design(candidate["id"])
+        if bp > 0:
+            chosen = candidate
+            break
+
     if not chosen:
-        return {"error": "no usable design found (tried PTO, installed, sold)"}
+        return {"error": "no usable design found (tried PTO, installed, sold — all had $0 base price)"}
 
     design_id = chosen.get("id")
     pricing_resp = pull_pricing(design_id)
