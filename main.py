@@ -6331,9 +6331,22 @@ def _write_dashboard_expenses(svc) -> int:
 
     rows = []
 
+    # Pre-compute medical premium from Config so we can add it to first-Friday payroll weeks.
+    # "Payroll Health Insurance" is excluded from normal monthly billing and handled here instead.
+    medical_premium = next(
+        (i["amount"] for i in config_items
+         if i["name"].lower() == "payroll health insurance"),
+        0,
+    )
+
     for week_monday in week_dates:
         week_serial = _sheets_serial(week_monday)
         week_days = [week_monday + datetime.timedelta(days=i) for i in range(7)]
+
+        # Determine if the Friday of this week is the first Friday of its calendar month.
+        # Test: Friday - 7 days falls in the prior month → this is the first Friday.
+        friday = week_monday + datetime.timedelta(days=4)
+        is_first_friday_of_month = (friday - datetime.timedelta(days=7)).month != friday.month
 
         for item in config_items:
             name        = item["name"]
@@ -6342,8 +6355,15 @@ def _write_dashboard_expenses(svc) -> int:
             frequency   = item["frequency"]
             billing_day = item["billing_day"]
 
+            # Medical premium is folded into weekly Payroll on first-Friday weeks; skip it here.
+            if name.lower() == "payroll health insurance":
+                continue
+
             if frequency == "weekly":
-                rows.append([week_serial, category, name, amount, "Yes", "Active", "", ""])
+                week_amount = amount
+                if name.lower() == "payroll" and is_first_friday_of_month and medical_premium:
+                    week_amount = amount + medical_premium
+                rows.append([week_serial, category, name, week_amount, "Yes", "Active", "", ""])
             elif frequency == "monthly" and billing_day:
                 for d in week_days:
                     max_day = _cal.monthrange(d.year, d.month)[1]
