@@ -7237,6 +7237,9 @@ async def cashflow_apply_overrides():
 
         formula_result = _update_cashflow_formulas(svc, tab_name)
 
+        # Refresh Expenses tab commission/project rows so overridden amounts are reflected
+        _write_dashboard_project_expenses(svc, event_rows)
+
         return {
             "status": "ok",
             "tab": tab_name,
