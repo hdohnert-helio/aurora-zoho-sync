@@ -2607,13 +2607,13 @@ def _upsert_overrides_materials(proj_id: str, customer: str, materials_actual: f
 
     data = sheets.values().get(
         spreadsheetId=CASHFLOW_SHEET_ID,
-        range=f"'{CASHFLOW_OVERRIDES_TAB}'!A2:J200",
+        range=f"'{CASHFLOW_OVERRIDES_TAB}'!A2:L200",
         valueRenderOption="FORMATTED_VALUE",
     ).execute().get("values", [])
 
     for i, row in enumerate(data):
         if row and str(row[0]).strip() == proj_id:
-            # Update col J on existing row
+            # Update col J on existing row (preserve K and L)
             sheets.values().update(
                 spreadsheetId=CASHFLOW_SHEET_ID,
                 range=f"'{CASHFLOW_OVERRIDES_TAB}'!J{i + 2}",
@@ -2623,13 +2623,13 @@ def _upsert_overrides_materials(proj_id: str, customer: str, materials_actual: f
             logger.info(f"_upsert_overrides_materials: updated row {i+2} for {proj_id} → {materials_actual}")
             return
 
-    # Not found — append new row
+    # Not found — append new row (cols A:L, K and L blank)
     next_row = len(data) + 2
     sheets.values().update(
         spreadsheetId=CASHFLOW_SHEET_ID,
-        range=f"'{CASHFLOW_OVERRIDES_TAB}'!A{next_row}:J{next_row}",
+        range=f"'{CASHFLOW_OVERRIDES_TAB}'!A{next_row}:L{next_row}",
         valueInputOption="USER_ENTERED",
-        body={"values": [[proj_id, customer, "", "", "", "Auto-updated by LightReach directPayEvent", "", "", "", materials_actual]]},
+        body={"values": [[proj_id, customer, "", "", "", "Auto-updated by LightReach directPayEvent", "", "", "", materials_actual, "", ""]]},
     ).execute()
     logger.info(f"_upsert_overrides_materials: appended row {next_row} for {proj_id} → {materials_actual}")
 
@@ -5242,8 +5242,8 @@ def _ensure_overrides_tab(svc) -> None:
         range=f"'{CASHFLOW_OVERRIDES_TAB}'!A1",
         valueInputOption="USER_ENTERED",
         body={"values": [
-            ["Project ID", "Customer", "Payment 1 Date", "Payment 2 Date", "Payment 3 Date", "Notes", "Payment 1 Amt", "Payment 2 Amt", "Payment 3 Amt", "Materials Actual"],
-            ["# Example: PROJ-1234", "", "2026-08-01", "", "", "LR draw delayed — paid week of 8/1", "", "", "", ""],
+            ["Project ID", "Customer", "Payment 1 Date", "Payment 2 Date", "Payment 3 Date", "Notes", "Payment 1 Amt", "Payment 2 Amt", "Payment 3 Amt", "Materials Actual", "Comm Payout 1 Amt", "Comm Payout 2 Amt"],
+            ["# Example: PROJ-1234", "", "2026-08-01", "", "", "LR draw delayed — paid week of 8/1", "", "", "", "", "", ""],
         ]},
     ).execute()
 
@@ -5277,13 +5277,14 @@ def _read_payment_overrides(svc) -> dict:
       {project_id: {"payment1": "YYYY-MM-DD", "payment2": "YYYY-MM-DD", "payment3": "YYYY-MM-DD"}}
     Only populated keys are included. Rows starting with '#' are skipped.
     Columns: A=Project ID, B=Customer (ignored), C=Payment 1, D=Payment 2, E=Payment 3, F=Notes,
-             G=Payment 1 Amt, H=Payment 2 Amt, I=Payment 3 Amt, J=Materials Actual
+             G=Payment 1 Amt, H=Payment 2 Amt, I=Payment 3 Amt, J=Materials Actual,
+             K=Comm Payout 1 Amt, L=Comm Payout 2 Amt
     """
     sheets = svc.spreadsheets()
     try:
         data = sheets.values().get(
             spreadsheetId=CASHFLOW_SHEET_ID,
-            range=f"'{CASHFLOW_OVERRIDES_TAB}'!A2:J200",
+            range=f"'{CASHFLOW_OVERRIDES_TAB}'!A2:L200",
             valueRenderOption="FORMATTED_VALUE",
         ).execute().get("values", [])
     except Exception:
@@ -5304,6 +5305,12 @@ def _read_payment_overrides(svc) -> dict:
         except (ValueError, AttributeError):
             return None
 
+    def parse_amt(s):
+        try:
+            return float(str(s or "").replace("$", "").replace(",", "").strip())
+        except (ValueError, AttributeError):
+            return None
+
     overrides = {}
     for row in data:
         if not row:
@@ -5318,11 +5325,6 @@ def _read_payment_overrides(svc) -> dict:
             entry["payment2"] = valid_date(row[3])
         if len(row) > 4 and valid_date(row[4]):
             entry["payment3"] = valid_date(row[4])
-        def parse_amt(s):
-            try:
-                return float(str(s or "").replace("$", "").replace(",", "").strip())
-            except (ValueError, AttributeError):
-                return None
         if len(row) > 6 and parse_amt(row[6]) is not None:
             entry["amount1"] = parse_amt(row[6])
         if len(row) > 7 and parse_amt(row[7]) is not None:
@@ -5331,6 +5333,10 @@ def _read_payment_overrides(svc) -> dict:
             entry["amount3"] = parse_amt(row[8])
         if len(row) > 9 and parse_amt(row[9]) is not None:
             entry["materials"] = parse_amt(row[9])
+        if len(row) > 10 and parse_amt(row[10]) is not None:
+            entry["comm_payout1"] = parse_amt(row[10])
+        if len(row) > 11 and parse_amt(row[11]) is not None:
+            entry["comm_payout2"] = parse_amt(row[11])
         if entry:
             overrides[proj_id] = entry
             logger.info(f"_read_payment_overrides: {proj_id} → {entry}")
@@ -7051,6 +7057,13 @@ def _apply_overrides_to_pipeline_tab(svc, tab_name: str, overrides: dict) -> dic
             amt_key = key.replace("payment", "amount")
             if pov.get(amt_key) is not None:
                 updates.append({"range": f"'{tab_name}'!{amt_col}{row_num}", "values": [[pov[amt_key]]]})
+
+        # Commission payout amount overrides (cols U and W)
+        # Pipeline tab: T=Comm Payout 1 Date, U=Comm Payout 1 Amt, V=Comm Payout 2 Date, W=Comm Payout 2 Amt
+        if pov.get("comm_payout1") is not None:
+            updates.append({"range": f"'{tab_name}'!U{row_num}", "values": [[pov["comm_payout1"]]]})
+        if pov.get("comm_payout2") is not None:
+            updates.append({"range": f"'{tab_name}'!W{row_num}", "values": [[pov["comm_payout2"]]]})
 
         # Materials override — recalculate LR draw amount
         if pov.get("materials") is not None and contract_price and finance_type == "LR":
