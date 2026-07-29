@@ -4885,8 +4885,6 @@ def _fetch_all_cashflow_projects(cutoff_date: str = "2026-01-01") -> list[dict]:
             is_pipeline = stage in CASHFLOW_PIPELINE_STAGES
             if not is_installed and not is_pipeline:
                 continue
-            if stage == "Project Closeout":
-                continue
             lending_status = (r.get("Lending_Status") or "").strip()
             # Skip fully paid projects — all payments received, nothing pending
             if lending_status in CASHFLOW_FULLY_PAID_STATUSES:
