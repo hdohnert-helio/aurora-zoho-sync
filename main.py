@@ -5065,10 +5065,8 @@ def _write_cashflow_tab(svc, tab_name: str, rows: list[dict]) -> None:
             except (ValueError, TypeError):
                 pass
 
-            # 80% draw already received — clear Payment 1 and Comm Payout 1
-            if lending_status in CASHFLOW_LR_DRAW_PAID_STATUSES:
-                payment1_date = payment1_amt = ""
-                comm_payout1_date = comm_payout1_amt = ""
+            # M1 already received — keep date/amount so it stays visible in the
+            # correct week as received revenue rather than disappearing entirely.
 
         elif finance_type == "CASH" and effective_sc_str:
             try:
@@ -5634,9 +5632,8 @@ def _compute_cashflow_row(row: dict, today: datetime.date, zoho_base: str, auror
             comm_payout1_amt = round(total_commission * 0.8 + referral_flat, 2)
             comm_payout2_date = payment2_date
             comm_payout2_amt = round(total_commission * 0.2, 2)
-            if lending_status in CASHFLOW_LR_DRAW_PAID_STATUSES:
-                payment1_date = payment1_amt = ""
-                comm_payout1_date = comm_payout1_amt = ""
+            # M1 already received — keep date/amount so it stays visible in the
+            # correct week as received revenue rather than disappearing entirely.
         except (ValueError, TypeError):
             pass
 
