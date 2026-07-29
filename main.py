@@ -4841,17 +4841,21 @@ def _payroll_friday_label() -> str:
     return f"{friday.month}/{friday.day}"
 
 
-def _fetch_all_cashflow_projects(cutoff_date: str = "2026-01-01") -> list[dict]:
+def _fetch_all_cashflow_projects(cutoff_date: str = "2026-01-01", override_proj_ids: set = None) -> list[dict]:
     """
     Pull all Zoho Installs for cash flow pipeline. Filters to projects that
     are installed (have Substantial_Completion OR are in an installed stage),
     created on or after cutoff_date.
+    override_proj_ids: project IDs from the Overrides tab — these are always
+    included even if their stage would normally be skipped (e.g. Project Closeout).
     """
     token = get_zoho_access_token()
     if not token:
         return []
     api_domain = os.getenv("ZOHO_API_DOMAIN")
     headers = {"Authorization": f"Zoho-oauthtoken {token}"}
+    if override_proj_ids is None:
+        override_proj_ids = set()
 
     fields = (
         "Name,Project_ID,Aurora_Project_ID,Sales_Representative,Owner,"
@@ -4880,10 +4884,15 @@ def _fetch_all_cashflow_projects(cutoff_date: str = "2026-01-01") -> list[dict]:
             if not aurora_id:
                 continue
             stage = (r.get("Project_Stage") or "").strip()
+            proj_id = (r.get("Project_ID") or "").strip()
             substantial_completion = (r.get("Substantial_Completion") or "").strip()
             is_installed = bool(substantial_completion) or stage in CASHFLOW_INSTALLED_STAGES
             is_pipeline = stage in CASHFLOW_PIPELINE_STAGES
-            if not is_installed and not is_pipeline:
+            in_overrides = proj_id in override_proj_ids
+            # Project Closeout: skip unless explicitly listed in Overrides tab
+            if stage == "Project Closeout" and not in_overrides:
+                continue
+            if not is_installed and not is_pipeline and not in_overrides:
                 continue
             lending_status = (r.get("Lending_Status") or "").strip()
             # Skip fully paid projects — all payments received, nothing pending
@@ -6937,7 +6946,9 @@ async def cashflow_run(request: Request):
     cutoff = (body.get("cutoff_date") or "2025-06-01") if isinstance(body, dict) else "2025-06-01"
     now_label = datetime.datetime.now(datetime.timezone.utc).strftime("%-m-%-d-%Y")
     tab_name = f"Pipeline {now_label}"
-    projects = _fetch_all_cashflow_projects(cutoff_date=cutoff)
+    svc = _build_sheets_service()
+    override_ids = set(_read_payment_overrides(svc).keys()) if svc else set()
+    projects = _fetch_all_cashflow_projects(cutoff_date=cutoff, override_proj_ids=override_ids)
     if not projects:
         return {"status": "no installed projects found", "cutoff_date": cutoff}
     try:
