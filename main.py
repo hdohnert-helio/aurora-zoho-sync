@@ -7379,6 +7379,8 @@ async def dashboard_apply_overrides():
 
         weekly_events.sort(key=lambda r: r[1] if r[1] else "9999")
         _write_dashboard_revenue_tab(svc, weekly_events)
+        _write_weekly_payments_from_events(svc, weekly_events)
+        _write_dashboard_project_expenses(svc, weekly_events)
 
         return {"status": "ok", "overrides_applied": len(overrides), "revenue_rows": len(weekly_events)}
 
