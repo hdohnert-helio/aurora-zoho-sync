@@ -7065,8 +7065,8 @@ def _apply_overrides_to_pipeline_tab(svc, tab_name: str, overrides: dict) -> dic
         if pov.get("comm_payout2") is not None:
             updates.append({"range": f"'{tab_name}'!W{row_num}", "values": [[pov["comm_payout2"]]]})
 
-        # Materials override — recalculate LR draw amount
-        if pov.get("materials") is not None and contract_price and finance_type == "LR":
+        # Materials override — recalculate LR draw amount only when no explicit Payment 1 Amt override
+        if pov.get("materials") is not None and pov.get("amount1") is None and contract_price and finance_type == "LR":
             mat = pov["materials"]
             new_draw = round(contract_price * 0.8 - mat, 2)
             updates.append({"range": f"'{tab_name}'!J{row_num}", "values": [[new_draw]]})
