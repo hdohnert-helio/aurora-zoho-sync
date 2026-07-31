@@ -3546,8 +3546,8 @@ def _fetch_all_commission_projects(cutoff_date: str = "2026-01-01") -> list[dict
             if not aurora_id:
                 continue
             stage = (r.get("Project_Stage") or "").strip()
-            # Skip cancelled/on-hold — fully paid projects are kept and routed to Paid tab
-            if stage.lower() in ("cancelled", "canceled", "on hold", "lost"):
+            # Skip cancelled/lost — on-hold projects are kept and routed to On Hold tab
+            if stage.lower() in ("cancelled", "canceled", "lost"):
                 continue
             owner_obj = r.get("Owner")
             owner_name = (owner_obj.get("name") or "").strip() if isinstance(owner_obj, dict) else ""
@@ -4688,14 +4688,16 @@ async def update_pipeline():
             proj_id = r[PROJ_ID_COL] if len(r) > PROJ_ID_COL else ""
             if proj_id and not r[STATUS_COL] and proj_id in main_existing_statuses:
                 r[STATUS_COL] = main_existing_statuses[proj_id]
-        # Split: active vs fully paid
-        main_active = [r for r in main_all_rows if r[STATUS_COL] != "Commission Paid ✓"]
+        # Split: active vs fully paid vs on-hold
+        main_on_hold = [r for r in main_all_rows if (r[4] if len(r) > 4 else "").lower() == "on hold"]
+        main_active = [r for r in main_all_rows if r[STATUS_COL] != "Commission Paid ✓" and (r[4] if len(r) > 4 else "").lower() != "on hold"]
         main_paid_rows = [r for r in main_all_rows if r[STATUS_COL] == "Commission Paid ✓"]
         del main_all_rows
         _write_pipeline_tab(svc, COMMISSION_SHEET_ID, main_active, "Pipeline")
         _write_pipeline_tab(svc, COMMISSION_SHEET_ID, main_paid_rows, "Paid")
+        _write_pipeline_tab(svc, COMMISSION_SHEET_ID, main_on_hold, "On Hold")
         main_count = len(main_active)
-        del main_active, main_paid_rows
+        del main_active, main_paid_rows, main_on_hold
         gc.collect()
 
         # ── Doug's sheet: same pattern ──
@@ -4713,13 +4715,15 @@ async def update_pipeline():
             proj_id = r[PROJ_ID_COL] if len(r) > PROJ_ID_COL else ""
             if proj_id and not r[STATUS_COL] and proj_id in doug_existing_statuses:
                 r[STATUS_COL] = doug_existing_statuses[proj_id]
-        doug_active = [r for r in doug_all_rows if r[STATUS_COL] != "Commission Paid ✓"]
+        doug_on_hold = [r for r in doug_all_rows if (r[4] if len(r) > 4 else "").lower() == "on hold"]
+        doug_active = [r for r in doug_all_rows if r[STATUS_COL] != "Commission Paid ✓" and (r[4] if len(r) > 4 else "").lower() != "on hold"]
         doug_paid_rows = [r for r in doug_all_rows if r[STATUS_COL] == "Commission Paid ✓"]
         del doug_all_rows
         _write_pipeline_tab(svc, DOUG_SHEET_ID, doug_active, "Pipeline")
         _write_pipeline_tab(svc, DOUG_SHEET_ID, doug_paid_rows, "Paid")
+        _write_pipeline_tab(svc, DOUG_SHEET_ID, doug_on_hold, "On Hold")
         doug_count = len(doug_active)
-        del doug_active, doug_paid_rows
+        del doug_active, doug_paid_rows, doug_on_hold
         gc.collect()
 
         # Sync paid amounts back to Zoho automatically
