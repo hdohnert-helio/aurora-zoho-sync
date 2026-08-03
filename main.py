@@ -7955,10 +7955,11 @@ async def dashboard_create(request: Request):
 
         # ---- Inputs tab ---------------------------------------------------
         value_data.append({
-            "range": "Inputs!A1:B4",
+            "range": "Inputs!A1:B5",
             "values": [
                 ["Label", "Value"],
                 ["Today's Balance", 0],
+                ["Balance Date", str(today)],
                 ["Minimum Safe Balance", 50000],
                 ["Last Updated", str(today)],
             ],
@@ -8233,11 +8234,13 @@ async def dashboard_create(request: Request):
             # Net / Opening / Closing
             formulas[31] = f'={col_letter}17-{col_letter}30'
 
+            # Opening balance: apply Inputs balance to the week containing the balance date;
+            # earlier weeks show 0, later weeks cascade from the previous closing balance.
             if col_idx == 0:
-                formulas[33] = "=Inputs!$B$2"
+                formulas[33] = f'=IF(AND(B$2<=Inputs!$B$3,Inputs!$B$3<B$2+7),Inputs!$B$2,0)'
             else:
                 prev_col = _col_letter(col_idx)
-                formulas[33] = f"={prev_col}34"
+                formulas[33] = f'=IF(AND({col_letter}$2<=Inputs!$B$3,Inputs!$B$3<{col_letter}$2+7),Inputs!$B$2,{prev_col}34)'
 
             formulas[34] = f'={col_letter}33+{col_letter}31'
 
