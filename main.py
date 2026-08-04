@@ -4897,12 +4897,14 @@ def _fetch_all_cashflow_projects(cutoff_date: str = "2026-01-01", override_proj_
             is_installed = bool(substantial_completion) or stage in CASHFLOW_INSTALLED_STAGES
             is_pipeline = stage in CASHFLOW_PIPELINE_STAGES
             in_overrides = proj_id in override_proj_ids
-            # Project Closeout: skip unless explicitly listed in Overrides tab
-            if stage == "Project Closeout" and not in_overrides:
-                continue
-            if not is_installed and not is_pipeline and not in_overrides:
-                continue
             lending_status = (r.get("Lending_Status") or "").strip()
+            # Activation-paid LR projects still have a DC holdback pending — keep them
+            has_pending_holdback = lending_status in CASHFLOW_LR_ACTIVATION_PAID_STATUSES
+            # Project Closeout: skip unless in Overrides tab or has a pending holdback
+            if stage == "Project Closeout" and not in_overrides and not has_pending_holdback:
+                continue
+            if not is_installed and not is_pipeline and not in_overrides and not has_pending_holdback:
+                continue
             # Skip fully paid projects — all payments received, nothing pending
             if lending_status in CASHFLOW_FULLY_PAID_STATUSES:
                 continue
