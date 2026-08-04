@@ -4777,7 +4777,6 @@ CASHFLOW_CT_GREEN_PPW = 0.25  # $0.25/W cost owed to CT Green Estates at final p
 
 # Lending statuses that indicate all payments have been received — exclude from cash flow
 CASHFLOW_FULLY_PAID_STATUSES = {
-    "LR - Activation Package Paid",
     "Cash - paid in full",
     "CF - Phase 2 Funded",
     "SG - PTO Package Paid",
@@ -4789,6 +4788,11 @@ CASHFLOW_LR_DRAW_PAID_STATUSES = {
     "LR - Install Package Paid",
     "LR - Activation Package Submitted",
     "Cash - 20PCT deposit paid",
+}
+
+# LR status where both M1 and M2 are received — show only DC holdback
+CASHFLOW_LR_ACTIVATION_PAID_STATUSES = {
+    "LR - Activation Package Paid",
 }
 
 CASHFLOW_CASH_PROGRESS_PAID_STATUSES = {
@@ -5107,10 +5111,16 @@ def _write_cashflow_tab(svc, tab_name: str, rows: list[dict]) -> None:
                 comm_payout3_amt = round(total_commission * 0.2 + referral_flat, 2)
             except (ValueError, TypeError):
                 pass
-            # 20% deposit already collected — clear Payment 1
+            # M1 already received — clear Payment 1
             if lending_status in CASHFLOW_LR_DRAW_PAID_STATUSES:
                 payment1_date = payment1_amt = ""
                 comm_payout1_date = comm_payout1_amt = ""
+            # M1 + M2 both received — clear both, show only DC holdback
+            if lending_status in CASHFLOW_LR_ACTIVATION_PAID_STATUSES:
+                payment1_date = payment1_amt = ""
+                comm_payout1_date = comm_payout1_amt = ""
+                payment2_date = payment2_amt = ""
+                comm_payout2_date = comm_payout2_amt = ""
             # 60% progress already collected — clear Payment 1 and Payment 2
             if lending_status in CASHFLOW_CASH_PROGRESS_PAID_STATUSES:
                 payment1_date = payment1_amt = ""
@@ -5673,10 +5683,16 @@ def _compute_cashflow_row(row: dict, today: datetime.date, zoho_base: str, auror
             comm_payout2_amt = round(total_commission * 0.6, 2)
             comm_payout3_date = payment3_date
             comm_payout3_amt = round(total_commission * 0.2 + referral_flat, 2)
-            # 20% deposit already collected — clear Payment 1
+            # M1 already received — clear Payment 1
             if lending_status in CASHFLOW_LR_DRAW_PAID_STATUSES:
                 payment1_date = payment1_amt = ""
                 comm_payout1_date = comm_payout1_amt = ""
+            # M1 + M2 both received — clear both, show only DC holdback
+            if lending_status in CASHFLOW_LR_ACTIVATION_PAID_STATUSES:
+                payment1_date = payment1_amt = ""
+                comm_payout1_date = comm_payout1_amt = ""
+                payment2_date = payment2_amt = ""
+                comm_payout2_date = comm_payout2_amt = ""
             # 60% progress already collected — clear Payment 1 and Payment 2
             if lending_status in CASHFLOW_CASH_PROGRESS_PAID_STATUSES:
                 payment1_date = payment1_amt = ""
