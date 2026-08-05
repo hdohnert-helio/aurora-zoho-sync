@@ -8008,18 +8008,39 @@ async def dashboard_create(request: Request):
         value_data = []
 
         # ---- Inputs tab ---------------------------------------------------
+        # Preserve existing user values (balance, balance date) — only use
+        # defaults for cells that are genuinely empty.
+        existing_inputs = service.spreadsheets().values().get(
+            spreadsheetId=ss_id,
+            range="Inputs!B2:B5",
+            valueRenderOption="UNFORMATTED_VALUE",
+        ).execute().get("values", [])
+        def _inp(row_idx, default):
+            try:
+                v = existing_inputs[row_idx][0]
+                return v if v not in (None, "", 0, "0") else default
+            except (IndexError, TypeError):
+                return default
         value_data.append({
             "range": "Inputs!A1:B5",
             "values": [
                 ["Label", "Value"],
-                ["Today's Balance", 0],
-                ["Balance Date", str(today)],
-                ["Minimum Safe Balance", 50000],
-                ["Last Updated", str(today)],
+                ["Today's Balance", _inp(0, 0)],
+                ["Balance Date",    _inp(1, str(today))],
+                ["Minimum Safe Balance", _inp(2, 50000)],
+                ["Last Updated",    str(today)],
             ],
         })
 
         # ---- Config tab -------------------------------------------------------
+        # Only write defaults if the Config tab is empty — never overwrite user data.
+        existing_config = service.spreadsheets().values().get(
+            spreadsheetId=ss_id,
+            range="Config!A2:A3",
+            valueRenderOption="FORMATTED_VALUE",
+        ).execute().get("values", [])
+        config_has_data = bool(existing_config and existing_config[0] and existing_config[0][0])
+
         config_headers = ["Name", "Category", "Amount", "Frequency", "Billing Day", "Status"]
         config_rows = [
             config_headers,
@@ -8073,7 +8094,11 @@ async def dashboard_create(request: Request):
             ["Ford Escape 2019",       "Fleet",               507.59, "Monthly", 10,  "Active"],
             ["Forklift",               "Fleet",               901.00, "Monthly", 30,  "Active"],
         ]
-        value_data.append({"range": "Config!A1", "values": config_rows})
+        if config_has_data:
+            # Tab already has user data — only ensure headers are correct
+            value_data.append({"range": "Config!A1:F1", "values": [config_headers]})
+        else:
+            value_data.append({"range": "Config!A1", "values": config_rows})
 
         # ---- Expenses tab — pre-populate from existing Cash Flow sheet -------
         exp_headers = ["Week", "Category", "Description", "Amount",
