@@ -2607,7 +2607,7 @@ def _upsert_overrides_materials(proj_id: str, customer: str, materials_actual: f
 
     data = sheets.values().get(
         spreadsheetId=CASHFLOW_SHEET_ID,
-        range=f"'{CASHFLOW_OVERRIDES_TAB}'!A2:L200",
+        range=f"'{CASHFLOW_OVERRIDES_TAB}'!A2:N200",
         valueRenderOption="FORMATTED_VALUE",
     ).execute().get("values", [])
 
@@ -5246,13 +5246,36 @@ CASHFLOW_WEEKLY_TAB = "Weekly Payments"
 CASHFLOW_OVERRIDES_TAB = "Overrides"
 
 
+OVERRIDES_HEADERS = [
+    "Project ID", "Customer", "Payment 1 Date", "Payment 2 Date", "Payment 3 Date",
+    "Notes", "Payment 1 Amt", "Payment 2 Amt", "Payment 3 Amt", "Materials Actual",
+    "Comm Payout 1 Amt", "Comm Payout 2 Amt", "Holdback Date", "Holdback Amt",
+]
+
 def _ensure_overrides_tab(svc) -> None:
-    """Create the Overrides tab with headers if it doesn't already exist."""
+    """Create the Overrides tab with headers if it doesn't already exist.
+    If it already exists, patch any missing header columns without touching data."""
     sheets = svc.spreadsheets()
     existing = sheets.get(spreadsheetId=CASHFLOW_SHEET_ID).execute()
     for s in existing.get("sheets", []):
         if s["properties"]["title"] == CASHFLOW_OVERRIDES_TAB:
-            return  # already exists
+            # Tab exists — patch any missing headers (e.g. new columns added to code)
+            try:
+                result = sheets.values().get(
+                    spreadsheetId=CASHFLOW_SHEET_ID,
+                    range=f"'{CASHFLOW_OVERRIDES_TAB}'!1:1",
+                ).execute()
+                existing_headers = (result.get("values") or [[]])[0]
+                if existing_headers != OVERRIDES_HEADERS:
+                    sheets.values().update(
+                        spreadsheetId=CASHFLOW_SHEET_ID,
+                        range=f"'{CASHFLOW_OVERRIDES_TAB}'!A1",
+                        valueInputOption="USER_ENTERED",
+                        body={"values": [OVERRIDES_HEADERS]},
+                    ).execute()
+            except Exception:
+                pass
+            return
 
     resp = sheets.batchUpdate(
         spreadsheetId=CASHFLOW_SHEET_ID,
@@ -5265,8 +5288,8 @@ def _ensure_overrides_tab(svc) -> None:
         range=f"'{CASHFLOW_OVERRIDES_TAB}'!A1",
         valueInputOption="USER_ENTERED",
         body={"values": [
-            ["Project ID", "Customer", "Payment 1 Date", "Payment 2 Date", "Payment 3 Date", "Notes", "Payment 1 Amt", "Payment 2 Amt", "Payment 3 Amt", "Materials Actual", "Comm Payout 1 Amt", "Comm Payout 2 Amt"],
-            ["# Example: PROJ-1234", "", "2026-08-01", "", "", "LR draw delayed — paid week of 8/1", "", "", "", "", "", ""],
+            OVERRIDES_HEADERS,
+            ["# Example: PROJ-1234", "", "2026-08-01", "", "", "LR draw delayed — paid week of 8/1", "", "", "", "", "", "", "", ""],
         ]},
     ).execute()
 
@@ -5307,7 +5330,7 @@ def _read_payment_overrides(svc) -> dict:
     try:
         data = sheets.values().get(
             spreadsheetId=CASHFLOW_SHEET_ID,
-            range=f"'{CASHFLOW_OVERRIDES_TAB}'!A2:L200",
+            range=f"'{CASHFLOW_OVERRIDES_TAB}'!A2:N200",
             valueRenderOption="FORMATTED_VALUE",
         ).execute().get("values", [])
     except Exception:
@@ -5360,6 +5383,10 @@ def _read_payment_overrides(svc) -> dict:
             entry["comm_payout1"] = parse_amt(row[10])
         if len(row) > 11 and parse_amt(row[11]) is not None:
             entry["comm_payout2"] = parse_amt(row[11])
+        if len(row) > 12 and valid_date(row[12]):
+            entry["holdback_date"] = valid_date(row[12])
+        if len(row) > 13 and parse_amt(row[13]) is not None:
+            entry["holdback_amt"] = parse_amt(row[13])
         if entry:
             overrides[proj_id] = entry
             logger.info(f"_read_payment_overrides: {proj_id} → {entry}")
@@ -5842,13 +5869,22 @@ def _compute_cashflow_row(row: dict, today: datetime.date, zoho_base: str, auror
         pay_events.append([cash_materials_date, customer, finance_type, "Cash Materials", cash_materials_amt,
                            "", "", stage, sc_display, project_id, zoho_link])
 
-    # LR DC Holdback: 25 days after final payment, only if not yet fully paid
-    if finance_type == "LR" and system_watts and lending_status not in CASHFLOW_FULLY_PAID_STATUSES and payment2_date:
+    # LR DC Holdback: 25 days after M2, only if not yet fully paid.
+    # For activation-paid projects payment2_date is cleared; derive from SC instead.
+    if finance_type == "LR" and system_watts and lending_status not in CASHFLOW_FULLY_PAID_STATUSES:
         try:
-            holdback_date = (datetime.date.fromisoformat(payment2_date) + datetime.timedelta(days=25)).isoformat()
-            holdback_amt = round(system_watts * _lr_holdback_ppw(created_date_str), 2)
-            pay_events.append([holdback_date, customer, finance_type, "LR DC Holdback", holdback_amt,
-                               "", "", stage, sc_display, project_id, zoho_link])
+            _hb_base = payment2_date or (
+                _next_monday_on_or_after(
+                    datetime.date.fromisoformat(effective_sc_str) + datetime.timedelta(days=33)
+                ).isoformat() if effective_sc_str else None
+            )
+            if _hb_base:
+                holdback_date = pov.get("holdback_date") or (
+                    datetime.date.fromisoformat(_hb_base) + datetime.timedelta(days=25)
+                ).isoformat()
+                holdback_amt = pov.get("holdback_amt") or round(system_watts * _lr_holdback_ppw(created_date_str), 2)
+                pay_events.append([holdback_date, customer, finance_type, "LR DC Holdback", holdback_amt,
+                                   "", "", stage, sc_display, project_id, zoho_link])
         except (ValueError, TypeError):
             pass
 
