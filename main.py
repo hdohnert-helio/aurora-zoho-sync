@@ -7427,20 +7427,26 @@ async def dashboard_apply_overrides():
                     pay_amt, comm_date, comm_amt, stage, sc_display, proj_id, zoho_link,
                 ])
 
-            # LR DC Holdback: $0.25/W, 25 days after payment2
+            # LR DC Holdback: 25 days after payment2, respecting Overrides tab
             pay2_date = cell(row, "pay2_date")
-            if ft == "LR" and pay2_date:
+            pov = overrides.get(proj_id, {})
+            if ft == "LR" and (pay2_date or pov.get("holdback_date") or pov.get("holdback_amt")):
                 try:
                     kw_raw = cell(row, "kw")
                     system_watts = round(float(str(kw_raw).replace(",", "")) * 1000) if kw_raw else 0
-                    if system_watts:
-                        holdback_date = (datetime.date.fromisoformat(pay2_date) + datetime.timedelta(days=25)).isoformat()
+                    if system_watts or pov.get("holdback_amt"):
+                        _hb_base = pay2_date
+                        holdback_date = pov.get("holdback_date") or (
+                            (datetime.date.fromisoformat(_hb_base) + datetime.timedelta(days=25)).isoformat()
+                            if _hb_base else None
+                        )
                         created_date_str = cell(row, "created_date")
-                        holdback_amt = round(system_watts * _lr_holdback_ppw(created_date_str), 2)
-                        weekly_events.append([
-                            week_of(holdback_date), holdback_date, customer, ft, "LR DC Holdback",
-                            holdback_amt, "", "", stage, sc_display, proj_id, zoho_link,
-                        ])
+                        holdback_amt = pov.get("holdback_amt") or round(system_watts * _lr_holdback_ppw(created_date_str), 2)
+                        if holdback_date and holdback_amt:
+                            weekly_events.append([
+                                week_of(holdback_date), holdback_date, customer, ft, "LR DC Holdback",
+                                holdback_amt, "", "", stage, sc_display, proj_id, zoho_link,
+                            ])
                 except (ValueError, TypeError):
                     pass
 
