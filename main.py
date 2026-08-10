@@ -7210,6 +7210,10 @@ async def cashflow_apply_overrides():
             "comm3_date":   col("Comm Payout 3 Date"),
             "comm3_amt":    col("Comm Payout 3 Amt"),
             "zoho_link":    col("Zoho Link"),
+            "ct_green_date":       col("CT Green Date"),
+            "ct_green_amt":        col("CT Green Amt"),
+            "cash_mat_date":       col("Cash Materials Date"),
+            "cash_mat_amt":        col("Cash Materials Amt"),
         }
 
         def cell(row, key):
@@ -7271,6 +7275,32 @@ async def cashflow_apply_overrides():
                 event_rows.append([
                     week_of(pay_date), pay_date, customer, ft, pay_type,
                     pay_amt, comm_date, comm_amt, stage, sc_display, proj_id, zoho_link,
+                ])
+
+            # CT Green Estates cost
+            ct_green_date = cell(row, "ct_green_date")
+            ct_green_amt_raw = cell(row, "ct_green_amt")
+            if ct_green_date and ct_green_amt_raw:
+                try:
+                    ct_green_amt = float(str(ct_green_amt_raw).replace("$", "").replace(",", ""))
+                except ValueError:
+                    ct_green_amt = ct_green_amt_raw
+                event_rows.append([
+                    week_of(ct_green_date), ct_green_date, customer, ft, "CT Green Estates",
+                    ct_green_amt, "", "", stage, sc_display, proj_id, zoho_link,
+                ])
+
+            # Cash/SE Materials cost
+            cash_mat_date = cell(row, "cash_mat_date")
+            cash_mat_amt_raw = cell(row, "cash_mat_amt")
+            if cash_mat_date and cash_mat_amt_raw:
+                try:
+                    cash_mat_amt = float(str(cash_mat_amt_raw).replace("$", "").replace(",", ""))
+                except ValueError:
+                    cash_mat_amt = cash_mat_amt_raw
+                event_rows.append([
+                    week_of(cash_mat_date), cash_mat_date, customer, ft, "Cash Materials",
+                    cash_mat_amt, "", "", stage, sc_display, proj_id, zoho_link,
                 ])
 
         event_rows.sort(key=lambda r: r[1] if r[1] else "9999")
