@@ -4781,7 +4781,7 @@ CASHFLOW_FULLY_PAID_STATUSES = {
     "CF - Phase 2 Funded",
     "SG - PTO Package Paid",
     "SE- Final 1/3 Payment Funded",
-    "LR - DC Holdback Paid",
+    "LR - Fully Paid",
 }
 
 # LR statuses where the 80% draw has already been received — show only 20% final
