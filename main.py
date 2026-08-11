@@ -7174,7 +7174,7 @@ async def cashflow_apply_overrides():
         sheets = svc.spreadsheets()
         raw = sheets.values().get(
             spreadsheetId=CASHFLOW_SHEET_ID,
-            range=f"'{tab_name}'!A1:AA200",
+            range=f"'{tab_name}'!A1:AG200",
             valueRenderOption="FORMATTED_VALUE",
         ).execute().get("values", [])
 
