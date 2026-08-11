@@ -5104,13 +5104,11 @@ def _write_cashflow_tab(svc, tab_name: str, rows: list[dict]) -> None:
                 payment2_amt = round(contract_price * 0.6, 2)
                 payment3_date = final_received.isoformat()
                 payment3_amt = round(contract_price * 0.2, 2)
-                # Commissions proportional; referral at final payment
-                comm_payout1_date = deposit_received.isoformat()
-                comm_payout1_amt = round(total_commission * 0.2, 2)
-                comm_payout2_date = progress_received.isoformat()
-                comm_payout2_amt = round(total_commission * 0.6, 2)
+                # Commission paid once in full at final payment (100% collected)
+                comm_payout1_date = comm_payout1_amt = ""
+                comm_payout2_date = comm_payout2_amt = ""
                 comm_payout3_date = final_received.isoformat()
-                comm_payout3_amt = round(total_commission * 0.2 + referral_flat, 2)
+                comm_payout3_amt = round(total_commission + referral_flat, 2)
             except (ValueError, TypeError):
                 pass
             # M1 already received — clear Payment 1
@@ -5706,12 +5704,11 @@ def _compute_cashflow_row(row: dict, today: datetime.date, zoho_base: str, auror
             payment1_amt = round(contract_price * 0.2, 2)
             payment2_amt = round(contract_price * 0.6, 2)
             payment3_amt = round(contract_price * 0.2, 2)
-            comm_payout1_date = payment1_date
-            comm_payout1_amt = round(total_commission * 0.2, 2)
-            comm_payout2_date = payment2_date
-            comm_payout2_amt = round(total_commission * 0.6, 2)
+            # Commission paid once in full at final payment (100% collected)
+            comm_payout1_date = comm_payout1_amt = ""
+            comm_payout2_date = comm_payout2_amt = ""
             comm_payout3_date = payment3_date
-            comm_payout3_amt = round(total_commission * 0.2 + referral_flat, 2)
+            comm_payout3_amt = round(total_commission + referral_flat, 2)
             # M1 already received — clear Payment 1
             if lending_status in CASHFLOW_LR_DRAW_PAID_STATUSES:
                 payment1_date = payment1_amt = ""
