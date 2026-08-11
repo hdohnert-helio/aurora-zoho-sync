@@ -7214,6 +7214,7 @@ async def cashflow_apply_overrides():
             "ct_green_amt":        col("CT Green Amt"),
             "cash_mat_date":       col("Cash Materials Date"),
             "cash_mat_amt":        col("Cash Materials Amt"),
+            "solarinsure_amt":     col("SolarInsure Amt"),
         }
 
         def cell(row, key):
@@ -7302,6 +7303,20 @@ async def cashflow_apply_overrides():
                     week_of(cash_mat_date), cash_mat_date, customer, ft, "Cash Materials",
                     cash_mat_amt, "", "", stage, sc_display, proj_id, zoho_link,
                 ])
+
+            # SolarInsure: at final payment date for non-LR/non-SG projects
+            si_amt_raw = cell(row, "solarinsure_amt")
+            if ft not in ("LR", "SG") and si_amt_raw:
+                si_date = cell(row, "pay3_date") or cell(row, "pay2_date") or cell(row, "pay1_date")
+                if si_date:
+                    try:
+                        si_amt = float(str(si_amt_raw).replace("$", "").replace(",", ""))
+                    except ValueError:
+                        si_amt = si_amt_raw
+                    event_rows.append([
+                        week_of(si_date), si_date, customer, ft, "SolarInsure",
+                        si_amt, "", "", stage, sc_display, proj_id, zoho_link,
+                    ])
 
         event_rows.sort(key=lambda r: r[1] if r[1] else "9999")
 
@@ -7399,6 +7414,11 @@ async def dashboard_apply_overrides():
             "comm3_date": "Comm Payout 3 Date", "comm3_amt": "Comm Payout 3 Amt",
             "zoho_link": "Zoho Link",
             "created_date": "Created Date",
+            "ct_green_date": "CT Green Date",
+            "ct_green_amt": "CT Green Amt",
+            "cash_mat_date": "Cash Materials Date",
+            "cash_mat_amt": "Cash Materials Amt",
+            "solarinsure_amt": "SolarInsure Amt",
         }.items()}
 
         def cell(row, key):
@@ -7456,6 +7476,46 @@ async def dashboard_apply_overrides():
                     week_of(pay_date), pay_date, customer, ft, pay_type,
                     pay_amt, comm_date, comm_amt, stage, sc_display, proj_id, zoho_link,
                 ])
+
+            # CT Green Estates cost
+            ct_green_date = cell(row, "ct_green_date")
+            ct_green_amt_raw = cell(row, "ct_green_amt")
+            if ct_green_date and ct_green_amt_raw:
+                try:
+                    ct_green_amt = float(str(ct_green_amt_raw).replace("$", "").replace(",", ""))
+                except ValueError:
+                    ct_green_amt = ct_green_amt_raw
+                weekly_events.append([
+                    week_of(ct_green_date), ct_green_date, customer, ft, "CT Green Estates",
+                    ct_green_amt, "", "", stage, sc_display, proj_id, zoho_link,
+                ])
+
+            # Cash/SE Materials cost
+            cash_mat_date = cell(row, "cash_mat_date")
+            cash_mat_amt_raw = cell(row, "cash_mat_amt")
+            if cash_mat_date and cash_mat_amt_raw:
+                try:
+                    cash_mat_amt = float(str(cash_mat_amt_raw).replace("$", "").replace(",", ""))
+                except ValueError:
+                    cash_mat_amt = cash_mat_amt_raw
+                weekly_events.append([
+                    week_of(cash_mat_date), cash_mat_date, customer, ft, "Cash Materials",
+                    cash_mat_amt, "", "", stage, sc_display, proj_id, zoho_link,
+                ])
+
+            # SolarInsure: at final payment date for non-LR/non-SG projects
+            si_amt_raw = cell(row, "solarinsure_amt")
+            if ft not in ("LR", "SG") and si_amt_raw:
+                si_date = cell(row, "pay3_date") or cell(row, "pay2_date") or cell(row, "pay1_date")
+                if si_date:
+                    try:
+                        si_amt = float(str(si_amt_raw).replace("$", "").replace(",", ""))
+                    except ValueError:
+                        si_amt = si_amt_raw
+                    weekly_events.append([
+                        week_of(si_date), si_date, customer, ft, "SolarInsure",
+                        si_amt, "", "", stage, sc_display, proj_id, zoho_link,
+                    ])
 
             # LR DC Holdback: 25 days after payment2, respecting Overrides tab
             pay2_date = cell(row, "pay2_date")
