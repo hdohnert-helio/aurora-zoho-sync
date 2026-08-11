@@ -5675,6 +5675,7 @@ def _compute_cashflow_row(row: dict, today: datetime.date, zoho_base: str, auror
     comm_payout1_date = comm_payout1_amt = ""
     comm_payout2_date = comm_payout2_amt = ""
     comm_payout3_date = comm_payout3_amt = ""
+    holdback_date = holdback_amt = ""
 
     if finance_type in ("LR", "SG") and effective_sc_str:
         try:
@@ -5834,6 +5835,7 @@ def _compute_cashflow_row(row: dict, today: datetime.date, zoho_base: str, auror
         cash_materials_date, cash_materials_amt,
         round(system_watts * 0.10, 2) if (finance_type not in ("LR", "SG") and system_watts) else "",
         created_date_str,
+        holdback_date, holdback_amt,
     ]
 
     PAYMENT_TYPE_MAP = {
@@ -6704,6 +6706,7 @@ def _run_cashflow_batch(projects: list[dict], tab_name: str) -> dict:
         "Cash Materials Date", "Cash Materials Amt",
         "SolarInsure Amt",
         "Created Date",
+        "LR Holdback Date", "LR Holdback Amt",
     ]
     sheets.values().update(
         spreadsheetId=CASHFLOW_SHEET_ID,
@@ -7061,7 +7064,7 @@ def _apply_overrides_to_pipeline_tab(svc, tab_name: str, overrides: dict) -> dic
     # Read full pipeline to get project IDs, finance type, contract price, and kW
     raw = sheets.values().get(
         spreadsheetId=CASHFLOW_SHEET_ID,
-        range=f"'{tab_name}'!A1:Z200",
+        range=f"'{tab_name}'!A1:AI200",
         valueRenderOption="FORMATTED_VALUE",
     ).execute().get("values", [])
 
@@ -7133,6 +7136,12 @@ def _apply_overrides_to_pipeline_tab(svc, tab_name: str, overrides: dict) -> dic
         if pov.get("comm_payout2") is not None:
             updates.append({"range": f"'{tab_name}'!W{row_num}", "values": [[pov["comm_payout2"]]]})
 
+        # Holdback date/amount overrides (cols AH/AI)
+        if pov.get("holdback_date"):
+            updates.append({"range": f"'{tab_name}'!AH{row_num}", "values": [[pov["holdback_date"]]]})
+        if pov.get("holdback_amt") is not None:
+            updates.append({"range": f"'{tab_name}'!AI{row_num}", "values": [[pov["holdback_amt"]]]})
+
         # Materials override — recalculate LR draw amount only when no explicit Payment 1 Amt override
         if pov.get("materials") is not None and pov.get("amount1") is None and contract_price and finance_type == "LR":
             mat = pov["materials"]
@@ -7178,7 +7187,7 @@ async def cashflow_apply_overrides():
         sheets = svc.spreadsheets()
         raw = sheets.values().get(
             spreadsheetId=CASHFLOW_SHEET_ID,
-            range=f"'{tab_name}'!A1:AG200",
+            range=f"'{tab_name}'!A1:AI200",
             valueRenderOption="FORMATTED_VALUE",
         ).execute().get("values", [])
 
@@ -7216,6 +7225,9 @@ async def cashflow_apply_overrides():
             "cash_mat_date":       col("Cash Materials Date"),
             "cash_mat_amt":        col("Cash Materials Amt"),
             "solarinsure_amt":     col("SolarInsure Amt"),
+            "created_date":        col("Created Date"),
+            "holdback_date":       col("LR Holdback Date"),
+            "holdback_amt":        col("LR Holdback Amt"),
         }
 
         def cell(row, key):
@@ -7319,6 +7331,19 @@ async def cashflow_apply_overrides():
                         si_amt, "", "", stage, sc_display, proj_id, zoho_link,
                     ])
 
+            # LR DC Holdback
+            hb_date = cell(row, "holdback_date")
+            hb_amt_raw = cell(row, "holdback_amt")
+            if hb_date and hb_amt_raw:
+                try:
+                    hb_amt = float(str(hb_amt_raw).replace("$", "").replace(",", ""))
+                except ValueError:
+                    hb_amt = hb_amt_raw
+                event_rows.append([
+                    week_of(hb_date), hb_date, customer, ft, "LR DC Holdback",
+                    hb_amt, "", "", stage, sc_display, proj_id, zoho_link,
+                ])
+
         event_rows.sort(key=lambda r: r[1] if r[1] else "9999")
 
         weekly_tab = CASHFLOW_WEEKLY_TAB
@@ -7390,7 +7415,7 @@ async def dashboard_apply_overrides():
         # Read patched pipeline tab
         raw = sheets.values().get(
             spreadsheetId=CASHFLOW_SHEET_ID,
-            range=f"'{tab_name}'!A1:AE200",
+            range=f"'{tab_name}'!A1:AI200",
             valueRenderOption="FORMATTED_VALUE",
         ).execute().get("values", [])
 
@@ -7420,6 +7445,8 @@ async def dashboard_apply_overrides():
             "cash_mat_date": "Cash Materials Date",
             "cash_mat_amt": "Cash Materials Amt",
             "solarinsure_amt": "SolarInsure Amt",
+            "holdback_date": "LR Holdback Date",
+            "holdback_amt": "LR Holdback Amt",
         }.items()}
 
         def cell(row, key):
@@ -7518,28 +7545,18 @@ async def dashboard_apply_overrides():
                         si_amt, "", "", stage, sc_display, proj_id, zoho_link,
                     ])
 
-            # LR DC Holdback: 25 days after payment2, respecting Overrides tab
-            pay2_date = cell(row, "pay2_date")
-            pov = overrides.get(proj_id, {})
-            if ft == "LR" and (pay2_date or pov.get("holdback_date") or pov.get("holdback_amt")):
+            # LR DC Holdback — read from stored pipeline columns (already pov-applied from last full run)
+            hb_date = cell(row, "holdback_date")
+            hb_amt_raw = cell(row, "holdback_amt")
+            if hb_date and hb_amt_raw:
                 try:
-                    kw_raw = cell(row, "kw")
-                    system_watts = round(float(str(kw_raw).replace(",", "")) * 1000) if kw_raw else 0
-                    if system_watts or pov.get("holdback_amt"):
-                        _hb_base = pay2_date
-                        holdback_date = pov.get("holdback_date") or (
-                            (datetime.date.fromisoformat(_hb_base) + datetime.timedelta(days=25)).isoformat()
-                            if _hb_base else None
-                        )
-                        created_date_str = cell(row, "created_date")
-                        holdback_amt = pov.get("holdback_amt") or round(system_watts * _lr_holdback_ppw(created_date_str), 2)
-                        if holdback_date and holdback_amt:
-                            weekly_events.append([
-                                week_of(holdback_date), holdback_date, customer, ft, "LR DC Holdback",
-                                holdback_amt, "", "", stage, sc_display, proj_id, zoho_link,
-                            ])
-                except (ValueError, TypeError):
-                    pass
+                    hb_amt = float(str(hb_amt_raw).replace("$", "").replace(",", ""))
+                except ValueError:
+                    hb_amt = hb_amt_raw
+                weekly_events.append([
+                    week_of(hb_date), hb_date, customer, ft, "LR DC Holdback",
+                    hb_amt, "", "", stage, sc_display, proj_id, zoho_link,
+                ])
 
         weekly_events.sort(key=lambda r: r[1] if r[1] else "9999")
         _write_dashboard_revenue_tab(svc, weekly_events)
