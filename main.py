@@ -4901,6 +4901,9 @@ def _fetch_all_cashflow_projects(cutoff_date: str = "2026-01-01", override_proj_
             lending_status = (r.get("Lending_Status") or "").strip()
             # Activation-paid LR projects still have a DC holdback pending — keep them
             has_pending_holdback = lending_status in CASHFLOW_LR_ACTIVATION_PAID_STATUSES
+            # Always exclude On Hold projects regardless of any other status
+            if stage == "On Hold":
+                continue
             # Project Closeout: skip unless in Overrides tab or has a pending holdback
             if stage == "Project Closeout" and not in_overrides and not has_pending_holdback:
                 continue
