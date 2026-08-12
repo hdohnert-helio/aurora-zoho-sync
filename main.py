@@ -5390,7 +5390,10 @@ def _read_payment_overrides(svc) -> dict:
         if len(row) > 13 and parse_amt(row[13]) is not None:
             entry["holdback_amt"] = parse_amt(row[13])
         if entry:
-            overrides[proj_id] = entry
+            if proj_id in overrides:
+                overrides[proj_id].update(entry)
+            else:
+                overrides[proj_id] = entry
             logger.info(f"_read_payment_overrides: {proj_id} → {entry}")
     logger.info(f"_read_payment_overrides: loaded {len(overrides)} override(s)")
     return overrides
