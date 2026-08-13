@@ -6392,21 +6392,27 @@ def _read_config(svc) -> list:
             amount = float(amount) if amount != "" else ""
         except (ValueError, TypeError):
             amount = ""
-        # Parse skip_weeks: comma-separated dates in YYYY-MM-DD or M/D/YYYY format
+        # Parse skip_weeks: may be a Sheets serial number (UNFORMATTED_VALUE returns dates as ints)
+        # or a comma-separated string of dates in YYYY-MM-DD or M/D/YYYY format.
         skip_weeks = set()
-        for part in skip_raw.replace(";", ",").split(","):
-            part = part.strip()
-            if not part:
-                continue
-            parsed = None
-            for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%-m/%-d/%Y", "%m/%d/%y"):
-                try:
-                    parsed = datetime.datetime.strptime(part, fmt).date()
-                    break
-                except ValueError:
+        raw_skip = row[6] if len(row) > 6 else ""
+        if isinstance(raw_skip, (int, float)) and raw_skip > 0:
+            # Single serial date from a date-formatted cell
+            skip_weeks.add(datetime.date(1899, 12, 30) + datetime.timedelta(days=int(raw_skip)))
+        else:
+            for part in str(raw_skip).replace(";", ",").split(","):
+                part = part.strip()
+                if not part:
                     continue
-            if parsed:
-                skip_weeks.add(parsed)
+                parsed = None
+                for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%m/%d/%y"):
+                    try:
+                        parsed = datetime.datetime.strptime(part, fmt).date()
+                        break
+                    except ValueError:
+                        continue
+                if parsed:
+                    skip_weeks.add(parsed)
         items.append({
             "name": name, "category": category, "amount": amount,
             "frequency": frequency, "billing_day": billing_day,
