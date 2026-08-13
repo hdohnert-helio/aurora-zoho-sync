@@ -6369,10 +6369,10 @@ def _sheets_serial(d: datetime.date) -> int:
 
 
 def _read_config(svc) -> list:
-    """Read Config tab and return list of dicts with keys: name, category, amount, frequency, billing_day, status."""
+    """Read Config tab and return list of dicts with keys: name, category, amount, frequency, billing_day, status, skip_weeks."""
     raw = svc.spreadsheets().values().get(
         spreadsheetId=DASHBOARD_SHEET_ID,
-        range="Config!A2:F200",
+        range="Config!A2:G200",
         valueRenderOption="UNFORMATTED_VALUE",
     ).execute().get("values", [])
     items = []
@@ -6385,15 +6385,25 @@ def _read_config(svc) -> list:
         frequency   = str(row[3]).strip().lower() if len(row) > 3 else "weekly"
         billing_day = int(row[4]) if len(row) > 4 and row[4] != "" else None
         status      = str(row[5]).strip() if len(row) > 5 else "Active"
+        skip_raw    = str(row[6]).strip() if len(row) > 6 else ""
         if not name or status.lower() != "active":
             continue
         try:
             amount = float(amount) if amount != "" else ""
         except (ValueError, TypeError):
             amount = ""
+        # Parse skip_weeks: comma-separated YYYY-MM-DD dates (Monday of the week to skip)
+        skip_weeks = set()
+        for part in skip_raw.replace(";", ",").split(","):
+            part = part.strip()
+            try:
+                skip_weeks.add(datetime.date.fromisoformat(part))
+            except ValueError:
+                pass
         items.append({
             "name": name, "category": category, "amount": amount,
             "frequency": frequency, "billing_day": billing_day,
+            "skip_weeks": skip_weeks,
         })
     return items
 
@@ -6455,9 +6465,14 @@ def _write_dashboard_expenses(svc) -> int:
             amount      = item["amount"]
             frequency   = item["frequency"]
             billing_day = item["billing_day"]
+            skip_weeks  = item.get("skip_weeks", set())
 
             # Medical premium is folded into weekly Payroll on first-Friday weeks; skip it here.
             if name.lower() == "payroll health insurance":
+                continue
+
+            # Skip this week if listed in the item's Skip Weeks column
+            if week_monday in skip_weeks:
                 continue
 
             if frequency == "weekly":
@@ -8182,7 +8197,7 @@ async def dashboard_create(request: Request):
         ).execute().get("values", [])
         config_has_data = bool(existing_config and existing_config[0] and existing_config[0][0])
 
-        config_headers = ["Name", "Category", "Amount", "Frequency", "Billing Day", "Status"]
+        config_headers = ["Name", "Category", "Amount", "Frequency", "Billing Day", "Status", "Skip Weeks"]
         config_rows = [
             config_headers,
             # Payroll
@@ -8237,7 +8252,7 @@ async def dashboard_create(request: Request):
         ]
         if config_has_data:
             # Tab already has user data — only ensure headers are correct
-            value_data.append({"range": "Config!A1:F1", "values": [config_headers]})
+            value_data.append({"range": "Config!A1:G1", "values": [config_headers]})
         else:
             value_data.append({"range": "Config!A1", "values": config_rows})
 
