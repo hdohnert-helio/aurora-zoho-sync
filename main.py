@@ -7355,9 +7355,19 @@ async def cashflow_apply_overrides():
                 pay_amt_raw = cell(row, pay_key.replace("_date", "_amt"))
                 comm_date = cell(row, comm_key)
                 comm_amt_raw = cell(row, comm_key.replace("_date", "_amt"))
-                if not pay_date:
-                    continue
                 pay_type = PAYMENT_TYPE_MAP.get((ft, slot), "Loan / Full Payment")
+                if not pay_date:
+                    # Revenue cleared but commission may still be pending
+                    try:
+                        if comm_date and comm_amt_raw and float(str(comm_amt_raw).replace("$", "").replace(",", "")) > 0:
+                            event_rows.append([
+                                week_of(comm_date), comm_date, customer, ft, pay_type,
+                                "", comm_date, float(str(comm_amt_raw).replace("$", "").replace(",", "")),
+                                stage, sc_display, proj_id, zoho_link,
+                            ])
+                    except (ValueError, TypeError):
+                        pass
+                    continue
                 try:
                     pay_amt = float(str(pay_amt_raw).replace("$", "").replace(",", "")) if pay_amt_raw else ""
                 except ValueError:
