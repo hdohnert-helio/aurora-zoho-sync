@@ -7144,16 +7144,26 @@ def _apply_overrides_to_pipeline_tab(svc, tab_name: str, overrides: dict) -> dic
         except (ValueError, AttributeError):
             return None
 
-    # Build {project_id: (row_number_1indexed, finance_type, contract_price, system_watts)}
+    ci_pay1 = _ci("Payment 1 Date")
+    ci_pay2 = _ci("Payment 2 Date")
+    ci_pay3 = _ci("Payment 3 Date")
+
+    def _cell(row, ci):
+        return row[ci].strip() if ci is not None and len(row) > ci else ""
+
+    # Build {project_id: (row_number_1indexed, finance_type, contract_price, system_watts, pay1, pay2, pay3)}
     proj_info = {}
     for i, row in enumerate(raw[1:], start=2):
-        pid = row[ci_proj].strip() if ci_proj is not None and len(row) > ci_proj else ""
+        pid = _cell(row, ci_proj)
         if not pid or pid == "Project ID":
             continue
-        fin   = row[ci_fin].strip()   if ci_fin   is not None and len(row) > ci_fin   else ""
+        fin   = _cell(row, ci_fin)
         price = _parse_currency(row[ci_price])  if ci_price is not None and len(row) > ci_price else None
         kw    = _parse_currency(row[ci_kw])     if ci_kw    is not None and len(row) > ci_kw    else None
-        proj_info[pid] = (i, fin, price, kw * 1000 if kw else None)
+        pay1  = _cell(row, ci_pay1)
+        pay2  = _cell(row, ci_pay2)
+        pay3  = _cell(row, ci_pay3)
+        proj_info[pid] = (i, fin, price, kw * 1000 if kw else None, pay1, pay2, pay3)
 
     # payment key → (date col, amt col, comm date col)
     PAY_COLS = {
@@ -7169,11 +7179,16 @@ def _apply_overrides_to_pipeline_tab(svc, tab_name: str, overrides: dict) -> dic
         if not info:
             logger.warning(f"apply_overrides: {proj_id} not found in {tab_name}")
             continue
-        row_num, finance_type, contract_price, system_watts = info
+        row_num, finance_type, contract_price, system_watts, cur_pay1, cur_pay2, cur_pay3 = info
+        current_pay = {"payment1": cur_pay1, "payment2": cur_pay2, "payment3": cur_pay3}
 
-        # Date overrides
+        # Date overrides — skip if the pipeline already has a blank date for this slot:
+        # a blank means the full run intentionally cleared it (status-based) and we must not restore it.
         for key, (pay_col, amt_col, comm_col) in PAY_COLS.items():
             if pov.get(key):
+                if not current_pay[key]:
+                    # Pipeline cleared this slot; don't restore the stale override date.
+                    continue
                 date_val = pov[key]
                 updates.append({"range": f"'{tab_name}'!{pay_col}{row_num}", "values": [[date_val]]})
                 updates.append({"range": f"'{tab_name}'!{comm_col}{row_num}", "values": [[date_val]]})
