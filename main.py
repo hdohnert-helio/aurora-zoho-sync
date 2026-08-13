@@ -7212,11 +7212,22 @@ def _apply_overrides_to_pipeline_tab(svc, tab_name: str, overrides: dict) -> dic
         if pov.get("holdback_amt") is not None:
             updates.append({"range": f"'{tab_name}'!AI{row_num}", "values": [[pov["holdback_amt"]]]})
 
-        # Materials override — recalculate LR draw amount only when no explicit Payment 1 Amt override
-        if pov.get("materials") is not None and pov.get("amount1") is None and contract_price and finance_type == "LR":
+        # For CASH/SE: if payment2 date was overridden, move the cash materials date with it
+        if pov.get("payment2") and finance_type in ("CASH", "SE") and current_pay["payment2"]:
+            updates.append({"range": f"'{tab_name}'!AD{row_num}", "values": [[pov["payment2"]]]})
+
+        # Materials override
+        if pov.get("materials") is not None:
             mat = pov["materials"]
-            new_draw = round(contract_price * 0.8 - mat, 2)
-            updates.append({"range": f"'{tab_name}'!J{row_num}", "values": [[new_draw]]})
+            if finance_type == "LR" and pov.get("amount1") is None and contract_price:
+                # LR: recalculate the 80% draw net of materials
+                new_draw = round(contract_price * 0.8 - mat, 2)
+                updates.append({"range": f"'{tab_name}'!J{row_num}", "values": [[new_draw]]})
+            elif finance_type in ("CASH", "SE"):
+                # CASH/SE: write the override directly to the cash materials amount column
+                updates.append({"range": f"'{tab_name}'!AE{row_num}", "values": [[mat]]})
+            # Always update the Materials (est) column O for visibility
+            updates.append({"range": f"'{tab_name}'!O{row_num}", "values": [[mat]]})
 
         patched.append(proj_id)
 
