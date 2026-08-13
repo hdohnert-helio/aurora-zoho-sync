@@ -5798,6 +5798,10 @@ def _compute_cashflow_row(row: dict, today: datetime.date, zoho_base: str, auror
         payment2_amt = pov["amount2"]
     if pov.get("amount3") is not None:
         payment3_amt = pov["amount3"]
+    if pov.get("comm_payout1") is not None:
+        comm_payout1_amt = pov["comm_payout1"]
+    if pov.get("comm_payout2") is not None:
+        comm_payout2_amt = pov["comm_payout2"]
 
     # Status-based clearing for LR/SG — runs AFTER pov overrides so Zoho status always wins.
     # Only revenue payments are cleared (already received from lender); commission payouts
@@ -5890,9 +5894,15 @@ def _compute_cashflow_row(row: dict, today: datetime.date, zoho_base: str, auror
     ]
     pay_events = []
     for i, (pd, pa, cd, ca) in enumerate(pay_slots):
-        if not pd or not pa:
-            continue
         pay_type = PAYMENT_TYPE_MAP.get((finance_type, i), "Loan / Full Payment")
+        if not pd or not pa:
+            # Revenue already received; emit commission-only event if commission is still pending.
+            try:
+                if cd and ca and float(str(ca).replace(",", "")) > 0:
+                    pay_events.append([cd, customer, finance_type, pay_type, "", cd, ca, stage, sc_display, project_id, zoho_link])
+            except (ValueError, TypeError):
+                pass
+            continue
         pay_events.append([pd, customer, finance_type, pay_type, pa, cd, ca, stage, sc_display, project_id, zoho_link])
 
     if ct_green_date and ct_green_amt:
