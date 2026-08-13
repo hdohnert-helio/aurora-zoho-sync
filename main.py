@@ -5661,7 +5661,7 @@ def _compute_cashflow_row(row: dict, today: datetime.date, zoho_base: str, auror
     referral_flat = float(d.get("referral_flat") or 0)
     subcontractor_total = d.get("subcontractor_total", 0)
     subcontractor_notes = d.get("subcontractor_notes", "")
-    materials_est = round(system_watts * CASHFLOW_MATERIALS_PPW, 2) if system_watts and finance_type == "LR" else ""
+    materials_est = round(system_watts * CASHFLOW_MATERIALS_PPW, 2) if system_watts else ""
     if pov.get("materials") is not None:
         materials_est = pov["materials"]
 
