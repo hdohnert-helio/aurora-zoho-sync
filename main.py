@@ -5800,17 +5800,15 @@ def _compute_cashflow_row(row: dict, today: datetime.date, zoho_base: str, auror
         payment3_amt = pov["amount3"]
 
     # Status-based clearing for LR/SG — runs AFTER pov overrides so Zoho status always wins.
-    # M1 draw received: clear payment 1 so it no longer appears as pending.
+    # Only revenue payments are cleared (already received from lender); commission payouts
+    # remain visible as pending expenses until manually cleared or project fully paid.
     if finance_type in ("LR", "SG"):
         if lending_status in CASHFLOW_LR_DRAW_PAID_STATUSES:
             payment1_date = payment1_amt = ""
-            comm_payout1_date = comm_payout1_amt = ""
-        # Both M1 and M2 received: clear both; only DC holdback remains.
+        # Both M1 and M2 received: clear revenue only; only DC holdback remains.
         if lending_status in CASHFLOW_LR_ACTIVATION_PAID_STATUSES:
             payment1_date = payment1_amt = ""
-            comm_payout1_date = comm_payout1_amt = ""
             payment2_date = payment2_amt = ""
-            comm_payout2_date = comm_payout2_amt = ""
 
     # Cash materials cost: $1.26/W at 60% progress (Cash) or Payment 2 (SE) date
     cash_materials_date = cash_materials_amt = ""
