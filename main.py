@@ -6392,14 +6392,21 @@ def _read_config(svc) -> list:
             amount = float(amount) if amount != "" else ""
         except (ValueError, TypeError):
             amount = ""
-        # Parse skip_weeks: comma-separated YYYY-MM-DD dates (Monday of the week to skip)
+        # Parse skip_weeks: comma-separated dates in YYYY-MM-DD or M/D/YYYY format
         skip_weeks = set()
         for part in skip_raw.replace(";", ",").split(","):
             part = part.strip()
-            try:
-                skip_weeks.add(datetime.date.fromisoformat(part))
-            except ValueError:
-                pass
+            if not part:
+                continue
+            parsed = None
+            for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%-m/%-d/%Y", "%m/%d/%y"):
+                try:
+                    parsed = datetime.datetime.strptime(part, fmt).date()
+                    break
+                except ValueError:
+                    continue
+            if parsed:
+                skip_weeks.add(parsed)
         items.append({
             "name": name, "category": category, "amount": amount,
             "frequency": frequency, "billing_day": billing_day,
