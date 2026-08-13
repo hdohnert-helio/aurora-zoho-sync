@@ -5799,6 +5799,19 @@ def _compute_cashflow_row(row: dict, today: datetime.date, zoho_base: str, auror
     if pov.get("amount3") is not None:
         payment3_amt = pov["amount3"]
 
+    # Status-based clearing for LR/SG — runs AFTER pov overrides so Zoho status always wins.
+    # M1 draw received: clear payment 1 so it no longer appears as pending.
+    if finance_type in ("LR", "SG"):
+        if lending_status in CASHFLOW_LR_DRAW_PAID_STATUSES:
+            payment1_date = payment1_amt = ""
+            comm_payout1_date = comm_payout1_amt = ""
+        # Both M1 and M2 received: clear both; only DC holdback remains.
+        if lending_status in CASHFLOW_LR_ACTIVATION_PAID_STATUSES:
+            payment1_date = payment1_amt = ""
+            comm_payout1_date = comm_payout1_amt = ""
+            payment2_date = payment2_amt = ""
+            comm_payout2_date = comm_payout2_amt = ""
+
     # Cash materials cost: $1.26/W at 60% progress (Cash) or Payment 2 (SE) date
     cash_materials_date = cash_materials_amt = ""
     if finance_type in ("CASH", "SE") and system_watts and payment2_date:
@@ -5821,6 +5834,23 @@ def _compute_cashflow_row(row: dict, today: datetime.date, zoho_base: str, auror
         if final_date_for_ct:
             ct_green_date = final_date_for_ct
             ct_green_amt = round(system_watts * CASHFLOW_CT_GREEN_PPW, 2)
+
+    # Pre-compute LR DC holdback so it lands in the pipeline tab (AH/AI columns).
+    # Must happen before pipeline_row is constructed; pay_events uses the same vars below.
+    if finance_type == "LR" and system_watts and lending_status not in CASHFLOW_FULLY_PAID_STATUSES:
+        try:
+            _hb_base = payment2_date or (
+                _next_monday_on_or_after(
+                    datetime.date.fromisoformat(effective_sc_str) + datetime.timedelta(days=33)
+                ).isoformat() if effective_sc_str else None
+            )
+            if _hb_base:
+                holdback_date = pov.get("holdback_date") or (
+                    datetime.date.fromisoformat(_hb_base) + datetime.timedelta(days=25)
+                ).isoformat()
+                holdback_amt = pov.get("holdback_amt") or round(system_watts * _lr_holdback_ppw(created_date_str), 2)
+        except (ValueError, TypeError):
+            pass
 
     pipeline_row = [
         customer, project_id, finance_type, stage, sc_display,
@@ -5875,24 +5905,10 @@ def _compute_cashflow_row(row: dict, today: datetime.date, zoho_base: str, auror
         pay_events.append([cash_materials_date, customer, finance_type, "Cash Materials", cash_materials_amt,
                            "", "", stage, sc_display, project_id, zoho_link])
 
-    # LR DC Holdback: 25 days after M2, only if not yet fully paid.
-    # For activation-paid projects payment2_date is cleared; derive from SC instead.
-    if finance_type == "LR" and system_watts and lending_status not in CASHFLOW_FULLY_PAID_STATUSES:
-        try:
-            _hb_base = payment2_date or (
-                _next_monday_on_or_after(
-                    datetime.date.fromisoformat(effective_sc_str) + datetime.timedelta(days=33)
-                ).isoformat() if effective_sc_str else None
-            )
-            if _hb_base:
-                holdback_date = pov.get("holdback_date") or (
-                    datetime.date.fromisoformat(_hb_base) + datetime.timedelta(days=25)
-                ).isoformat()
-                holdback_amt = pov.get("holdback_amt") or round(system_watts * _lr_holdback_ppw(created_date_str), 2)
-                pay_events.append([holdback_date, customer, finance_type, "LR DC Holdback", holdback_amt,
-                                   "", "", stage, sc_display, project_id, zoho_link])
-        except (ValueError, TypeError):
-            pass
+    # LR DC Holdback — already computed above before pipeline_row; just emit the pay event.
+    if holdback_date and holdback_amt:
+        pay_events.append([holdback_date, customer, finance_type, "LR DC Holdback", holdback_amt,
+                           "", "", stage, sc_display, project_id, zoho_link])
 
     # SolarInsure: $0.10/watt at final payment for non-LR projects
     if finance_type not in ("LR", "SG") and system_watts:
