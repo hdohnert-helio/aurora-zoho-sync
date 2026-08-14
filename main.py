@@ -6597,6 +6597,21 @@ def _write_dashboard_expenses(svc) -> int:
     # Re-apply 'Paid' status to rows that were marked before the rewrite
     _restore_expense_paid_statuses(svc, paid_keys)
 
+    # Keep "Paid This Week" row (row 32) in Cash Flow tab in sync
+    # Formula: sum of all Expense rows for that week where Status="Paid"
+    try:
+        cf_updates = [{"range": "'Cash Flow'!A32", "values": [["  Paid This Week"]]}]
+        for i, wd in enumerate(week_dates):
+            col = _col_letter(i + 1)  # B, C, D, …
+            formula = (f'=SUMIFS(Expenses!$D:$D,Expenses!$A:$A,{col}$2,Expenses!$F:$F,"Paid")')
+            cf_updates.append({"range": f"'Cash Flow'!{col}32", "values": [[formula]]})
+        sheets.values().batchUpdate(
+            spreadsheetId=DASHBOARD_SHEET_ID,
+            body={"valueInputOption": "USER_ENTERED", "data": cf_updates},
+        ).execute()
+    except Exception as _e:
+        logger.warning(f"_write_dashboard_expenses: could not update Cash Flow row 32: {_e}")
+
     logger.info(f"_write_dashboard_expenses: wrote {len(rows)} expense rows across {len(week_dates)} weeks")
     return len(rows)
 
@@ -8540,6 +8555,7 @@ async def dashboard_create(request: Request):
             29: "  CT Green Estates",
             30: "TOTAL MONEY OUT",
             31: "NET CASH FLOW",
+            32: "  Paid This Week",
             33: "Opening Balance",
             34: "CLOSING BALANCE",
         }
@@ -8570,6 +8586,9 @@ async def dashboard_create(request: Request):
             return (f'=SUMIFS(Expenses!$D:$D,Expenses!$A:$A,{col}$2,'
                     f'Expenses!$B:$B,"{cat}",Expenses!$F:$F,"Active")')
 
+        def paid_sumif(col):
+            return f'=SUMIFS(Expenses!$D:$D,Expenses!$A:$A,{col}$2,Expenses!$F:$F,"Paid")'
+
         for col_idx in range(num_weeks):  # 0-based; col B = index 1 in sheet
             col_letter = _col_letter(col_idx + 1)  # +1 because A is labels
 
@@ -8595,6 +8614,7 @@ async def dashboard_create(request: Request):
                 formulas[row_num] = exp_sumif(col_letter, cat)
             formulas[29] = exp_sumif(col_letter, "CT Green Estates")
             formulas[30] = f'=SUM({col_letter}19:{col_letter}29)'
+            formulas[32] = paid_sumif(col_letter)
 
             # Net / Opening / Closing
             formulas[31] = f'={col_letter}17-{col_letter}30'
@@ -8721,8 +8741,8 @@ async def dashboard_create(request: Request):
         requests.append(row_bg_bold(cf_sid, 33, 18, closing_bg))    # row 34: CLOSING BALANCE
 
         # Currency format for revenue (rows 5-16=idx4-15), expenses (rows 19-29=idx18-28),
-        # net/balance (rows 31,33,34 = idx 30,32,33)
-        currency_rows = list(range(4, 16)) + list(range(18, 29)) + [30, 32, 33]
+        # net/balance (rows 31,32,33,34 = idx 30,31,32,33) — row 32 = "Paid This Week"
+        currency_rows = list(range(4, 16)) + list(range(18, 29)) + [30, 31, 32, 33]
         for r in currency_rows:
             requests.append({
                 "repeatCell": {
