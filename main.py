@@ -6421,6 +6421,65 @@ def _read_config(svc) -> list:
     return items
 
 
+def _read_expense_paid_keys(svc) -> set:
+    """Return (week_serial_int, category, description) for every Expenses row with Status='Paid'."""
+    try:
+        raw = svc.spreadsheets().values().get(
+            spreadsheetId=DASHBOARD_SHEET_ID,
+            range="Expenses!A2:F",
+            valueRenderOption="UNFORMATTED_VALUE",
+        ).execute().get("values", [])
+    except Exception:
+        return set()
+    paid = set()
+    for row in raw:
+        if len(row) < 6:
+            continue
+        if str(row[5]).strip().lower() != "paid":
+            continue
+        try:
+            w_int = int(row[0]) if isinstance(row[0], (int, float)) else None
+        except (TypeError, ValueError):
+            w_int = None
+        if w_int is None:
+            continue
+        paid.add((w_int, str(row[1]).strip(), str(row[2]).strip()))
+    return paid
+
+
+def _restore_expense_paid_statuses(svc, paid_keys: set) -> None:
+    """Re-stamp 'Paid' on Expenses rows that match saved (week_serial_int, category, description) keys."""
+    if not paid_keys:
+        return
+    try:
+        raw = svc.spreadsheets().values().get(
+            spreadsheetId=DASHBOARD_SHEET_ID,
+            range="Expenses!A2:F",
+            valueRenderOption="UNFORMATTED_VALUE",
+        ).execute().get("values", [])
+    except Exception:
+        return
+    updates = []
+    for i, row in enumerate(raw):
+        if len(row) < 3:
+            continue
+        try:
+            w_int = int(row[0]) if isinstance(row[0], (int, float)) else None
+        except (TypeError, ValueError):
+            w_int = None
+        if w_int is None:
+            continue
+        key = (w_int, str(row[1]).strip(), str(row[2]).strip())
+        if key in paid_keys:
+            updates.append({"range": f"Expenses!F{i + 2}", "values": [["Paid"]]})
+    if updates:
+        svc.spreadsheets().values().batchUpdate(
+            spreadsheetId=DASHBOARD_SHEET_ID,
+            body={"valueInputOption": "USER_ENTERED", "data": updates},
+        ).execute()
+        logger.info(f"_restore_expense_paid_statuses: restored Paid on {len(updates)} rows")
+
+
 def _write_dashboard_expenses(svc) -> int:
     """
     Generate and write expense rows to the dashboard Expenses tab.
@@ -6501,6 +6560,9 @@ def _write_dashboard_expenses(svc) -> int:
                         rows.append([week_serial, category, name, amount, "Yes", "Active", "", ""])
                         break
 
+    # Save 'Paid' statuses before clearing so they survive the rewrite
+    paid_keys = _read_expense_paid_keys(svc)
+
     # Preserve manually-entered rows (Recurring = "No") before clearing
     existing = sheets.values().get(
         spreadsheetId=DASHBOARD_SHEET_ID,
@@ -6532,6 +6594,9 @@ def _write_dashboard_expenses(svc) -> int:
             body={"values": all_rows},
         ).execute()
 
+    # Re-apply 'Paid' status to rows that were marked before the rewrite
+    _restore_expense_paid_statuses(svc, paid_keys)
+
     logger.info(f"_write_dashboard_expenses: wrote {len(rows)} expense rows across {len(week_dates)} weeks")
     return len(rows)
 
@@ -6555,6 +6620,9 @@ def _write_dashboard_project_expenses(svc, weekly_events: list) -> int:
                    project_id, zoho_link]
     """
     sheets = _build_sheets_service().spreadsheets()
+
+    # Save 'Paid' statuses before clearing so they survive the rewrite
+    paid_keys = _read_expense_paid_keys(svc)
 
     # Remove stale Auto project rows before appending fresh ones to prevent duplicates
     _PROJECT_CATS = {"Commissions", "Materials", "SolarInsure/Warranty", "Subcontractor", "Subcontractor Payments", "CT Green Estates"}
@@ -6639,6 +6707,9 @@ def _write_dashboard_project_expenses(svc, weekly_events: list) -> int:
             insertDataOption="INSERT_ROWS",
             body={"values": rows},
         ).execute()
+
+    # Re-apply 'Paid' status to rows that were marked before the rewrite
+    _restore_expense_paid_statuses(svc, paid_keys)
 
     logger.info(f"_write_dashboard_project_expenses: appended {len(rows)} project expense rows")
     return len(rows)
