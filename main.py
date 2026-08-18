@@ -9255,9 +9255,7 @@ _JENNA_FULLY_PAID_STATUSES = {
     "LR - Activation Package Paid",
     "CF - Phase 2 Funded",
     "SG - PTO Package Paid",
-    "SG - Install Package Paid",
     "SE- Final 1/3 Payment Funded",
-    "SE - Loan Closed 1/3 Payment Funded",
     "SE - Final 1/3 Payment Funded",
 }
 
