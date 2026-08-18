@@ -9365,6 +9365,26 @@ async def jenna_overrides_refresh():
         return {"error": str(e), "traceback": _tb.format_exc()}
 
 
+@app.get("/jenna-overrides/debug")
+async def jenna_overrides_debug():
+    """Debug: show raw Zoho response for first page of Installs."""
+    access_token = get_zoho_access_token()
+    api_domain = os.getenv("ZOHO_API_DOMAIN", "https://www.zohoapis.com")
+    headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
+    url = (
+        f"{api_domain}/crm/v2/Installs"
+        f"?fields=id,Name,System_kW_DC,Created_Time,Substantial_Completion,Lending_Status"
+        f"&page=1&per_page=3"
+    )
+    resp = requests.get(url, headers=headers)
+    return {
+        "status_code": resp.status_code,
+        "api_domain": api_domain,
+        "url": url,
+        "response": resp.json(),
+    }
+
+
 @app.get("/debug/read-tab")
 async def debug_read_tab(sheet_id: str, tab: str, range_: str = "A1:Z200"):
     """Read raw values from any tab of any sheet the service account can access."""
