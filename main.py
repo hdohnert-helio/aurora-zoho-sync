@@ -9263,24 +9263,27 @@ _JENNA_FULLY_PAID_STATUSES = {
 }
 
 
-def _zoho_coql_all(coql: str, access_token: str, api_domain: str) -> list:
-    """Paginate a COQL query and return all records."""
+def _zoho_fetch_all_installs(access_token: str, api_domain: str) -> list:
+    """Fetch all Install records from Zoho using the standard records API."""
     all_records = []
-    offset = 0
-    page_size = 200
+    page = 1
+    per_page = 200
+    headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
     while True:
-        paginated = coql.rstrip() + f" OFFSET {offset} LIMIT {page_size}"
-        url = f"{api_domain}/crm/v7/coql"
-        resp = requests.post(
-            url, json={"select_query": paginated},
-            headers={"Authorization": f"Zoho-oauthtoken {access_token}"},
-        )
+        url = f"{api_domain}/crm/v2/Installs"
+        resp = requests.get(url, headers=headers, params={
+            "fields": "Name,System_kW_DC,Created_Time,Substantial_Completion,Lending_Status,id",
+            "per_page": per_page,
+            "page": page,
+            "sort_by": "Created_Time",
+            "sort_order": "asc",
+        })
         data = resp.json()
         records = data.get("data", [])
         all_records.extend(records)
         if not data.get("info", {}).get("more_records"):
             break
-        offset += page_size
+        page += 1
     return all_records
 
 
@@ -9296,12 +9299,15 @@ async def jenna_overrides_refresh():
         api_domain = os.getenv("ZOHO_API_DOMAIN", "https://www.zohoapis.com")
         svc = _build_sheets_service()
 
-        coql = (
-            "SELECT Name, System_kW_DC, Created_Time, Substantial_Completion, Lending_Status, id "
-            "FROM Installs WHERE Created_Time >= '2025-09-22T00:00:00-04:00'"
-        )
-        records = _zoho_coql_all(coql, access_token, api_domain)
-        logger.info(f"jenna_overrides_refresh: fetched {len(records)} Zoho records")
+        all_installs = _zoho_fetch_all_installs(access_token, api_domain)
+        logger.info(f"jenna_overrides_refresh: fetched {len(all_installs)} total Zoho records")
+
+        # Filter to records created on or after 2025-09-22
+        records = [
+            r for r in all_installs
+            if (r.get("Created_Time") or "") >= "2025-09-22"
+        ]
+        logger.info(f"jenna_overrides_refresh: {len(records)} records after cutoff filter")
 
         # Sort by created date ascending
         records.sort(key=lambda r: r.get("Created_Time") or "")
