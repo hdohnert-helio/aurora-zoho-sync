@@ -9264,29 +9264,31 @@ _JENNA_FULLY_PAID_STATUSES = {
 
 
 def _zoho_fetch_all_installs_for_jenna(access_token: str, api_domain: str) -> list:
-    """Fetch all Install records from Zoho needed for Jenna override calculations."""
+    """Fetch Install records created on/after 2025-09-22 for Jenna override calculations."""
     all_records = []
     page = 1
-    per_page = 200
     headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
+    criteria = "(Project_Created_Date:greater_equal:2025-09-22)"
+    fields = "id,Name,System_kW_DC,Project_Created_Date,Substantial_Completion,Lending_Status"
     while True:
         url = (
-            f"{api_domain}/crm/v2/Installs"
-            f"?fields=id,Name,System_kW_DC,Created_Time,Substantial_Completion,Lending_Status"
-            f"&page={page}&per_page={per_page}"
+            f"{api_domain}/crm/v7/Installs/search"
+            f"?criteria={criteria}&fields={fields}&page={page}&per_page=200"
         )
         resp = requests.get(url, headers=headers)
         if resp.status_code != 200:
-            logger.error(f"_zoho_fetch_all_installs_for_jenna: page {page} failed status={resp.status_code}")
+            logger.error(f"_zoho_fetch_all_installs_for_jenna: page {page} failed status={resp.status_code} body={resp.text[:200]}")
             break
-        data = resp.json()
-        records = data.get("data") or []
-        if not records:
+        data = resp.json().get("data") or []
+        if not data:
             break
-        all_records.extend(records)
-        if not data.get("info", {}).get("more_records"):
+        all_records.extend(data)
+        info = resp.json().get("info") or {}
+        if not info.get("more_records"):
             break
         page += 1
+        if page > 50:
+            break
     return all_records
 
 
@@ -9305,12 +9307,8 @@ async def jenna_overrides_refresh():
         all_installs = _zoho_fetch_all_installs_for_jenna(access_token, api_domain)
         logger.info(f"jenna_overrides_refresh: fetched {len(all_installs)} total Zoho records")
 
-        # Filter to records created on or after 2025-09-22
-        records = [
-            r for r in all_installs
-            if (r.get("Created_Time") or "") >= "2025-09-22"
-        ]
-        logger.info(f"jenna_overrides_refresh: {len(records)} records after cutoff filter")
+        records = all_installs
+        logger.info(f"jenna_overrides_refresh: {len(records)} records (already filtered by Project_Created_Date >= 2025-09-22 in search)")
 
         # Sort by created date ascending
         records.sort(key=lambda r: r.get("Created_Time") or "")
@@ -9320,8 +9318,7 @@ async def jenna_overrides_refresh():
         for r in records:
             name = r.get("Name") or ""
             kw = r.get("System_kW_DC") or 0
-            created_raw = r.get("Created_Time") or ""
-            created_date = created_raw[:10] if created_raw else ""
+            created_date = r.get("Project_Created_Date") or ""
             sc_date = r.get("Substantial_Completion") or ""
             status = (r.get("Lending_Status") or "").strip()
             fully_paid = "Yes" if status in _JENNA_FULLY_PAID_STATUSES else "No"
