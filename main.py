@@ -9266,7 +9266,7 @@ def _zoho_fetch_all_installs_for_jenna(access_token: str, api_domain: str) -> li
     page = 1
     headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
     criteria = "(Project_Created_Date:greater_equal:2025-09-22)"
-    fields = "id,Name,System_kW_DC,Project_Created_Date,Substantial_Completion,Lending_Status,Project_Stage"
+    fields = "id,Name,System_kW_DC,Project_Created_Date,Substantial_Completion,Lending_Status,Project_Stage,Active_Snapshot"
     while True:
         url = (
             f"{api_domain}/crm/v7/Installs/search"
@@ -9287,6 +9287,35 @@ def _zoho_fetch_all_installs_for_jenna(access_token: str, api_domain: str) -> li
         if page > 50:
             break
     return all_records
+
+
+def _fetch_jenna_snapshot_sizes(snapshot_ids: list, access_token: str, api_domain: str) -> dict:
+    """
+    Fetch System_Size_STC_Watts from Aurora_Design_Snapshots for a list of snapshot IDs.
+    Returns {snapshot_id: kw_float}. Uses a thread pool for concurrency.
+    """
+    import concurrent.futures
+
+    headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
+
+    def fetch_one(snap_id):
+        url = f"{api_domain}/crm/v2/Aurora_Design_Snapshots/{snap_id}?fields=id,System_Size_STC_Watts"
+        try:
+            resp = requests.get(url, headers=headers, timeout=15)
+            if resp.status_code == 200:
+                data = resp.json().get("data") or []
+                if data:
+                    watts = data[0].get("System_Size_STC_Watts") or 0
+                    return snap_id, round(watts / 1000, 3) if watts else 0
+        except Exception:
+            pass
+        return snap_id, 0
+
+    result = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as pool:
+        for snap_id, kw in pool.map(fetch_one, snapshot_ids):
+            result[snap_id] = kw
+    return result
 
 
 @app.post("/jenna-overrides/refresh")
@@ -9325,6 +9354,24 @@ async def jenna_overrides_refresh():
         records.sort(key=lambda r: r.get("Project_Created_Date") or "")
         logger.info(f"jenna_overrides_refresh: {len(records)} records after filtering cancelled/lost")
 
+        # Resolve system size from Active Snapshot (Aurora-derived), fall back to Zoho kW_DC
+        snapshot_ids = []
+        snap_to_record = {}  # snapshot_id -> record
+        for r in records:
+            snap = r.get("Active_Snapshot")
+            snap_id = snap.get("id") if isinstance(snap, dict) else None
+            if snap_id:
+                snapshot_ids.append(snap_id)
+                snap_to_record[snap_id] = r.get("id")
+        snapshot_kw_map = {}  # zoho_install_id -> kw
+        if snapshot_ids:
+            snap_sizes = _fetch_jenna_snapshot_sizes(snapshot_ids, access_token, api_domain)
+            for snap_id, kw_val in snap_sizes.items():
+                install_id = snap_to_record.get(snap_id)
+                if install_id:
+                    snapshot_kw_map[install_id] = kw_val
+        logger.info(f"jenna_overrides_refresh: resolved kW from snapshots for {len(snapshot_kw_map)} records")
+
         _CANVAS_ID = "5264387000040853100"
         # Columns A-K: Name | kW | Created | SC Date | Lending Status | Customer Paid? | Override Amount | Zoho ID | Zoho Link | Stage | Paid Out On
         rows = [["Project Name", "System kW", "Created Date", "SC Date", "Lending Status", "Customer Paid?", "Override Amount", "Zoho ID", "Zoho Link", "Stage", "Paid Out On"]]
@@ -9332,17 +9379,18 @@ async def jenna_overrides_refresh():
         pipeline_total_kw = 0.0
         for r in records:
             name = r.get("Name") or ""
-            kw = r.get("System_kW_DC") or 0
+            zoho_id = r.get("id") or ""
+            # Aurora snapshot kW is authoritative; fall back to Zoho System_kW_DC
+            kw = snapshot_kw_map.get(zoho_id) or r.get("System_kW_DC") or 0
             created_date = r.get("Project_Created_Date") or ""
             sc_date = r.get("Substantial_Completion") or ""
             status = (r.get("Lending_Status") or "").strip()
             stage = (r.get("Project_Stage") or "").strip()
             fully_paid = "Yes" if status in _JENNA_FULLY_PAID_STATUSES else "No"
-            override_amt = round(kw * 1000 * JENNA_OVERRIDE_RATE, 2) if fully_paid == "Yes" else 0
+            override_amt = round(kw * 1000 * JENNA_OVERRIDE_RATE, 2)
             pipeline_total_kw += kw
             if fully_paid == "Yes":
                 fully_paid_total_kw += kw
-            zoho_id = r.get("id") or ""
             zoho_url = f"https://crm.zoho.com/crm/heliosolar/tab/CustomModule6/{zoho_id}/canvas/{_CANVAS_ID}"
             zoho_link = f'=HYPERLINK("{zoho_url}", "View")'
             rows.append([name, kw, created_date, sc_date, status, fully_paid, override_amt, zoho_id, zoho_link, stage, paid_out_on.get(zoho_id, "")])
