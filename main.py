@@ -9304,27 +9304,13 @@ async def jenna_overrides_refresh():
         api_domain = os.getenv("ZOHO_API_DOMAIN", "https://www.zohoapis.com")
         svc = _build_sheets_service()
 
-        # Save existing Override Paid Dates (col I) keyed by Zoho ID (col H) before clearing
-        paid_dates: dict = {}
-        try:
-            existing = svc.spreadsheets().values().get(
-                spreadsheetId=JENNA_OVERRIDE_SHEET_ID,
-                range="Projects!H2:I",
-                valueRenderOption="FORMATTED_VALUE",
-            ).execute().get("values", [])
-            for row in existing:
-                if len(row) >= 2 and row[0] and row[1]:
-                    paid_dates[row[0]] = row[1]
-        except Exception:
-            pass
-
         all_installs = _zoho_fetch_all_installs_for_jenna(access_token, api_domain)
         logger.info(f"jenna_overrides_refresh: fetched {len(all_installs)} Zoho records")
 
         records = all_installs
         records.sort(key=lambda r: r.get("Project_Created_Date") or "")
 
-        rows = [["Project Name", "System kW", "Created Date", "SC Date", "Lending Status", "Fully Paid?", "Override Amount", "Zoho ID", "Override Paid Date"]]
+        rows = [["Project Name", "System kW", "Created Date", "SC Date", "Lending Status", "Fully Paid?", "Override Amount", "Zoho ID"]]
         fully_paid_total_kw = 0.0
         for r in records:
             name = r.get("Name") or ""
@@ -9336,9 +9322,7 @@ async def jenna_overrides_refresh():
             override_amt = round(kw * 1000 * JENNA_OVERRIDE_RATE, 2) if fully_paid == "Yes" else 0
             if fully_paid == "Yes":
                 fully_paid_total_kw += kw
-            zoho_id = r.get("id") or ""
-            paid_date = paid_dates.get(zoho_id, "")
-            rows.append([name, kw, created_date, sc_date, status, fully_paid, override_amt, zoho_id, paid_date])
+            rows.append([name, kw, created_date, sc_date, status, fully_paid, override_amt, r.get("id") or ""])
 
         # Clear and rewrite Projects tab
         svc.spreadsheets().values().clear(
