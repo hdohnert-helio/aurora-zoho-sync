@@ -9253,7 +9253,6 @@ _JENNA_FULLY_PAID_STATUSES = {
     "Cash-Pd In Full",
     "LR - Fully Paid",
     "LR - Activation Package Paid",
-    "LR - Install Package Paid",
     "CF - Phase 2 Funded",
     "SG - PTO Package Paid",
     "SG - Install Package Paid",
@@ -9325,7 +9324,7 @@ async def jenna_overrides_refresh():
         records.sort(key=lambda r: r.get("Project_Created_Date") or "")
 
         _CANVAS_ID = "5264387000040853100"
-        rows = [["Project Name", "System kW", "Created Date", "SC Date", "Lending Status", "Fully Paid?", "Override Amount", "Zoho ID", "Zoho Link", "Paid Out On"]]
+        rows = [["Project Name", "System kW", "Created Date", "SC Date", "Lending Status", "Customer Paid?", "Override Amount", "Zoho ID", "Zoho Link", "Paid Out On"]]
         fully_paid_total_kw = 0.0
         for r in records:
             name = r.get("Name") or ""
@@ -9333,7 +9332,7 @@ async def jenna_overrides_refresh():
             created_date = r.get("Project_Created_Date") or ""
             sc_date = r.get("Substantial_Completion") or ""
             status = (r.get("Lending_Status") or "").strip()
-            fully_paid = "Yes" if status in _JENNA_FULLY_PAID_STATUSES else "No"
+            fully_paid = "Yes" if status in _JENNA_FULLY_PAID_STATUSES else "No"  # customer paid Helio
             override_amt = round(kw * 1000 * JENNA_OVERRIDE_RATE, 2) if fully_paid == "Yes" else 0
             if fully_paid == "Yes":
                 fully_paid_total_kw += kw
