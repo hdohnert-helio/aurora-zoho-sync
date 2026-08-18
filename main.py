@@ -9238,6 +9238,124 @@ async def property_lookup(request: Request):
         return {"error": str(e), "traceback": _tb.format_exc()}
 
 
+
+# ─────────────────────────────────────────────────────────────
+# Jenna Override Tracker
+# ─────────────────────────────────────────────────────────────
+JENNA_OVERRIDE_SHEET_ID = "1kxOGEtUhDIiOp5WAwlVogB5zppw_Cy0UsociDgDO7CA"
+JENNA_OVERRIDE_RATE = 0.02  # $/watt
+JENNA_CUTOFF_DATE = "2025-09-22T00:00:00-04:00"  # projects created on or after this date
+
+# Lending statuses that mean the customer has fully paid
+_JENNA_FULLY_PAID_STATUSES = {
+    "Cash - paid in full",
+    "Cash - Pd In Full",
+    "Cash-Pd In Full",
+    "LR - Fully Paid",
+    "LR - Activation Package Paid",
+    "LR - Install Package Paid",
+    "CF - Phase 2 Funded",
+    "SG - PTO Package Paid",
+    "SG - Install Package Paid",
+    "SE- Final 1/3 Payment Funded",
+    "SE - Loan Closed 1/3 Payment Funded",
+    "SE - Final 1/3 Payment Funded",
+}
+
+
+def _zoho_coql_all(coql: str, access_token: str, api_domain: str) -> list:
+    """Paginate a COQL query and return all records."""
+    all_records = []
+    offset = 0
+    page_size = 200
+    while True:
+        paginated = coql.rstrip() + f" OFFSET {offset} LIMIT {page_size}"
+        url = f"{api_domain}/crm/v7/coql"
+        resp = requests.post(
+            url, json={"select_query": paginated},
+            headers={"Authorization": f"Zoho-oauthtoken {access_token}"},
+        )
+        data = resp.json()
+        records = data.get("data", [])
+        all_records.extend(records)
+        if not data.get("info", {}).get("more_records"):
+            break
+        offset += page_size
+    return all_records
+
+
+@app.post("/jenna-overrides/refresh")
+async def jenna_overrides_refresh():
+    """
+    Pull all Installs created on/after 2025-09-22 from Zoho, classify by
+    fully-paid status, and write to the Jenna Override Tracker Google Sheet.
+    Preserves the Payments tab (payment history) — only overwrites Projects tab.
+    """
+    try:
+        access_token = get_zoho_access_token()
+        api_domain = os.getenv("ZOHO_API_DOMAIN", "https://www.zohoapis.com")
+        svc = _build_sheets_service()
+
+        coql = (
+            "SELECT Name, System_kW_DC, Created_Time, Substantial_Completion, Lending_Status, id "
+            "FROM Installs WHERE Created_Time >= '2025-09-22T00:00:00-04:00'"
+        )
+        records = _zoho_coql_all(coql, access_token, api_domain)
+        logger.info(f"jenna_overrides_refresh: fetched {len(records)} Zoho records")
+
+        # Sort by created date ascending
+        records.sort(key=lambda r: r.get("Created_Time") or "")
+
+        rows = [["Project Name", "System kW", "Created Date", "SC Date", "Lending Status", "Fully Paid?", "Override Amount", "Zoho ID"]]
+        fully_paid_total_kw = 0.0
+        for r in records:
+            name = r.get("Name") or ""
+            kw = r.get("System_kW_DC") or 0
+            created_raw = r.get("Created_Time") or ""
+            created_date = created_raw[:10] if created_raw else ""
+            sc_date = r.get("Substantial_Completion") or ""
+            status = (r.get("Lending_Status") or "").strip()
+            fully_paid = "Yes" if status in _JENNA_FULLY_PAID_STATUSES else "No"
+            override_amt = round(kw * 1000 * JENNA_OVERRIDE_RATE, 2) if fully_paid == "Yes" else 0
+            if fully_paid == "Yes":
+                fully_paid_total_kw += kw
+            rows.append([name, kw, created_date, sc_date, status, fully_paid, override_amt, r.get("id") or ""])
+
+        # Clear and rewrite Projects tab
+        svc.spreadsheets().values().clear(
+            spreadsheetId=JENNA_OVERRIDE_SHEET_ID, range="Projects!A:H"
+        ).execute()
+        svc.spreadsheets().values().update(
+            spreadsheetId=JENNA_OVERRIDE_SHEET_ID,
+            range="Projects!A1",
+            valueInputOption="USER_ENTERED",
+            body={"values": rows},
+        ).execute()
+
+        # Update last-refreshed timestamp in Summary tab
+        import datetime as _dt
+        now_str = _dt.datetime.now().strftime("%Y-%m-%d %H:%M")
+        svc.spreadsheets().values().update(
+            spreadsheetId=JENNA_OVERRIDE_SHEET_ID,
+            range="Summary!B9",
+            valueInputOption="USER_ENTERED",
+            body={"values": [[f"Last refreshed {now_str}"]]},
+        ).execute()
+
+        fully_paid_count = sum(1 for r in rows[1:] if r[5] == "Yes")
+        return {
+            "status": "ok",
+            "total_records": len(records),
+            "fully_paid_projects": fully_paid_count,
+            "fully_paid_kw": round(fully_paid_total_kw, 2),
+            "estimated_total_owed": round(fully_paid_total_kw * 1000 * JENNA_OVERRIDE_RATE, 2),
+        }
+    except Exception as e:
+        import traceback as _tb
+        logger.error(f"jenna_overrides_refresh error: {e}")
+        return {"error": str(e), "traceback": _tb.format_exc()}
+
+
 @app.get("/debug/read-tab")
 async def debug_read_tab(sheet_id: str, tab: str, range_: str = "A1:Z200"):
     """Read raw values from any tab of any sheet the service account can access."""
