@@ -9410,13 +9410,11 @@ async def jenna_overrides_refresh():
         import datetime as _dt
         now_str = _dt.datetime.now().strftime("%Y-%m-%d %H:%M")
         pipeline_total_amt = round(pipeline_total_kw * 1000 * JENNA_OVERRIDE_RATE, 2)
-        svc.spreadsheets().values().batchUpdate(
+        svc.spreadsheets().values().update(
             spreadsheetId=JENNA_OVERRIDE_SHEET_ID,
-            body={"valueInputOption": "USER_ENTERED", "data": [
-                {"range": "Summary!B9", "values": [[f"Last refreshed {now_str}"]]},
-                {"range": "Summary!A10", "values": [["Total Pipeline Override"]]},
-                {"range": "Summary!B10", "values": [[pipeline_total_amt]]},
-            ]},
+            range="Summary!B9",
+            valueInputOption="USER_ENTERED",
+            body={"values": [[f"Last refreshed {now_str}"]]},
         ).execute()
 
         fully_paid_count = sum(1 for r in rows[1:] if r[5] == "Yes")
