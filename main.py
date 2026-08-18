@@ -9266,7 +9266,7 @@ def _zoho_fetch_all_installs_for_jenna(access_token: str, api_domain: str) -> li
     page = 1
     headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
     criteria = "(Project_Created_Date:greater_equal:2025-09-22)"
-    fields = "id,Name,System_kW_DC,Project_Created_Date,Substantial_Completion,Lending_Status"
+    fields = "id,Name,System_kW_DC,Project_Created_Date,Substantial_Completion,Lending_Status,Project_Stage"
     while True:
         url = (
             f"{api_domain}/crm/v7/Installs/search"
@@ -9301,47 +9301,55 @@ async def jenna_overrides_refresh():
         api_domain = os.getenv("ZOHO_API_DOMAIN", "https://www.zohoapis.com")
         svc = _build_sheets_service()
 
-        # Save existing Paid Out On dates (col J) keyed by Zoho ID (col H) before clearing
+        # Save existing Paid Out On dates (col K) keyed by Zoho ID (col H) before clearing
+        # Layout: H=Zoho ID, I=Zoho Link, J=Stage, K=Paid Out On → read H2:K, offset 3
         paid_out_on: dict = {}
         try:
             existing = svc.spreadsheets().values().get(
                 spreadsheetId=JENNA_OVERRIDE_SHEET_ID,
-                range="Projects!H2:J",
+                range="Projects!H2:K",
                 valueRenderOption="FORMATTED_VALUE",
             ).execute().get("values", [])
             for row in existing:
-                if len(row) >= 3 and row[0] and row[2]:
-                    paid_out_on[row[0]] = row[2]
+                if len(row) >= 4 and row[0] and row[3]:
+                    paid_out_on[row[0]] = row[3]
         except Exception:
             pass
 
         all_installs = _zoho_fetch_all_installs_for_jenna(access_token, api_domain)
         logger.info(f"jenna_overrides_refresh: fetched {len(all_installs)} Zoho records")
 
-        records = all_installs
+        _CANCELLED_STAGES = {"Cancelled", "Canceled", "cancelled", "canceled", "Lost", "lost"}
+
+        records = [r for r in all_installs if (r.get("Project_Stage") or "") not in _CANCELLED_STAGES]
         records.sort(key=lambda r: r.get("Project_Created_Date") or "")
+        logger.info(f"jenna_overrides_refresh: {len(records)} records after filtering cancelled/lost")
 
         _CANVAS_ID = "5264387000040853100"
-        rows = [["Project Name", "System kW", "Created Date", "SC Date", "Lending Status", "Customer Paid?", "Override Amount", "Zoho ID", "Zoho Link", "Paid Out On"]]
+        # Columns A-K: Name | kW | Created | SC Date | Lending Status | Customer Paid? | Override Amount | Zoho ID | Zoho Link | Stage | Paid Out On
+        rows = [["Project Name", "System kW", "Created Date", "SC Date", "Lending Status", "Customer Paid?", "Override Amount", "Zoho ID", "Zoho Link", "Stage", "Paid Out On"]]
         fully_paid_total_kw = 0.0
+        pipeline_total_kw = 0.0
         for r in records:
             name = r.get("Name") or ""
             kw = r.get("System_kW_DC") or 0
             created_date = r.get("Project_Created_Date") or ""
             sc_date = r.get("Substantial_Completion") or ""
             status = (r.get("Lending_Status") or "").strip()
-            fully_paid = "Yes" if status in _JENNA_FULLY_PAID_STATUSES else "No"  # customer paid Helio
+            stage = (r.get("Project_Stage") or "").strip()
+            fully_paid = "Yes" if status in _JENNA_FULLY_PAID_STATUSES else "No"
             override_amt = round(kw * 1000 * JENNA_OVERRIDE_RATE, 2) if fully_paid == "Yes" else 0
+            pipeline_total_kw += kw
             if fully_paid == "Yes":
                 fully_paid_total_kw += kw
             zoho_id = r.get("id") or ""
             zoho_url = f"https://crm.zoho.com/crm/heliosolar/tab/CustomModule6/{zoho_id}/canvas/{_CANVAS_ID}"
             zoho_link = f'=HYPERLINK("{zoho_url}", "View")'
-            rows.append([name, kw, created_date, sc_date, status, fully_paid, override_amt, zoho_id, zoho_link, paid_out_on.get(zoho_id, "")])
+            rows.append([name, kw, created_date, sc_date, status, fully_paid, override_amt, zoho_id, zoho_link, stage, paid_out_on.get(zoho_id, "")])
 
-        # Clear and rewrite Projects tab
+        # Clear and rewrite Projects tab (A:K)
         svc.spreadsheets().values().clear(
-            spreadsheetId=JENNA_OVERRIDE_SHEET_ID, range="Projects!A:J"
+            spreadsheetId=JENNA_OVERRIDE_SHEET_ID, range="Projects!A:K"
         ).execute()
         svc.spreadsheets().values().update(
             spreadsheetId=JENNA_OVERRIDE_SHEET_ID,
@@ -9350,14 +9358,17 @@ async def jenna_overrides_refresh():
             body={"values": rows},
         ).execute()
 
-        # Update last-refreshed timestamp in Summary tab
+        # Update Summary tab: last-refreshed timestamp + pipeline total
         import datetime as _dt
         now_str = _dt.datetime.now().strftime("%Y-%m-%d %H:%M")
-        svc.spreadsheets().values().update(
+        pipeline_total_amt = round(pipeline_total_kw * 1000 * JENNA_OVERRIDE_RATE, 2)
+        svc.spreadsheets().values().batchUpdate(
             spreadsheetId=JENNA_OVERRIDE_SHEET_ID,
-            range="Summary!B9",
-            valueInputOption="USER_ENTERED",
-            body={"values": [[f"Last refreshed {now_str}"]]},
+            body={"valueInputOption": "USER_ENTERED", "data": [
+                {"range": "Summary!B9", "values": [[f"Last refreshed {now_str}"]]},
+                {"range": "Summary!A10", "values": [["Total Pipeline Override"]]},
+                {"range": "Summary!B10", "values": [[pipeline_total_amt]]},
+            ]},
         ).execute()
 
         fully_paid_count = sum(1 for r in rows[1:] if r[5] == "Yes")
@@ -9367,6 +9378,8 @@ async def jenna_overrides_refresh():
             "fully_paid_projects": fully_paid_count,
             "fully_paid_kw": round(fully_paid_total_kw, 2),
             "estimated_total_owed": round(fully_paid_total_kw * 1000 * JENNA_OVERRIDE_RATE, 2),
+            "pipeline_total_kw": round(pipeline_total_kw, 2),
+            "pipeline_total_override": pipeline_total_amt,
         }
     except Exception as e:
         import traceback as _tb
