@@ -9297,23 +9297,34 @@ async def jenna_overrides_refresh():
     """
     Pull all Installs created on/after 2025-09-22 from Zoho, classify by
     fully-paid status, and write to the Jenna Override Tracker Google Sheet.
-    Preserves the Payments tab (payment history) — only overwrites Projects tab.
+    Preserves the Payments tab and any Override Paid Date entries in Projects.
     """
     try:
         access_token = get_zoho_access_token()
         api_domain = os.getenv("ZOHO_API_DOMAIN", "https://www.zohoapis.com")
         svc = _build_sheets_service()
 
+        # Save existing Override Paid Dates (col I) keyed by Zoho ID (col H) before clearing
+        paid_dates: dict = {}
+        try:
+            existing = svc.spreadsheets().values().get(
+                spreadsheetId=JENNA_OVERRIDE_SHEET_ID,
+                range="Projects!H2:I",
+                valueRenderOption="FORMATTED_VALUE",
+            ).execute().get("values", [])
+            for row in existing:
+                if len(row) >= 2 and row[0] and row[1]:
+                    paid_dates[row[0]] = row[1]
+        except Exception:
+            pass
+
         all_installs = _zoho_fetch_all_installs_for_jenna(access_token, api_domain)
-        logger.info(f"jenna_overrides_refresh: fetched {len(all_installs)} total Zoho records")
+        logger.info(f"jenna_overrides_refresh: fetched {len(all_installs)} Zoho records")
 
         records = all_installs
-        logger.info(f"jenna_overrides_refresh: {len(records)} records (already filtered by Project_Created_Date >= 2025-09-22 in search)")
+        records.sort(key=lambda r: r.get("Project_Created_Date") or "")
 
-        # Sort by created date ascending
-        records.sort(key=lambda r: r.get("Created_Time") or "")
-
-        rows = [["Project Name", "System kW", "Created Date", "SC Date", "Lending Status", "Fully Paid?", "Override Amount", "Zoho ID"]]
+        rows = [["Project Name", "System kW", "Created Date", "SC Date", "Lending Status", "Fully Paid?", "Override Amount", "Zoho ID", "Override Paid Date"]]
         fully_paid_total_kw = 0.0
         for r in records:
             name = r.get("Name") or ""
@@ -9325,11 +9336,13 @@ async def jenna_overrides_refresh():
             override_amt = round(kw * 1000 * JENNA_OVERRIDE_RATE, 2) if fully_paid == "Yes" else 0
             if fully_paid == "Yes":
                 fully_paid_total_kw += kw
-            rows.append([name, kw, created_date, sc_date, status, fully_paid, override_amt, r.get("id") or ""])
+            zoho_id = r.get("id") or ""
+            paid_date = paid_dates.get(zoho_id, "")
+            rows.append([name, kw, created_date, sc_date, status, fully_paid, override_amt, zoho_id, paid_date])
 
         # Clear and rewrite Projects tab
         svc.spreadsheets().values().clear(
-            spreadsheetId=JENNA_OVERRIDE_SHEET_ID, range="Projects!A:H"
+            spreadsheetId=JENNA_OVERRIDE_SHEET_ID, range="Projects!A:I"
         ).execute()
         svc.spreadsheets().values().update(
             spreadsheetId=JENNA_OVERRIDE_SHEET_ID,
