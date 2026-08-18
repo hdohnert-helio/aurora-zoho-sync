@@ -9263,23 +9263,26 @@ _JENNA_FULLY_PAID_STATUSES = {
 }
 
 
-def _zoho_fetch_all_installs(access_token: str, api_domain: str) -> list:
-    """Fetch all Install records from Zoho using the standard records API."""
+def _zoho_fetch_all_installs_for_jenna(access_token: str, api_domain: str) -> list:
+    """Fetch all Install records from Zoho needed for Jenna override calculations."""
     all_records = []
     page = 1
     per_page = 200
     headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
     while True:
-        url = f"{api_domain}/crm/v2/Installs"
-        resp = requests.get(url, headers=headers, params={
-            "fields": "Name,System_kW_DC,Created_Time,Substantial_Completion,Lending_Status,id",
-            "per_page": per_page,
-            "page": page,
-            "sort_by": "Created_Time",
-            "sort_order": "asc",
-        })
+        url = (
+            f"{api_domain}/crm/v2/Installs"
+            f"?fields=id,Name,System_kW_DC,Created_Time,Substantial_Completion,Lending_Status"
+            f"&page={page}&per_page={per_page}"
+        )
+        resp = requests.get(url, headers=headers)
+        if resp.status_code != 200:
+            logger.error(f"_zoho_fetch_all_installs_for_jenna: page {page} failed status={resp.status_code}")
+            break
         data = resp.json()
-        records = data.get("data", [])
+        records = data.get("data") or []
+        if not records:
+            break
         all_records.extend(records)
         if not data.get("info", {}).get("more_records"):
             break
@@ -9299,7 +9302,7 @@ async def jenna_overrides_refresh():
         api_domain = os.getenv("ZOHO_API_DOMAIN", "https://www.zohoapis.com")
         svc = _build_sheets_service()
 
-        all_installs = _zoho_fetch_all_installs(access_token, api_domain)
+        all_installs = _zoho_fetch_all_installs_for_jenna(access_token, api_domain)
         logger.info(f"jenna_overrides_refresh: fetched {len(all_installs)} total Zoho records")
 
         # Filter to records created on or after 2025-09-22
