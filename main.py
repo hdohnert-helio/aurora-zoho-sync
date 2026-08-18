@@ -9304,13 +9304,28 @@ async def jenna_overrides_refresh():
         api_domain = os.getenv("ZOHO_API_DOMAIN", "https://www.zohoapis.com")
         svc = _build_sheets_service()
 
+        # Save existing Paid Out On dates (col J) keyed by Zoho ID (col H) before clearing
+        paid_out_on: dict = {}
+        try:
+            existing = svc.spreadsheets().values().get(
+                spreadsheetId=JENNA_OVERRIDE_SHEET_ID,
+                range="Projects!H2:J",
+                valueRenderOption="FORMATTED_VALUE",
+            ).execute().get("values", [])
+            for row in existing:
+                if len(row) >= 3 and row[0] and row[2]:
+                    paid_out_on[row[0]] = row[2]
+        except Exception:
+            pass
+
         all_installs = _zoho_fetch_all_installs_for_jenna(access_token, api_domain)
         logger.info(f"jenna_overrides_refresh: fetched {len(all_installs)} Zoho records")
 
         records = all_installs
         records.sort(key=lambda r: r.get("Project_Created_Date") or "")
 
-        rows = [["Project Name", "System kW", "Created Date", "SC Date", "Lending Status", "Fully Paid?", "Override Amount", "Zoho ID"]]
+        _CANVAS_ID = "5264387000040853100"
+        rows = [["Project Name", "System kW", "Created Date", "SC Date", "Lending Status", "Fully Paid?", "Override Amount", "Zoho ID", "Zoho Link", "Paid Out On"]]
         fully_paid_total_kw = 0.0
         for r in records:
             name = r.get("Name") or ""
@@ -9322,11 +9337,14 @@ async def jenna_overrides_refresh():
             override_amt = round(kw * 1000 * JENNA_OVERRIDE_RATE, 2) if fully_paid == "Yes" else 0
             if fully_paid == "Yes":
                 fully_paid_total_kw += kw
-            rows.append([name, kw, created_date, sc_date, status, fully_paid, override_amt, r.get("id") or ""])
+            zoho_id = r.get("id") or ""
+            zoho_url = f"https://crm.zoho.com/crm/heliosolar/tab/CustomModule6/{zoho_id}/canvas/{_CANVAS_ID}"
+            zoho_link = f'=HYPERLINK("{zoho_url}", "View")'
+            rows.append([name, kw, created_date, sc_date, status, fully_paid, override_amt, zoho_id, zoho_link, paid_out_on.get(zoho_id, "")])
 
         # Clear and rewrite Projects tab
         svc.spreadsheets().values().clear(
-            spreadsheetId=JENNA_OVERRIDE_SHEET_ID, range="Projects!A:I"
+            spreadsheetId=JENNA_OVERRIDE_SHEET_ID, range="Projects!A:J"
         ).execute()
         svc.spreadsheets().values().update(
             spreadsheetId=JENNA_OVERRIDE_SHEET_ID,
