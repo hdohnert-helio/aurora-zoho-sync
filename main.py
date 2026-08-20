@@ -4850,7 +4850,7 @@ def _payroll_friday_label() -> str:
     return f"{friday.month}/{friday.day}"
 
 
-def _fetch_all_cashflow_projects(cutoff_date: str = "2026-01-01", override_proj_ids: set = None) -> list[dict]:
+def _fetch_all_cashflow_projects(cutoff_date: str = "2026-01-01", override_proj_ids: set = None, ct_green_paid_ids: set = None) -> list[dict]:
     """
     Pull all Zoho Installs for cash flow pipeline. Filters to projects that
     are installed (have Substantial_Completion OR are in an installed stage),
@@ -4865,6 +4865,8 @@ def _fetch_all_cashflow_projects(cutoff_date: str = "2026-01-01", override_proj_
     headers = {"Authorization": f"Zoho-oauthtoken {token}"}
     if override_proj_ids is None:
         override_proj_ids = set()
+    if ct_green_paid_ids is None:
+        ct_green_paid_ids = set()
 
     fields = (
         "Name,Project_ID,Aurora_Project_ID,Sales_Representative,Owner,"
@@ -4909,9 +4911,14 @@ def _fetch_all_cashflow_projects(cutoff_date: str = "2026-01-01", override_proj_
                 continue
             if not is_installed and not is_pipeline and not in_overrides and not has_pending_holdback:
                 continue
-            # Skip fully paid projects — all payments received, nothing pending
+            # Skip fully paid projects — all payments received, nothing pending.
+            # Exception: keep if CT Green Estates payment is still outstanding
+            # (SC after cutoff date and not explicitly marked paid in Overrides).
             if lending_status in CASHFLOW_FULLY_PAID_STATUSES:
-                continue
+                sc_str = (r.get("Substantial_Completion") or "").strip()
+                ct_green_pending = (sc_str > "2026-06-08" and proj_id not in ct_green_paid_ids)
+                if not ct_green_pending:
+                    continue
             owner_obj = r.get("Owner")
             owner_name = owner_obj.get("name", "") if isinstance(owner_obj, dict) else ""
             results.append({
@@ -7182,8 +7189,10 @@ async def cashflow_run(request: Request):
     now_label = datetime.datetime.now(datetime.timezone.utc).strftime("%-m-%-d-%Y")
     tab_name = f"Pipeline {now_label}"
     svc = _build_sheets_service()
-    override_ids = set(_read_payment_overrides(svc).keys()) if svc else set()
-    projects = _fetch_all_cashflow_projects(cutoff_date=cutoff, override_proj_ids=override_ids)
+    payment_overrides = _read_payment_overrides(svc) if svc else {}
+    override_ids = set(payment_overrides.keys())
+    ct_green_paid_ids = {pid for pid, v in payment_overrides.items() if v.get("ct_green_paid")}
+    projects = _fetch_all_cashflow_projects(cutoff_date=cutoff, override_proj_ids=override_ids, ct_green_paid_ids=ct_green_paid_ids)
     if not projects:
         return {"status": "no installed projects found", "cutoff_date": cutoff}
     try:
