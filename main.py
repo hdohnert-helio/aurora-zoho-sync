@@ -4817,6 +4817,8 @@ CASHFLOW_STAGE_DAYS_TO_SC = {
     "Permitting": 22,
     "Procurement & Scheduling": 12,
     "Active Installation": 5,
+    "Inspection": 2,
+    "Witness Test / PTO": 2,
 }
 
 
@@ -5839,7 +5841,9 @@ def _compute_cashflow_row(row: dict, today: datetime.date, zoho_base: str, auror
     ct_green_date = ct_green_amt = ""
     _ct_green_cutoff = "2026-06-08"
     _sc_for_ct = effective_sc_str or ""
-    if system_watts and not pov.get("ct_green_paid") and _sc_for_ct > _ct_green_cutoff:
+    # CASH/SE deals with a payment3 override are definitionally post-cutoff — bypass the SC check.
+    _cash_override_bypasses_cutoff = finance_type in ("CASH", "SE") and bool(pov.get("payment3"))
+    if system_watts and not pov.get("ct_green_paid") and (_sc_for_ct > _ct_green_cutoff or _cash_override_bypasses_cutoff):
         if lending_status in CASHFLOW_FULLY_PAID_STATUSES or lending_status in CASHFLOW_LR_ACTIVATION_PAID_STATUSES:
             # Use the computed payment2 date (saved before clearing); override takes precedence
             final_date_for_ct = pov.get("payment2") or _payment2_date_before_clear or effective_sc_str
