@@ -5252,6 +5252,7 @@ OVERRIDES_HEADERS = [
     "Project ID", "Customer", "Payment 1 Date", "Payment 2 Date", "Payment 3 Date",
     "Notes", "Payment 1 Amt", "Payment 2 Amt", "Payment 3 Amt", "Materials Actual",
     "Comm Payout 1 Amt", "Comm Payout 2 Amt", "Holdback Date", "Holdback Amt",
+    "CT Green Paid",
 ]
 
 def _ensure_overrides_tab(svc) -> None:
@@ -5389,6 +5390,8 @@ def _read_payment_overrides(svc) -> dict:
             entry["holdback_date"] = valid_date(row[12])
         if len(row) > 13 and parse_amt(row[13]) is not None:
             entry["holdback_amt"] = parse_amt(row[13])
+        if len(row) > 14 and str(row[14]).strip():
+            entry["ct_green_paid"] = True
         if entry:
             if proj_id in overrides:
                 overrides[proj_id].update(entry)
@@ -5822,11 +5825,17 @@ def _compute_cashflow_row(row: dict, today: datetime.date, zoho_base: str, auror
 
     # CT Green Estates cost: $0.25/W, paid once project is fully paid (activation/final)
     # Only applies to projects with SC date after 2026-06-08 (CT Green contract start)
+    # Suppressed only when explicitly marked paid via "CT Green Paid" column in Overrides tab.
+    # NOTE: lending_status is intentionally NOT used to suppress CT Green — marking activation
+    # paid in Zoho does not mean CT Green has been paid; those are independent events.
     ct_green_date = ct_green_amt = ""
     _ct_green_cutoff = "2026-06-08"
     _sc_for_ct = effective_sc_str or ""
-    if system_watts and lending_status not in CASHFLOW_FULLY_PAID_STATUSES and _sc_for_ct > _ct_green_cutoff:
-        if finance_type == "LR":
+    if system_watts and not pov.get("ct_green_paid") and _sc_for_ct > _ct_green_cutoff:
+        if lending_status in CASHFLOW_FULLY_PAID_STATUSES:
+            # Activation already paid but CT Green not yet — schedule for current week
+            final_date_for_ct = _next_monday_on_or_after(datetime.date.today()).isoformat()
+        elif finance_type == "LR":
             # Use activation payment date; fall back to SC date if activation not yet scheduled
             final_date_for_ct = payment2_date or effective_sc_str
         elif finance_type in ("CASH", "SE"):
