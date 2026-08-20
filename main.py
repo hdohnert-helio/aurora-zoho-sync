@@ -5816,6 +5816,7 @@ def _compute_cashflow_row(row: dict, today: datetime.date, zoho_base: str, auror
     # Status-based clearing for LR/SG — runs AFTER pov overrides so Zoho status always wins.
     # Only revenue payments are cleared (already received from lender); commission payouts
     # remain visible as pending expenses until manually cleared or project fully paid.
+    _payment2_date_before_clear = payment2_date  # saved for CT Green before status-based clearing
     if finance_type in ("LR", "SG"):
         if lending_status in CASHFLOW_LR_DRAW_PAID_STATUSES:
             payment1_date = payment1_amt = ""
@@ -5840,9 +5841,8 @@ def _compute_cashflow_row(row: dict, today: datetime.date, zoho_base: str, auror
     _sc_for_ct = effective_sc_str or ""
     if system_watts and not pov.get("ct_green_paid") and _sc_for_ct > _ct_green_cutoff:
         if lending_status in CASHFLOW_FULLY_PAID_STATUSES or lending_status in CASHFLOW_LR_ACTIVATION_PAID_STATUSES:
-            # Use the override payment2 date (actual activation receipt date) if available;
-            # otherwise fall back to next Monday (current week)
-            final_date_for_ct = pov.get("payment2") or _next_monday_on_or_after(datetime.date.today()).isoformat()
+            # Use the computed payment2 date (saved before clearing); override takes precedence
+            final_date_for_ct = pov.get("payment2") or _payment2_date_before_clear or effective_sc_str
         elif finance_type == "LR":
             # Use activation payment date; fall back to SC date if activation not yet scheduled
             final_date_for_ct = payment2_date or effective_sc_str
