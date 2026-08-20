@@ -6675,19 +6675,30 @@ def _write_dashboard_project_expenses(svc, weekly_events: list) -> int:
     """
     sheets = _build_sheets_service().spreadsheets()
 
-    # Save 'Paid' statuses before clearing so they survive the rewrite
-    paid_keys = _read_expense_paid_keys(svc)
-
-    # Remove stale Auto project rows before appending fresh ones to prevent duplicates
+    # Read existing rows before touching anything
     _PROJECT_CATS = {"Commissions", "Materials", "SolarInsure/Warranty", "Subcontractor", "Subcontractor Payments", "CT Green Estates"}
     existing = sheets.values().get(
         spreadsheetId=DASHBOARD_SHEET_ID,
         range="Expenses!A2:H",
         valueRenderOption="FORMATTED_VALUE",
     ).execute().get("values", [])
+
+    # Paid auto project rows are immutable historical records — never remove them.
+    # Active auto project rows are replaced with fresh data from weekly_events.
+    paid_project_rows = [
+        r for r in existing
+        if len(r) > 5 and str(r[5]).strip() == "Paid"
+        and len(r) > 4 and str(r[4]).strip() == "Auto"
+        and len(r) > 1 and str(r[1]).strip() in _PROJECT_CATS
+    ]
+    # (category, customer) pairs already marked Paid — skip adding a new Active row for these
+    paid_pairs = {(str(r[1]).strip(), str(r[2]).strip()) for r in paid_project_rows}
+
+    # Remove stale Active auto project rows; keep everything else (manual, overhead, Paid project)
     kept = [r for r in existing
             if not (len(r) > 4 and str(r[4]).strip() == "Auto"
-                    and len(r) > 1 and r[1] in _PROJECT_CATS)]
+                    and len(r) > 1 and str(r[1]).strip() in _PROJECT_CATS
+                    and not (len(r) > 5 and str(r[5]).strip() == "Paid"))]
     sheets.values().clear(spreadsheetId=DASHBOARD_SHEET_ID, range="Expenses!A2:H").execute()
     if kept:
         sheets.values().update(
@@ -6710,48 +6721,53 @@ def _write_dashboard_project_expenses(svc, weekly_events: list) -> int:
 
         # Subcontractor costs
         if pay_type == "Subcontractor" and pay_amt:
-            try:
-                d = datetime.date.fromisoformat(evt[1])
-                serial = _sheets_serial(d - datetime.timedelta(days=d.weekday()))
-            except Exception:
-                serial = evt[0]
-            rows.append([serial, "Subcontractor", customer, pay_amt, "Auto", "Active", "", ""])
+            if ("Subcontractor", customer) not in paid_pairs:
+                try:
+                    d = datetime.date.fromisoformat(evt[1])
+                    serial = _sheets_serial(d - datetime.timedelta(days=d.weekday()))
+                except Exception:
+                    serial = evt[0]
+                rows.append([serial, "Subcontractor", customer, pay_amt, "Auto", "Active", "", ""])
 
         # Cash/SE materials outflow
         if pay_type == "Cash Materials" and pay_amt:
-            try:
-                d = datetime.date.fromisoformat(evt[1])
-                serial = _sheets_serial(d - datetime.timedelta(days=d.weekday()))
-            except Exception:
-                serial = evt[0]
-            rows.append([serial, "Materials", customer, pay_amt, "Auto", "Active", "", ""])
+            if ("Materials", customer) not in paid_pairs:
+                try:
+                    d = datetime.date.fromisoformat(evt[1])
+                    serial = _sheets_serial(d - datetime.timedelta(days=d.weekday()))
+                except Exception:
+                    serial = evt[0]
+                rows.append([serial, "Materials", customer, pay_amt, "Auto", "Active", "", ""])
 
         # SolarInsure warranty fee
         if pay_type == "SolarInsure" and pay_amt:
-            try:
-                d = datetime.date.fromisoformat(evt[1])
-                serial = _sheets_serial(d - datetime.timedelta(days=d.weekday()))
-            except Exception:
-                serial = evt[0]
-            rows.append([serial, "SolarInsure/Warranty", customer, pay_amt, "Auto", "Active", "", ""])
+            if ("SolarInsure/Warranty", customer) not in paid_pairs:
+                try:
+                    d = datetime.date.fromisoformat(evt[1])
+                    serial = _sheets_serial(d - datetime.timedelta(days=d.weekday()))
+                except Exception:
+                    serial = evt[0]
+                rows.append([serial, "SolarInsure/Warranty", customer, pay_amt, "Auto", "Active", "", ""])
 
         # CT Green Estates cost
         if pay_type == "CT Green Estates" and pay_amt:
-            try:
-                d = datetime.date.fromisoformat(evt[1])
-                serial = _sheets_serial(d - datetime.timedelta(days=d.weekday()))
-            except Exception:
-                serial = evt[0]
-            rows.append([serial, "CT Green Estates", customer, pay_amt, "Auto", "Active", "", ""])
+            if ("CT Green Estates", customer) not in paid_pairs:
+                try:
+                    d = datetime.date.fromisoformat(evt[1])
+                    serial = _sheets_serial(d - datetime.timedelta(days=d.weekday()))
+                except Exception:
+                    serial = evt[0]
+                rows.append([serial, "CT Green Estates", customer, pay_amt, "Auto", "Active", "", ""])
 
         # Commission payouts (keyed to comm_date, not pay_date)
         if comm_date and comm_amt and comm_amt != "" and comm_amt != 0:
-            try:
-                cd = datetime.date.fromisoformat(comm_date)
-                serial = _sheets_serial(cd - datetime.timedelta(days=cd.weekday()))
-            except Exception:
-                serial = evt[0]
-            rows.append([serial, "Commissions", customer, comm_amt, "Auto", "Active", "", ""])
+            if ("Commissions", customer) not in paid_pairs:
+                try:
+                    cd = datetime.date.fromisoformat(comm_date)
+                    serial = _sheets_serial(cd - datetime.timedelta(days=cd.weekday()))
+                except Exception:
+                    serial = evt[0]
+                rows.append([serial, "Commissions", customer, comm_amt, "Auto", "Active", "", ""])
 
     if rows:
         sheets.values().append(
@@ -6762,10 +6778,7 @@ def _write_dashboard_project_expenses(svc, weekly_events: list) -> int:
             body={"values": rows},
         ).execute()
 
-    # Re-apply 'Paid' status to rows that were marked before the rewrite
-    _restore_expense_paid_statuses(svc, paid_keys)
-
-    logger.info(f"_write_dashboard_project_expenses: appended {len(rows)} project expense rows")
+    logger.info(f"_write_dashboard_project_expenses: appended {len(rows)} project expense rows, {len(paid_project_rows)} Paid rows preserved")
     return len(rows)
 
 
