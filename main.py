@@ -5827,6 +5827,15 @@ def _compute_cashflow_row(row: dict, today: datetime.date, zoho_base: str, auror
     if pov.get("comm_payout2") is not None:
         comm_payout2_amt = pov["comm_payout2"]
 
+    # Fully-paid project kept in only for CT Green — suppress all cash payments.
+    if row.get("ct_green_only"):
+        payment1_date = payment1_amt = ""
+        payment2_date = payment2_amt = ""
+        payment3_date = payment3_amt = ""
+        comm_payout1_date = comm_payout1_amt = ""
+        comm_payout2_date = comm_payout2_amt = ""
+        comm_payout3_date = comm_payout3_amt = ""
+
     # Status-based clearing for LR/SG — runs AFTER pov overrides so Zoho status always wins.
     # Only revenue payments are cleared (already received from lender); commission payouts
     # remain visible as pending expenses until manually cleared or project fully paid.
