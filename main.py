@@ -5173,11 +5173,12 @@ def _write_cashflow_tab(svc, tab_name: str, rows: list[dict]) -> None:
         if pov.get("amount3") is not None:
             payment3_amt = pov["amount3"]
 
-        # Project is fully paid — only CT Green is still pending; suppress all cash payments.
+        # Project is fully paid — only CT Green is still pending; zero out cash payment amounts
+        # but keep dates so SolarInsure can still generate from the pipeline row.
         if row.get("ct_green_only"):
-            payment1_date = payment1_amt = ""
-            payment2_date = payment2_amt = ""
-            payment3_date = payment3_amt = ""
+            payment1_amt = ""
+            payment2_amt = ""
+            payment3_amt = ""
             comm_payout1_date = comm_payout1_amt = ""
             comm_payout2_date = comm_payout2_amt = ""
             comm_payout3_date = comm_payout3_amt = ""
@@ -5827,13 +5828,12 @@ def _compute_cashflow_row(row: dict, today: datetime.date, zoho_base: str, auror
     if pov.get("comm_payout2") is not None:
         comm_payout2_amt = pov["comm_payout2"]
 
-    # Fully-paid project kept in only for CT Green — suppress all cash payments.
-    # Save payment3_date first so SolarInsure (an expense) can still be generated.
-    _si_fallback_date = payment3_date or payment2_date or payment1_date
+    # Fully-paid project kept in only for CT Green — zero out all cash payment amounts
+    # but keep the dates so SolarInsure (which only needs the date) still generates correctly.
     if row.get("ct_green_only"):
-        payment1_date = payment1_amt = ""
-        payment2_date = payment2_amt = ""
-        payment3_date = payment3_amt = ""
+        payment1_amt = ""
+        payment2_amt = ""
+        payment3_amt = ""
         comm_payout1_date = comm_payout1_amt = ""
         comm_payout2_date = comm_payout2_amt = ""
         comm_payout3_date = comm_payout3_amt = ""
@@ -5964,7 +5964,7 @@ def _compute_cashflow_row(row: dict, today: datetime.date, zoho_base: str, auror
 
     # SolarInsure: $0.10/watt at final payment for non-LR projects
     if finance_type not in ("LR", "SG") and system_watts:
-        si_date = payment3_date or payment2_date or payment1_date or (row.get("ct_green_only") and _si_fallback_date)
+        si_date = payment3_date or payment2_date or payment1_date
         if si_date:
             si_amt = round(system_watts * 0.10, 2)
             pay_events.append([si_date, customer, finance_type, "SolarInsure", si_amt,
