@@ -4916,11 +4916,13 @@ def _fetch_all_cashflow_projects(cutoff_date: str = "2026-01-01", override_proj_
             # Skip fully paid projects — all payments received, nothing pending.
             # Exception: keep if CT Green Estates payment is still outstanding
             # (SC after cutoff date and not explicitly marked paid in Overrides).
+            ct_green_only = False
             if lending_status in CASHFLOW_FULLY_PAID_STATUSES:
                 sc_str = (r.get("Substantial_Completion") or "").strip()
                 ct_green_pending = (sc_str > "2026-06-08" and proj_id not in ct_green_paid_ids)
                 if not ct_green_pending:
                     continue
+                ct_green_only = True
             owner_obj = r.get("Owner")
             owner_name = owner_obj.get("name", "") if isinstance(owner_obj, dict) else ""
             results.append({
@@ -4940,6 +4942,7 @@ def _fetch_all_cashflow_projects(cutoff_date: str = "2026-01-01", override_proj_
                 "price_per_watt_zoho": float(r.get("Price_Per_Watt") or 0),
                 "pto_date": (r.get("Utility_PTO") or "").strip(),
                 "ica_contingent_approval": (r.get("ICA_Contingent_Approval") or "").strip(),
+                "ct_green_only": ct_green_only,
             })
         info = resp.json().get("info") or {}
         if not info.get("more_records"):
@@ -5169,6 +5172,15 @@ def _write_cashflow_tab(svc, tab_name: str, rows: list[dict]) -> None:
             payment2_amt = pov["amount2"]
         if pov.get("amount3") is not None:
             payment3_amt = pov["amount3"]
+
+        # Project is fully paid — only CT Green is still pending; suppress all cash payments.
+        if row.get("ct_green_only"):
+            payment1_date = payment1_amt = ""
+            payment2_date = payment2_amt = ""
+            payment3_date = payment3_amt = ""
+            comm_payout1_date = comm_payout1_amt = ""
+            comm_payout2_date = comm_payout2_amt = ""
+            comm_payout3_date = comm_payout3_amt = ""
 
         notes_col = subcontractor_notes
 
