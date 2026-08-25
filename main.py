@@ -1626,6 +1626,7 @@ async def zoho_note_added(request: Request):
 
         latest_note = notes_data[0]
         note_content = (latest_note.get("Note_Content") or "").strip()
+        note_title = (latest_note.get("Note_Title") or "").strip()
         deal_name = (latest_note.get("Parent_Id", {}) or {}).get("name") or "Unknown deal"
 
         if not note_content:
@@ -1649,7 +1650,10 @@ async def zoho_note_added(request: Request):
             phone = REP_PHONES.get(uid)
             if phone and phone not in seen_phones:
                 seen_phones.add(phone)
-                msg = f"Helio note on {deal_name}:\n\n{clean_note}"
+                header = f"Helio note on {deal_name}"
+                if note_title:
+                    header += f" — {note_title}"
+                msg = f"{header}:\n\n{clean_note}"
                 _send_sms(phone, msg)
                 notified.append(uid)
                 logger.info(f"zoho_note_added: SMS sent to user {uid} ({phone})")
