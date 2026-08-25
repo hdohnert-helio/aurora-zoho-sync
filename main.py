@@ -1526,20 +1526,9 @@ def _extract_city_from_address(address):
 # Pulls Survey_Scheduled_For, Site_Location, Name, and Primary_Phone from the
 # Install record, then creates a 1-hour Google Calendar event on the
 # installs@helio.solar calendar with the standard attendee list.
-# Keys are Zoho user IDs (from [user#USERID#...] mention format in notes)
-REP_PHONES = {
-    "5264387000072521001": "+19175625291",   # Harry Dohnert
-    "5264387000046043007": "+12032186123",   # Walter Carmona
-    "5264387000041419001": "+12032582860",   # Fred Stevens
-    "5264387000064733001": "+18603091345",   # Jenna Stockwell
-    "5264387000062145001": "+18603091345",   # Jenna Stockwell (alt account)
-    "5264387000020373001": "+19172048534",   # Douglas Hoffman
-    "5264387000020377001": "+19172048534",   # Douglas Hoffman (alt account)
-    "5264387000047189001": "+12037023562",   # Tiffany Vilayphonh
-    "5264387000000380001": "+12039098031",   # Brian Tilford
-    "5264387000001296001": "+12039098031",   # Brian Tilford (alt account)
-}
-
+# Zoho user ID -> display name. Used to resolve mention tags to a name,
+# which is then looked up in the Network_Members module for the phone number.
+# Add new reps here (get their Zoho user ID from /debug/zoho-users).
 REP_NAMES = {
     "5264387000072521001": "Harry Dohnert",
     "5264387000046043007": "Walter Carmona",
@@ -1552,6 +1541,39 @@ REP_NAMES = {
     "5264387000000380001": "Brian Tilford",
     "5264387000001296001": "Brian Tilford",
 }
+
+# In-memory cache: name.lower() -> E.164 phone, populated from Network_Members on first use.
+_network_member_phone_cache: dict = {}
+
+def _get_phone_for_name(name: str, access_token: str) -> str | None:
+    key = name.lower()
+    if key in _network_member_phone_cache:
+        return _network_member_phone_cache[key]
+    try:
+        resp = requests.get(
+            "https://www.zohoapis.com/crm/v2/Network_Members/search",
+            headers={"Authorization": f"Zoho-oauthtoken {access_token}"},
+            params={"criteria": f"(Name:equals:{name})", "fields": "Phone,Mobile"},
+            timeout=10,
+        )
+        logger.info(f"_get_phone_for_name: {name} -> {resp.status_code} {resp.text[:200]}")
+        if resp.status_code == 200:
+            data = resp.json().get("data", [])
+            if data:
+                raw = (data[0].get("Mobile") or data[0].get("Phone") or "").strip()
+                digits = re.sub(r"[^\d]", "", raw)
+                if len(digits) == 10:
+                    phone = "+1" + digits
+                elif len(digits) == 11 and digits.startswith("1"):
+                    phone = "+" + digits
+                else:
+                    phone = None
+                if phone:
+                    _network_member_phone_cache[key] = phone
+                    return phone
+    except Exception:
+        logger.exception(f"_get_phone_for_name: error looking up {name}")
+    return None
 
 def _send_sms(to_number: str, body: str):
     from twilio.rest import Client
@@ -1645,15 +1667,17 @@ async def zoho_note_added(request: Request):
         tagged_user_ids = re.findall(r'\[user#(\d+)#\d+\]', note_content)
 
         # If HTML format, extract visible anchor text and match against rep names.
+        # Store matched names separately so we can look up phones directly by name.
+        tagged_names_from_html = []
         if not tagged_user_ids and '<' in note_content:
             anchor_texts = re.findall(r'<a\b[^>]*>(.*?)</a>', note_content, re.IGNORECASE)
-            name_to_id = {v.lower(): k for k, v in REP_NAMES.items()}
+            known_names = {v.lower(): v for v in REP_NAMES.values()}
             for text in anchor_texts:
                 clean_text = re.sub(r'<[^>]+>', '', text).strip().rstrip(',').lower()
-                if clean_text in name_to_id:
-                    uid = name_to_id[clean_text]
-                    if uid not in tagged_user_ids:
-                        tagged_user_ids.append(uid)
+                if clean_text in known_names:
+                    canonical = known_names[clean_text]
+                    if canonical not in tagged_names_from_html:
+                        tagged_names_from_html.append(canonical)
 
         logger.info(f"zoho_note_added: tagged user IDs: {tagged_user_ids}")
 
@@ -1663,10 +1687,14 @@ async def zoho_note_added(request: Request):
         clean_note = re.sub(r'<[^>]+>', '', note_content)
         clean_note = re.sub(r'crm\[user#(\d+)#\d+\]crm', _replace_mention, clean_note).strip()
 
+        # Build list of (name, label) to notify — from user IDs or HTML anchor text
+        names_to_notify = [(REP_NAMES[uid], uid) for uid in tagged_user_ids if uid in REP_NAMES]
+        names_to_notify += [(n, n) for n in tagged_names_from_html]
+
         notified = []
         seen_phones = set()
-        for uid in tagged_user_ids:
-            phone = REP_PHONES.get(uid)
+        for rep_name, label in names_to_notify:
+            phone = _get_phone_for_name(rep_name, access_token)
             if phone and phone not in seen_phones:
                 seen_phones.add(phone)
                 header = f"Helio note on {deal_name}"
@@ -1674,8 +1702,8 @@ async def zoho_note_added(request: Request):
                     header += f" — {note_title}"
                 msg = f"{header}:\n\n{clean_note}"
                 _send_sms(phone, msg)
-                notified.append(uid)
-                logger.info(f"zoho_note_added: SMS sent to user {uid} ({phone})")
+                notified.append(rep_name)
+                logger.info(f"zoho_note_added: SMS sent to {rep_name} ({phone})")
 
         return {"status": "ok", "notified": notified}
 
