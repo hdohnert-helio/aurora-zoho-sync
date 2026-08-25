@@ -1619,8 +1619,8 @@ async def zoho_note_added(request: Request):
         tagged_user_ids = re.findall(r'\[user#(\d+)#\d+\]', note_content)
         logger.info(f"zoho_note_added: tagged user IDs: {tagged_user_ids}")
 
-        # Strip mention tags to get clean note text for the SMS
-        clean_note = re.sub(r'\[user#\d+#\d+\]', '', note_content).strip()
+        # Strip mention tags (format: crm[user#USERID#NOTEID]crm) to get clean note text
+        clean_note = re.sub(r'crm\[user#\d+#\d+\]crm', '', note_content).strip()
 
         notified = []
         seen_phones = set()
