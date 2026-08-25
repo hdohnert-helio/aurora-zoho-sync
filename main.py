@@ -1526,13 +1526,16 @@ def _extract_city_from_address(address):
 # Pulls Survey_Scheduled_For, Site_Location, Name, and Primary_Phone from the
 # Install record, then creates a 1-hour Google Calendar event on the
 # installs@helio.solar calendar with the standard attendee list.
+# Keys are Zoho user IDs (from [user#USERID#...] mention format in notes)
 REP_PHONES = {
-    "harry dohnert":          "+19175625291",
-    "walter carmona":         "+12032186123",
-    "fred stevens":           "+12032582860",
-    "jenna stockwell":        "+18603091345",
-    "douglas hoffman":        "+19172048534",
-    "tiffany vilaypahonh":    "+12037023562",
+    "5264387000072521001": "+19175625291",   # Harry Dohnert
+    "5264387000046043007": "+12032186123",   # Walter Carmona
+    "5264387000041419001": "+12032582860",   # Fred Stevens
+    "5264387000064733001": "+18603091345",   # Jenna Stockwell
+    "5264387000062145001": "+18603091345",   # Jenna Stockwell (alt account)
+    "5264387000020373001": "+19172048534",   # Douglas Hoffman
+    "5264387000020377001": "+19172048534",   # Douglas Hoffman (alt account)
+    "5264387000047189001": "+12037023562",   # Tiffany Vilayphonh
 }
 
 def _send_sms(to_number: str, body: str):
@@ -1612,19 +1615,23 @@ async def zoho_note_added(request: Request):
 
         logger.info(f"zoho_note_added: note content: {note_content[:200]}")
 
-        # Parse tagged names from the first line (format: "Name1, Name2, - -")
-        first_line = note_content.split("\n")[0]
-        first_line = re.sub(r"\s*[-–]+\s*$", "", first_line).strip()
-        raw_names = [n.strip() for n in first_line.split(",") if n.strip()]
+        # Extract Zoho user IDs from mention tags: [user#USERID#NOTEID]
+        tagged_user_ids = re.findall(r'\[user#(\d+)#\d+\]', note_content)
+        logger.info(f"zoho_note_added: tagged user IDs: {tagged_user_ids}")
+
+        # Strip mention tags to get clean note text for the SMS
+        clean_note = re.sub(r'\[user#\d+#\d+\]', '', note_content).strip()
 
         notified = []
-        for name in raw_names:
-            phone = REP_PHONES.get(name.lower())
-            if phone:
-                msg = f"Helio note on {deal_name}:\n\n{note_content}"
+        seen_phones = set()
+        for uid in tagged_user_ids:
+            phone = REP_PHONES.get(uid)
+            if phone and phone not in seen_phones:
+                seen_phones.add(phone)
+                msg = f"Helio note on {deal_name}:\n\n{clean_note}"
                 _send_sms(phone, msg)
-                notified.append(name)
-                logger.info(f"zoho_note_added: SMS sent to {name} ({phone})")
+                notified.append(uid)
+                logger.info(f"zoho_note_added: SMS sent to user {uid} ({phone})")
 
         return {"status": "ok", "notified": notified}
 
