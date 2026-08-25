@@ -1577,9 +1577,9 @@ def _get_phone_for_name(name: str, access_token: str) -> str | None:
 
 def _send_sms(to_number: str, body: str):
     from twilio.rest import Client
-    max_len = 1500
+    max_len = 900
     if len(body) > max_len:
-        body = body[:max_len] + "… [truncated]"
+        body = body[:max_len] + "… [see Zoho for full note]"
     client = Client(
         os.environ.get("TWILIO_ACCOUNT_SID"),
         os.environ.get("TWILIO_AUTH_TOKEN"),
