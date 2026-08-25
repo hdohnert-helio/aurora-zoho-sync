@@ -4247,6 +4247,19 @@ async def project_intake_webhook(request: Request):
     return result
 
 
+@app.get("/debug/zoho-users")
+async def debug_zoho_users():
+    token = get_zoho_access_token()
+    if not token:
+        return {"error": "no token"}
+    resp = requests.get(
+        "https://www.zohoapis.com/crm/v2/users?type=AllUsers",
+        headers={"Authorization": f"Zoho-oauthtoken {token}"},
+    )
+    users = resp.json().get("users", [])
+    return [{"name": u.get("full_name"), "id": u.get("id"), "email": u.get("email")} for u in users]
+
+
 @app.get("/commissions/debug-zoho")
 async def debug_zoho():
     """Quick diagnostic: test Zoho token and list endpoint."""
