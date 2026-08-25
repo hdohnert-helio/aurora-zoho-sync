@@ -1700,7 +1700,8 @@ async def zoho_note_added(request: Request):
                 header = f"Helio note on {deal_name}"
                 if note_title:
                     header += f" — {note_title}"
-                msg = f"{header}:\n\n{clean_note}"
+                zoho_link = f"https://crm.zoho.com/crm/heliosolar/tab/CustomModule6/{record_id}"
+                msg = f"{header}\n{zoho_link}\n\n{clean_note}"
                 _send_sms(phone, msg)
                 notified.append(rep_name)
                 logger.info(f"zoho_note_added: SMS sent to {rep_name} ({phone})")
