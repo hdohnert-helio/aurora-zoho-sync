@@ -1634,17 +1634,30 @@ async def zoho_note_added(request: Request):
 
         logger.info(f"zoho_note_added: note content (len={len(note_content)}): {note_content[:1000]}")
 
-        # Zoho returns note content as HTML when mentions are present.
-        # Extract user IDs from data-id attributes on mention anchors, e.g.:
-        #   <a ... data-id="5264387000072521001">Harry Dohnert,</a>
-        # Also try the raw [user#USERID#NOTEID] format as fallback.
-        tagged_user_ids = re.findall(r'data-id=["\'](\d+)["\']', note_content)
-        if not tagged_user_ids:
-            tagged_user_ids = re.findall(r'\[user#(\d+)#\d+\]', note_content)
+        # Zoho returns mentions in two formats:
+        #   Plain text: crm[user#USERID#NOTEID]crm  → extract USERID directly
+        #   HTML:       <a ...>Name,</a>            → no ID in tag; match name against known reps
+        # Try plain-text format first.
+        tagged_user_ids = re.findall(r'\[user#(\d+)#\d+\]', note_content)
+
+        # If HTML format, extract visible anchor text and match against rep names.
+        if not tagged_user_ids and '<' in note_content:
+            anchor_texts = re.findall(r'<a\b[^>]*>(.*?)</a>', note_content, re.IGNORECASE)
+            name_to_id = {v.lower(): k for k, v in REP_NAMES.items()}
+            for text in anchor_texts:
+                clean_text = re.sub(r'<[^>]+>', '', text).strip().rstrip(',').lower()
+                if clean_text in name_to_id:
+                    uid = name_to_id[clean_text]
+                    if uid not in tagged_user_ids:
+                        tagged_user_ids.append(uid)
+
         logger.info(f"zoho_note_added: tagged user IDs: {tagged_user_ids}")
 
-        # Strip all HTML tags for clean SMS text
-        clean_note = re.sub(r'<[^>]+>', '', note_content).strip()
+        # Build clean note text: strip HTML tags, then replace plain-text mention markers with names.
+        def _replace_mention(m):
+            return REP_NAMES.get(m.group(1), "")
+        clean_note = re.sub(r'<[^>]+>', '', note_content)
+        clean_note = re.sub(r'crm\[user#(\d+)#\d+\]crm', _replace_mention, clean_note).strip()
 
         notified = []
         seen_phones = set()
