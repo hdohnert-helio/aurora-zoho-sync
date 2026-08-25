@@ -1577,9 +1577,9 @@ def _get_phone_for_name(name: str, access_token: str) -> str | None:
 
 def _send_sms(to_number: str, body: str):
     from twilio.rest import Client
-    max_len = 900
+    max_len = 1200
     if len(body) > max_len:
-        body = body[:max_len] + "… [see Zoho for full note]"
+        body = body[:max_len] + "… [truncated]"
     client = Client(
         os.environ.get("TWILIO_ACCOUNT_SID"),
         os.environ.get("TWILIO_AUTH_TOKEN"),
@@ -1701,7 +1701,11 @@ async def zoho_note_added(request: Request):
                 if note_title:
                     header += f" — {note_title}"
                 zoho_link = f"https://crm.zoho.com/crm/heliosolar/tab/CustomModule6/{record_id}"
-                msg = f"{header}\n{zoho_link}\n\n{clean_note}"
+                # Reserve space for header + link; truncate note body to fit in ~8 segments total
+                prefix = f"{header}\n{zoho_link}\n\n"
+                max_note = max(0, 900 - len(prefix))
+                note_part = clean_note if len(clean_note) <= max_note else clean_note[:max_note] + "… [see Zoho]"
+                msg = f"{prefix}{note_part}"
                 _send_sms(phone, msg)
                 notified.append(rep_name)
                 logger.info(f"zoho_note_added: SMS sent to {rep_name} ({phone})")
