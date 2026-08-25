@@ -1706,6 +1706,7 @@ async def zoho_note_added(request: Request):
                 max_note = max(0, 900 - len(prefix))
                 note_part = clean_note if len(clean_note) <= max_note else clean_note[:max_note] + "… [see Zoho]"
                 msg = f"{prefix}{note_part}"
+                logger.info(f"zoho_note_added: clean_note len={len(clean_note)}, prefix len={len(prefix)}, max_note={max_note}, msg len={len(msg)}")
                 _send_sms(phone, msg)
                 notified.append(rep_name)
                 logger.info(f"zoho_note_added: SMS sent to {rep_name} ({phone})")
