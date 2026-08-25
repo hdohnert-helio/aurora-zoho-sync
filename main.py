@@ -1526,6 +1526,82 @@ def _extract_city_from_address(address):
 # Pulls Survey_Scheduled_For, Site_Location, Name, and Primary_Phone from the
 # Install record, then creates a 1-hour Google Calendar event on the
 # installs@helio.solar calendar with the standard attendee list.
+REP_PHONES = {
+    "harry dohnert":          "+19175625291",
+    "walter carmona":         "+12032186123",
+    "fred stevens":           "+12032582860",
+    "jenna stockwell":        "+18603091345",
+    "douglas hoffman":        "+19172048534",
+    "tiffany vilaypahonh":    "+12037023562",
+}
+
+def _send_sms(to_number: str, body: str):
+    from twilio.rest import Client
+    client = Client(
+        os.environ.get("TWILIO_ACCOUNT_SID"),
+        os.environ.get("TWILIO_AUTH_TOKEN"),
+    )
+    client.messages.create(
+        to=to_number,
+        from_=os.environ.get("TWILIO_FROM_NUMBER"),
+        body=body[:1600],
+    )
+
+@app.post("/webhook/zoho/note-added")
+async def zoho_note_added(request: Request):
+    try:
+        try:
+            raw = await request.body()
+        except Exception:
+            raw = b""
+        body_text = raw.decode("utf-8", errors="replace") if raw else ""
+        logger.info(f"zoho_note_added payload: {body_text}")
+
+        try:
+            payload = json.loads(body_text) if body_text else {}
+        except Exception:
+            payload = {}
+
+        note_content = (
+            payload.get("Note_Content")
+            or payload.get("note_content")
+            or payload.get("$note_content")
+            or ""
+        ).strip()
+
+        deal_name = (
+            payload.get("Parent_Id", {}).get("name")
+            or payload.get("deal_name")
+            or payload.get("Deal_Name")
+            or "Unknown deal"
+        )
+
+        if not note_content:
+            logger.info("zoho_note_added: no note content, skipping")
+            return {"status": "skipped", "reason": "no note content"}
+
+        # Parse tagged names from the first line (format: "Name1, Name2, - -")
+        first_line = note_content.split("\n")[0]
+        # Strip trailing " - -" and similar separators
+        first_line = re.sub(r"\s*[-–]+\s*$", "", first_line).strip()
+        raw_names = [n.strip() for n in first_line.split(",") if n.strip()]
+
+        notified = []
+        for name in raw_names:
+            phone = REP_PHONES.get(name.lower())
+            if phone:
+                msg = f"Helio note on {deal_name}:\n\n{note_content}"
+                _send_sms(phone, msg)
+                notified.append(name)
+                logger.info(f"zoho_note_added: SMS sent to {name} ({phone})")
+
+        return {"status": "ok", "notified": notified}
+
+    except Exception:
+        logger.exception("zoho_note_added: unhandled error")
+        return {"status": "error"}
+
+
 @app.post("/webhook/zoho/site-survey-scheduled")
 async def site_survey_scheduled_webhook(request: Request):
     try:
