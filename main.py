@@ -1551,15 +1551,22 @@ REP_NAMES = {
 
 def _send_sms(to_number: str, body: str):
     from twilio.rest import Client
+    max_len = 1500
+    if len(body) > max_len:
+        body = body[:max_len] + "… [truncated]"
     client = Client(
         os.environ.get("TWILIO_ACCOUNT_SID"),
         os.environ.get("TWILIO_AUTH_TOKEN"),
     )
-    client.messages.create(
-        to=to_number,
-        from_=os.environ.get("TWILIO_FROM_NUMBER"),
-        body=body[:1600],
-    )
+    try:
+        msg = client.messages.create(
+            to=to_number,
+            from_=os.environ.get("TWILIO_FROM_NUMBER"),
+            body=body,
+        )
+        logger.info(f"_send_sms: sent to {to_number}, sid={msg.sid}, status={msg.status}")
+    except Exception:
+        logger.exception(f"_send_sms: failed to send to {to_number}")
 
 @app.post("/webhook/zoho/note-added")
 async def zoho_note_added(request: Request):
