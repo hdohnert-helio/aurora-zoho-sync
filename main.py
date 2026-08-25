@@ -1632,7 +1632,7 @@ async def zoho_note_added(request: Request):
         if not note_content:
             return {"status": "skipped", "reason": "empty note content"}
 
-        logger.info(f"zoho_note_added: note content: {note_content[:500]}")
+        logger.info(f"zoho_note_added: note content (len={len(note_content)}): {note_content[:1000]}")
 
         # Zoho returns note content as HTML when mentions are present.
         # Extract user IDs from data-id attributes on mention anchors, e.g.:
