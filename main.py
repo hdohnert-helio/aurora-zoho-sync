@@ -1632,17 +1632,19 @@ async def zoho_note_added(request: Request):
         if not note_content:
             return {"status": "skipped", "reason": "empty note content"}
 
-        logger.info(f"zoho_note_added: note content: {note_content[:200]}")
+        logger.info(f"zoho_note_added: note content: {note_content[:500]}")
 
-        # Extract Zoho user IDs from mention tags: [user#USERID#NOTEID]
-        tagged_user_ids = re.findall(r'\[user#(\d+)#\d+\]', note_content)
+        # Zoho returns note content as HTML when mentions are present.
+        # Extract user IDs from data-id attributes on mention anchors, e.g.:
+        #   <a ... data-id="5264387000072521001">Harry Dohnert,</a>
+        # Also try the raw [user#USERID#NOTEID] format as fallback.
+        tagged_user_ids = re.findall(r'data-id=["\'](\d+)["\']', note_content)
+        if not tagged_user_ids:
+            tagged_user_ids = re.findall(r'\[user#(\d+)#\d+\]', note_content)
         logger.info(f"zoho_note_added: tagged user IDs: {tagged_user_ids}")
 
-        # Replace mention tags (format: crm[user#USERID#NOTEID]crm) with the person's name
-        def _replace_mention(m):
-            uid = m.group(1)
-            return REP_NAMES.get(uid, "")
-        clean_note = re.sub(r'crm\[user#(\d+)#\d+\]crm', _replace_mention, note_content).strip()
+        # Strip all HTML tags for clean SMS text
+        clean_note = re.sub(r'<[^>]+>', '', note_content).strip()
 
         notified = []
         seen_phones = set()
