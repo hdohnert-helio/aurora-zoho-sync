@@ -1720,7 +1720,10 @@ async def zoho_note_added(request: Request):
                 # Reserve space for header + link; truncate note body to fit in ~8 segments total
                 prefix = f"{header}\n{zoho_link}\n\n"
                 max_note = max(0, 900 - len(prefix))
-                note_part = clean_note if len(clean_note) <= max_note else clean_note[:max_note] + "… [see Zoho]"
+                if len(clean_note) <= max_note:
+                    note_part = clean_note
+                else:
+                    note_part = clean_note[:max_note] + "... [note truncated - tap link above for full note]"
                 msg = f"{prefix}{note_part}"
                 logger.info(f"zoho_note_added: clean_note len={len(clean_note)}, prefix len={len(prefix)}, max_note={max_note}, msg len={len(msg)}")
                 _send_sms(phone, msg)
