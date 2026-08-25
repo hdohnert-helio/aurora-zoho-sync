@@ -1536,6 +1536,8 @@ REP_PHONES = {
     "5264387000020373001": "+19172048534",   # Douglas Hoffman
     "5264387000020377001": "+19172048534",   # Douglas Hoffman (alt account)
     "5264387000047189001": "+12037023562",   # Tiffany Vilayphonh
+    "5264387000000380001": "+12039098031",   # Brian Tilford
+    "5264387000001296001": "+12039098031",   # Brian Tilford (alt account)
 }
 
 REP_NAMES = {
@@ -1547,6 +1549,8 @@ REP_NAMES = {
     "5264387000020373001": "Douglas Hoffman",
     "5264387000020377001": "Douglas Hoffman",
     "5264387000047189001": "Tiffany Vilayphonh",
+    "5264387000000380001": "Brian Tilford",
+    "5264387000001296001": "Brian Tilford",
 }
 
 def _send_sms(to_number: str, body: str):
