@@ -1538,6 +1538,17 @@ REP_PHONES = {
     "5264387000047189001": "+12037023562",   # Tiffany Vilayphonh
 }
 
+REP_NAMES = {
+    "5264387000072521001": "Harry Dohnert",
+    "5264387000046043007": "Walter Carmona",
+    "5264387000041419001": "Fred Stevens",
+    "5264387000064733001": "Jenna Stockwell",
+    "5264387000062145001": "Jenna Stockwell",
+    "5264387000020373001": "Douglas Hoffman",
+    "5264387000020377001": "Douglas Hoffman",
+    "5264387000047189001": "Tiffany Vilayphonh",
+}
+
 def _send_sms(to_number: str, body: str):
     from twilio.rest import Client
     client = Client(
@@ -1619,8 +1630,11 @@ async def zoho_note_added(request: Request):
         tagged_user_ids = re.findall(r'\[user#(\d+)#\d+\]', note_content)
         logger.info(f"zoho_note_added: tagged user IDs: {tagged_user_ids}")
 
-        # Strip mention tags (format: crm[user#USERID#NOTEID]crm) to get clean note text
-        clean_note = re.sub(r'crm\[user#\d+#\d+\]crm', '', note_content).strip()
+        # Replace mention tags (format: crm[user#USERID#NOTEID]crm) with the person's name
+        def _replace_mention(m):
+            uid = m.group(1)
+            return REP_NAMES.get(uid, "")
+        clean_note = re.sub(r'crm\[user#(\d+)#\d+\]crm', _replace_mention, note_content).strip()
 
         notified = []
         seen_phones = set()
