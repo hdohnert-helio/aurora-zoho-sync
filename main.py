@@ -1557,32 +1557,50 @@ async def zoho_note_added(request: Request):
         body_text = raw.decode("utf-8", errors="replace") if raw else ""
         logger.info(f"zoho_note_added payload: {body_text}")
 
+        # Parse record_id from query params or body
+        params = dict(request.query_params)
         try:
             payload = json.loads(body_text) if body_text else {}
         except Exception:
             payload = {}
 
-        note_content = (
-            payload.get("Note_Content")
-            or payload.get("note_content")
-            or payload.get("$note_content")
-            or ""
-        ).strip()
+        record_id = params.get("record_id") or payload.get("record_id")
+        if not record_id:
+            logger.info("zoho_note_added: no record_id, skipping")
+            return {"status": "skipped", "reason": "no record_id"}
 
-        deal_name = (
-            payload.get("Parent_Id", {}).get("name")
-            or payload.get("deal_name")
-            or payload.get("Deal_Name")
-            or "Unknown deal"
+        # Fetch the most recent note on this Install record from Zoho
+        access_token = get_zoho_access_token()
+        if not access_token:
+            logger.error("zoho_note_added: could not get Zoho access token")
+            return {"status": "error", "reason": "no zoho token"}
+
+        headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
+        notes_resp = requests.get(
+            f"https://www.zohoapis.com/crm/v2/Installs/{record_id}/Notes",
+            headers=headers,
+            params={"sort_by": "Created_Time", "sort_order": "desc", "per_page": 1},
         )
+        logger.info(f"zoho_note_added: notes API response {notes_resp.status_code}: {notes_resp.text[:500]}")
+
+        if notes_resp.status_code != 200:
+            return {"status": "error", "reason": f"notes API returned {notes_resp.status_code}"}
+
+        notes_data = notes_resp.json().get("data", [])
+        if not notes_data:
+            return {"status": "skipped", "reason": "no notes found"}
+
+        latest_note = notes_data[0]
+        note_content = (latest_note.get("Note_Content") or "").strip()
+        deal_name = (latest_note.get("Parent_Id", {}) or {}).get("name") or "Unknown deal"
 
         if not note_content:
-            logger.info("zoho_note_added: no note content, skipping")
-            return {"status": "skipped", "reason": "no note content"}
+            return {"status": "skipped", "reason": "empty note content"}
+
+        logger.info(f"zoho_note_added: note content: {note_content[:200]}")
 
         # Parse tagged names from the first line (format: "Name1, Name2, - -")
         first_line = note_content.split("\n")[0]
-        # Strip trailing " - -" and similar separators
         first_line = re.sub(r"\s*[-–]+\s*$", "", first_line).strip()
         raw_names = [n.strip() for n in first_line.split(",") if n.strip()]
 
