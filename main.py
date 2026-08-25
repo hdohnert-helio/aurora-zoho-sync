@@ -1576,19 +1576,20 @@ def _get_phone_for_name(name: str, access_token: str) -> str | None:
     return None
 
 def _normalize_sms(text: str) -> str:
-    """Replace non-GSM-7 characters so Twilio uses 153-char segments instead of 67-char UCS-2."""
-    replacements = {
-        "‘": "'", "’": "'",   # curly single quotes
-        "“": '"', "”": '"',   # curly double quotes
-        "–": "-", "—": "-",   # en dash, em dash
-        "…": "...",                 # ellipsis
-        " ": " ",                   # non-breaking space
-        "•": "*",                   # bullet
-    }
-    for char, replacement in replacements.items():
+    “””Replace non-GSM-7 characters so Twilio uses 153-char segments instead of 67-char UCS-2.”””
+    import unicodedata
+    text = unicodedata.normalize(“NFKD”, text)
+    replacements = [
+        (“‘”, “’”), (“’”, “’”),   # curly single quotes
+        (““”, ‘”’), (“””, ‘”’),   # curly double quotes
+        (“–“, “-”), (“—“, “-”),   # en dash, em dash
+        (“…”, “...”),                  # ellipsis
+        (“ ”, “ “),                    # non-breaking space
+        (“•”, “*”),                    # bullet
+    ]
+    for char, replacement in replacements:
         text = text.replace(char, replacement)
-    # Strip any remaining non-ASCII characters
-    text = text.encode("ascii", errors="ignore").decode("ascii")
+    text = text.encode(“ascii”, errors=”ignore”).decode(“ascii”)
     return text
 
 def _send_sms(to_number: str, body: str):
