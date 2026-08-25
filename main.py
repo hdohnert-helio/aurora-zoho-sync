@@ -1557,14 +1557,27 @@ async def zoho_note_added(request: Request):
         body_text = raw.decode("utf-8", errors="replace") if raw else ""
         logger.info(f"zoho_note_added payload: {body_text}")
 
-        # Parse record_id from query params or body
+        # Parse record_id from query params, JSON body, or form data
         params = dict(request.query_params)
         try:
             payload = json.loads(body_text) if body_text else {}
         except Exception:
             payload = {}
 
-        record_id = params.get("record_id") or payload.get("record_id")
+        # Try form-encoded body as fallback
+        form_data = {}
+        try:
+            form_data = dict(await request.form())
+        except Exception:
+            pass
+
+        logger.info(f"zoho_note_added query_params: {params}, form_data: {form_data}")
+
+        record_id = (
+            params.get("record_id")
+            or payload.get("record_id")
+            or form_data.get("record_id")
+        )
         if not record_id:
             logger.info("zoho_note_added: no record_id, skipping")
             return {"status": "skipped", "reason": "no record_id"}
