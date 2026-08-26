@@ -6943,8 +6943,22 @@ def _write_dashboard_project_expenses(svc, weekly_events: list) -> int:
         and len(r) > 4 and str(r[4]).strip() == "Auto"
         and len(r) > 1 and str(r[1]).strip() in _PROJECT_CATS
     ]
-    # (category, customer) pairs already marked Paid — skip adding a new Active row for these
-    paid_pairs = {(str(r[1]).strip(), str(r[2]).strip()) for r in paid_project_rows}
+    # (category, customer, week_serial) triples already marked Paid — skip adding a new Active row
+    # for that specific week only. Using a 3-tuple prevents a paid M1 from suppressing M2.
+    def _row_week_serial(r):
+        raw = str(r[0]).strip()
+        try:
+            return int(raw)
+        except ValueError:
+            pass
+        for fmt in ("%m/%d/%Y", "%Y-%m-%d"):
+            try:
+                d = datetime.datetime.strptime(raw, fmt).date()
+                return _sheets_serial(d)
+            except ValueError:
+                continue
+        return raw
+    paid_pairs = {(str(r[1]).strip(), str(r[2]).strip(), _row_week_serial(r)) for r in paid_project_rows}
 
     # Remove stale Active auto project rows; keep everything else (manual, overhead, Paid project)
     kept = [r for r in existing
@@ -6973,53 +6987,53 @@ def _write_dashboard_project_expenses(svc, weekly_events: list) -> int:
 
         # Subcontractor costs
         if pay_type == "Subcontractor" and pay_amt:
-            if ("Subcontractor", customer) not in paid_pairs:
-                try:
-                    d = datetime.date.fromisoformat(evt[1])
-                    serial = _sheets_serial(d - datetime.timedelta(days=d.weekday()))
-                except Exception:
-                    serial = evt[0]
+            try:
+                d = datetime.date.fromisoformat(evt[1])
+                serial = _sheets_serial(d - datetime.timedelta(days=d.weekday()))
+            except Exception:
+                serial = evt[0]
+            if ("Subcontractor", customer, serial) not in paid_pairs:
                 rows.append([serial, "Subcontractor", customer, pay_amt, "Auto", "Active", "", ""])
 
         # Cash/SE materials outflow
         if pay_type == "Cash Materials" and pay_amt:
-            if ("Materials", customer) not in paid_pairs:
-                try:
-                    d = datetime.date.fromisoformat(evt[1])
-                    serial = _sheets_serial(d - datetime.timedelta(days=d.weekday()))
-                except Exception:
-                    serial = evt[0]
+            try:
+                d = datetime.date.fromisoformat(evt[1])
+                serial = _sheets_serial(d - datetime.timedelta(days=d.weekday()))
+            except Exception:
+                serial = evt[0]
+            if ("Materials", customer, serial) not in paid_pairs:
                 rows.append([serial, "Materials", customer, pay_amt, "Auto", "Active", "", ""])
 
         # SolarInsure warranty fee
         if pay_type == "SolarInsure" and pay_amt:
-            if ("SolarInsure/Warranty", customer) not in paid_pairs:
-                try:
-                    d = datetime.date.fromisoformat(evt[1])
-                    serial = _sheets_serial(d - datetime.timedelta(days=d.weekday()))
-                except Exception:
-                    serial = evt[0]
+            try:
+                d = datetime.date.fromisoformat(evt[1])
+                serial = _sheets_serial(d - datetime.timedelta(days=d.weekday()))
+            except Exception:
+                serial = evt[0]
+            if ("SolarInsure/Warranty", customer, serial) not in paid_pairs:
                 rows.append([serial, "SolarInsure/Warranty", customer, pay_amt, "Auto", "Active", "", ""])
 
         # CT Green Estates cost
         if pay_type == "CT Green Estates" and pay_amt:
-            if ("CT Green Estates", customer) not in paid_pairs:
-                try:
-                    d = datetime.date.fromisoformat(evt[1])
-                    serial = _sheets_serial(d - datetime.timedelta(days=d.weekday()))
-                except Exception:
-                    serial = evt[0]
+            try:
+                d = datetime.date.fromisoformat(evt[1])
+                serial = _sheets_serial(d - datetime.timedelta(days=d.weekday()))
+            except Exception:
+                serial = evt[0]
+            if ("CT Green Estates", customer, serial) not in paid_pairs:
                 rows.append([serial, "CT Green Estates", customer, pay_amt, "Auto", "Active", "", ""])
 
         # Commission payouts (keyed to comm_date, not pay_date)
         if comm_date and comm_amt and comm_amt != "" and comm_amt != 0:
-            if ("Commissions", customer) not in paid_pairs:
-                try:
-                    cd = datetime.date.fromisoformat(comm_date)
-                    serial = _sheets_serial(cd - datetime.timedelta(days=cd.weekday()))
-                except Exception:
-                    serial = evt[0]
-                rows.append([serial, "Commissions", customer, comm_amt, "Auto", "Active", "", ""])
+            try:
+                cd = datetime.date.fromisoformat(comm_date)
+                comm_serial = _sheets_serial(cd - datetime.timedelta(days=cd.weekday()))
+            except Exception:
+                comm_serial = evt[0]
+            if ("Commissions", customer, comm_serial) not in paid_pairs:
+                rows.append([comm_serial, "Commissions", customer, comm_amt, "Auto", "Active", "", ""])
 
     if rows:
         sheets.values().append(
