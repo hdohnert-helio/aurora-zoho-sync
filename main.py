@@ -7844,6 +7844,20 @@ def _apply_overrides_to_pipeline_tab(svc, tab_name: str, overrides: dict) -> dic
         if pov.get("payment2") and finance_type in ("CASH", "SE") and current_pay["payment2"]:
             updates.append({"range": f"'{tab_name}'!AD{row_num}", "values": [[pov["payment2"]]]})
 
+        # Standalone comm payout date overrides (when set without a payment date change)
+        if pov.get("comm_payout1_date") and not pov.get("payment1"):
+            updates.append({"range": f"'{tab_name}'!T{row_num}", "values": [[pov["comm_payout1_date"]]]})
+        if pov.get("comm_payout2_date") and not pov.get("payment2"):
+            updates.append({"range": f"'{tab_name}'!V{row_num}", "values": [[pov["comm_payout2_date"]]]})
+
+        # CT Green Date override (col AB)
+        if pov.get("ct_green_date"):
+            updates.append({"range": f"'{tab_name}'!AB{row_num}", "values": [[pov["ct_green_date"]]]})
+
+        # Materials Paid Date override (col AD) — overrides auto-computed cash materials date
+        if pov.get("materials_date"):
+            updates.append({"range": f"'{tab_name}'!AD{row_num}", "values": [[pov["materials_date"]]]})
+
         # Materials override
         if pov.get("materials") is not None:
             mat = pov["materials"]
