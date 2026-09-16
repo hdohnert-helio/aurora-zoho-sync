@@ -5495,10 +5495,12 @@ CASHFLOW_OVERRIDES_TAB = "Overrides"
 
 
 OVERRIDES_HEADERS = [
-    "Project ID", "Customer", "Payment 1 Date", "Payment 2 Date", "Payment 3 Date",
+    "Active", "Project ID", "Customer", "Payment 1 Date", "Payment 2 Date", "Payment 3 Date",
     "Notes", "Payment 1 Amt", "Payment 2 Amt", "Payment 3 Amt", "Materials Actual",
     "Comm Payout 1 Amt", "Comm Payout 2 Amt", "Holdback Date", "Holdback Amt",
     "CT Green Paid",
+    # Read-only reference columns (populated by /cashflow/populate-overrides, not used by apply-overrides)
+    "Finance Type", "Stage", "SC Date",
 ]
 
 def _ensure_overrides_tab(svc) -> None:
@@ -5568,18 +5570,21 @@ def _ensure_overrides_tab(svc) -> None:
 
 def _read_payment_overrides(svc) -> dict:
     """
-    Read the Overrides tab and return a dict keyed by project_id:
-      {project_id: {"payment1": "YYYY-MM-DD", "payment2": "YYYY-MM-DD", "payment3": "YYYY-MM-DD"}}
-    Only populated keys are included. Rows starting with '#' are skipped.
-    Columns: A=Project ID, B=Customer (ignored), C=Payment 1, D=Payment 2, E=Payment 3, F=Notes,
-             G=Payment 1 Amt, H=Payment 2 Amt, I=Payment 3 Amt, J=Materials Actual,
-             K=Comm Payout 1 Amt, L=Comm Payout 2 Amt
+    Read the Overrides tab and return a dict keyed by project_id.
+    Only rows where col A (Active) = TRUE are processed.
+
+    Columns: A=Active, B=Project ID, C=Customer (ignored), D=Payment 1 Date,
+             E=Payment 2 Date, F=Payment 3 Date, G=Notes, H=Payment 1 Amt,
+             I=Payment 2 Amt, J=Payment 3 Amt, K=Materials Actual,
+             L=Comm Payout 1 Amt, M=Comm Payout 2 Amt, N=Holdback Date,
+             O=Holdback Amt, P=CT Green Paid
+             (Q=Finance Type, R=Stage, S=SC Date are reference-only, ignored here)
     """
     sheets = svc.spreadsheets()
     try:
         data = sheets.values().get(
             spreadsheetId=CASHFLOW_SHEET_ID,
-            range=f"'{CASHFLOW_OVERRIDES_TAB}'!A2:N200",
+            range=f"'{CASHFLOW_OVERRIDES_TAB}'!A2:P200",
             valueRenderOption="FORMATTED_VALUE",
         ).execute().get("values", [])
     except Exception:
@@ -5587,13 +5592,11 @@ def _read_payment_overrides(svc) -> dict:
 
     def valid_date(s):
         s = (s or "").strip()
-        # Try ISO format first (YYYY-MM-DD)
         try:
             datetime.date.fromisoformat(s)
             return s
         except (ValueError, AttributeError):
             pass
-        # Fall back to M/D/YYYY (Google Sheets default date display)
         try:
             d = datetime.datetime.strptime(s, "%m/%d/%Y").date()
             return d.isoformat()
@@ -5610,33 +5613,37 @@ def _read_payment_overrides(svc) -> dict:
     for row in data:
         if not row:
             continue
-        proj_id = row[0].strip() if row else ""
+        # col A: Active flag — must be TRUE (checkbox) to be processed
+        active = str(row[0]).strip().upper() if row else ""
+        if active != "TRUE":
+            continue
+        proj_id = row[1].strip() if len(row) > 1 else ""
         if not proj_id or proj_id.startswith("#"):
             continue
         entry = {}
-        if len(row) > 2 and valid_date(row[2]):
-            entry["payment1"] = valid_date(row[2])
         if len(row) > 3 and valid_date(row[3]):
-            entry["payment2"] = valid_date(row[3])
+            entry["payment1"] = valid_date(row[3])
         if len(row) > 4 and valid_date(row[4]):
-            entry["payment3"] = valid_date(row[4])
-        if len(row) > 6 and parse_amt(row[6]) is not None:
-            entry["amount1"] = parse_amt(row[6])
+            entry["payment2"] = valid_date(row[4])
+        if len(row) > 5 and valid_date(row[5]):
+            entry["payment3"] = valid_date(row[5])
         if len(row) > 7 and parse_amt(row[7]) is not None:
-            entry["amount2"] = parse_amt(row[7])
+            entry["amount1"] = parse_amt(row[7])
         if len(row) > 8 and parse_amt(row[8]) is not None:
-            entry["amount3"] = parse_amt(row[8])
+            entry["amount2"] = parse_amt(row[8])
         if len(row) > 9 and parse_amt(row[9]) is not None:
-            entry["materials"] = parse_amt(row[9])
+            entry["amount3"] = parse_amt(row[9])
         if len(row) > 10 and parse_amt(row[10]) is not None:
-            entry["comm_payout1"] = parse_amt(row[10])
+            entry["materials"] = parse_amt(row[10])
         if len(row) > 11 and parse_amt(row[11]) is not None:
-            entry["comm_payout2"] = parse_amt(row[11])
-        if len(row) > 12 and valid_date(row[12]):
-            entry["holdback_date"] = valid_date(row[12])
-        if len(row) > 13 and parse_amt(row[13]) is not None:
-            entry["holdback_amt"] = parse_amt(row[13])
-        if len(row) > 14 and str(row[14]).strip():
+            entry["comm_payout1"] = parse_amt(row[11])
+        if len(row) > 12 and parse_amt(row[12]) is not None:
+            entry["comm_payout2"] = parse_amt(row[12])
+        if len(row) > 13 and valid_date(row[13]):
+            entry["holdback_date"] = valid_date(row[13])
+        if len(row) > 14 and parse_amt(row[14]) is not None:
+            entry["holdback_amt"] = parse_amt(row[14])
+        if len(row) > 15 and str(row[15]).strip():
             entry["ct_green_paid"] = True
         if entry:
             if proj_id in overrides:
@@ -5646,6 +5653,207 @@ def _read_payment_overrides(svc) -> dict:
             logger.info(f"_read_payment_overrides: {proj_id} → {entry}")
     logger.info(f"_read_payment_overrides: loaded {len(overrides)} override(s)")
     return overrides
+
+
+def _populate_overrides_from_pipeline(svc) -> dict:
+    """
+    Sync the Overrides tab from the latest Pipeline tab so every project appears
+    as a row the user can inspect and optionally activate.
+
+    Rules:
+    - Rows already marked Active=TRUE are preserved exactly as-is.
+    - All other pipeline projects are upserted with their current pipeline values
+      and Active=FALSE.
+    - Projects no longer in the pipeline are left in place (marked stale in Notes).
+    - Rows are sorted: Active=TRUE first, then by Project ID.
+    """
+    sheets = svc.spreadsheets()
+
+    tab_name = _find_current_pipeline_tab(svc)
+    if not tab_name:
+        return {"status": "failed", "reason": "no Pipeline tab found — run /cashflow/run first"}
+
+    # Read current overrides to preserve Active=TRUE rows
+    raw_overrides = sheets.values().get(
+        spreadsheetId=CASHFLOW_SHEET_ID,
+        range=f"'{CASHFLOW_OVERRIDES_TAB}'!A2:S200",
+        valueRenderOption="FORMATTED_VALUE",
+    ).execute().get("values", [])
+
+    # Index existing override rows by project_id
+    existing = {}  # proj_id → full row list
+    for row in raw_overrides:
+        if not row:
+            continue
+        proj_id = row[1].strip() if len(row) > 1 else ""
+        if not proj_id:
+            continue
+        existing[proj_id] = row
+
+    # Read pipeline
+    pipeline_raw = sheets.values().get(
+        spreadsheetId=CASHFLOW_SHEET_ID,
+        range=f"'{tab_name}'!A1:AI200",
+        valueRenderOption="FORMATTED_VALUE",
+    ).execute().get("values", [])
+
+    if not pipeline_raw:
+        return {"status": "failed", "reason": "pipeline tab is empty"}
+
+    headers = pipeline_raw[0]
+    def _ci(name):
+        try:
+            return headers.index(name)
+        except ValueError:
+            return None
+
+    ci_customer  = _ci("Customer")
+    ci_proj      = _ci("Project ID")
+    ci_fin       = _ci("Finance Type")
+    ci_stage     = _ci("Stage")
+    ci_sc        = _ci("SC / Projected SC")
+    ci_pay1d     = _ci("Payment 1 Date")
+    ci_pay1a     = _ci("Payment 1 Amt")
+    ci_pay2d     = _ci("Payment 2 Date")
+    ci_pay2a     = _ci("Payment 2 Amt")
+    ci_pay3d     = _ci("Payment 3 Date")
+    ci_pay3a     = _ci("Payment 3 Amt")
+    ci_mat       = _ci("Materials (est)")
+    ci_comm1a    = _ci("Comm Payout 1 Amt")
+    ci_comm2a    = _ci("Comm Payout 2 Amt")
+
+    def _cell(row, ci):
+        return row[ci].strip() if ci is not None and len(row) > ci else ""
+
+    new_rows = []  # will become the full Overrides body (excluding header)
+    seen_in_pipeline = set()
+
+    for row in pipeline_raw[1:]:
+        proj_id = _cell(row, ci_proj)
+        if not proj_id or proj_id == "Project ID":
+            continue
+        seen_in_pipeline.add(proj_id)
+
+        customer  = _cell(row, ci_customer)
+        fin_type  = _cell(row, ci_fin)
+        stage     = _cell(row, ci_stage)
+        sc        = _cell(row, ci_sc)
+        pay1d     = _cell(row, ci_pay1d)
+        pay1a     = _cell(row, ci_pay1a)
+        pay2d     = _cell(row, ci_pay2d)
+        pay2a     = _cell(row, ci_pay2a)
+        pay3d     = _cell(row, ci_pay3d)
+        pay3a     = _cell(row, ci_pay3a)
+        mat       = _cell(row, ci_mat)
+        comm1a    = _cell(row, ci_comm1a)
+        comm2a    = _cell(row, ci_comm2a)
+
+        if proj_id in existing:
+            ex = existing[proj_id]
+            active = str(ex[0]).strip().upper() if ex else ""
+            if active == "TRUE":
+                # Preserve the user's active override exactly; just refresh reference cols
+                preserved = list(ex) + [""] * (19 - len(ex))
+                preserved[16] = fin_type   # col Q: Finance Type
+                preserved[17] = stage      # col R: Stage
+                preserved[18] = sc         # col S: SC Date
+                new_rows.append((True, preserved))
+                continue
+            # Not active — refresh baseline values from pipeline
+            notes = ex[6] if len(ex) > 6 else ""
+        else:
+            notes = ""
+
+        pipeline_row = [
+            False,       # A: Active (unchecked)
+            proj_id,     # B: Project ID
+            customer,    # C: Customer
+            pay1d,       # D: Payment 1 Date
+            pay2d,       # E: Payment 2 Date
+            pay3d,       # F: Payment 3 Date
+            notes,       # G: Notes
+            pay1a,       # H: Payment 1 Amt
+            pay2a,       # I: Payment 2 Amt
+            pay3a,       # J: Payment 3 Amt
+            mat,         # K: Materials Actual
+            comm1a,      # L: Comm Payout 1 Amt
+            comm2a,      # M: Comm Payout 2 Amt
+            "",          # N: Holdback Date
+            "",          # O: Holdback Amt
+            "",          # P: CT Green Paid
+            fin_type,    # Q: Finance Type (ref)
+            stage,       # R: Stage (ref)
+            sc,          # S: SC Date (ref)
+        ]
+        new_rows.append((False, pipeline_row))
+
+    # Preserve any override rows not in current pipeline (mark stale)
+    for proj_id, ex_row in existing.items():
+        if proj_id in seen_in_pipeline:
+            continue
+        active = str(ex_row[0]).strip().upper() if ex_row else ""
+        preserved = list(ex_row) + [""] * (19 - len(ex_row))
+        if active == "TRUE":
+            new_rows.append((True, preserved))
+        else:
+            preserved[6] = f"[not in current pipeline] {preserved[6]}".strip()
+            new_rows.append((False, preserved))
+
+    # Sort: Active=TRUE first, then by project ID
+    new_rows.sort(key=lambda x: (not x[0], x[1][1]))
+
+    write_rows = [r for _, r in new_rows]
+
+    # Clear existing body and rewrite
+    sheets.values().clear(
+        spreadsheetId=CASHFLOW_SHEET_ID,
+        range=f"'{CASHFLOW_OVERRIDES_TAB}'!A2:S500",
+    ).execute()
+
+    if write_rows:
+        sheets.values().update(
+            spreadsheetId=CASHFLOW_SHEET_ID,
+            range=f"'{CASHFLOW_OVERRIDES_TAB}'!A2",
+            valueInputOption="USER_ENTERED",
+            body={"values": write_rows},
+        ).execute()
+
+    # Apply checkbox data validation to col A
+    meta = sheets.get(spreadsheetId=CASHFLOW_SHEET_ID).execute()
+    overrides_sheet_id = next(
+        s["properties"]["sheetId"] for s in meta["sheets"]
+        if s["properties"]["title"] == CASHFLOW_OVERRIDES_TAB
+    )
+    sheets.batchUpdate(
+        spreadsheetId=CASHFLOW_SHEET_ID,
+        body={"requests": [{
+            "setDataValidation": {
+                "range": {
+                    "sheetId": overrides_sheet_id,
+                    "startRowIndex": 1,
+                    "endRowIndex": 1 + len(write_rows),
+                    "startColumnIndex": 0,
+                    "endColumnIndex": 1,
+                },
+                "rule": {
+                    "condition": {"type": "BOOLEAN"},
+                    "showCustomUi": True,
+                    "strict": True,
+                },
+            }
+        }]},
+    ).execute()
+
+    active_count = sum(1 for active, _ in new_rows if active)
+    inactive_count = len(new_rows) - active_count
+    logger.info(f"_populate_overrides_from_pipeline: {active_count} active, {inactive_count} inactive, pipeline tab={tab_name}")
+    return {
+        "status": "ok",
+        "pipeline_tab": tab_name,
+        "total_projects": len(new_rows),
+        "active_overrides": active_count,
+        "pipeline_rows_added_or_refreshed": inactive_count,
+    }
 
 
 def _write_weekly_payments_tab(svc, rows: list[dict]) -> None:
@@ -7645,6 +7853,25 @@ def _apply_overrides_to_pipeline_tab(svc, tab_name: str, overrides: dict) -> dic
 
     logger.info(f"_apply_overrides_to_pipeline_tab: patched {len(patched)} project(s)")
     return {"patched": patched, "cells_updated": len(updates)}
+
+
+@app.post("/cashflow/populate-overrides")
+async def cashflow_populate_overrides():
+    """
+    Sync all pipeline projects into the Overrides tab as inactive rows so the user
+    can see every deal at a glance and check the Active box on the ones they need to adjust.
+    Rows already marked Active=TRUE are preserved exactly.
+    """
+    try:
+        svc = _build_sheets_service()
+        if not svc:
+            return {"status": "failed", "reason": "could not build Sheets service"}
+        _ensure_overrides_tab(svc)
+        result = _populate_overrides_from_pipeline(svc)
+        return result
+    except Exception as e:
+        logger.exception("cashflow_populate_overrides failed")
+        return {"status": "error", "detail": str(e)}
 
 
 @app.post("/cashflow/apply-overrides")
