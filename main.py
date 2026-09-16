@@ -5497,8 +5497,9 @@ CASHFLOW_OVERRIDES_TAB = "Overrides"
 OVERRIDES_HEADERS = [
     "Active", "Project ID", "Customer", "Payment 1 Date", "Payment 2 Date", "Payment 3 Date",
     "Notes", "Payment 1 Amt", "Payment 2 Amt", "Payment 3 Amt", "Materials Actual",
-    "Comm Payout 1 Date", "Comm Payout 1 Amt", "Comm Payout 2 Date", "Comm Payout 2 Amt",
-    "Holdback Date", "Holdback Amt", "CT Green Paid",
+    "Materials Paid Date", "Comm Payout 1 Date", "Comm Payout 1 Amt",
+    "Comm Payout 2 Date", "Comm Payout 2 Amt",
+    "Holdback Date", "Holdback Amt", "CT Green Paid", "CT Green Paid Date",
     # Read-only reference columns (populated by /cashflow/populate-overrides, not used by apply-overrides)
     "Finance Type", "Stage", "SC Date",
 ]
@@ -5576,15 +5577,16 @@ def _read_payment_overrides(svc) -> dict:
     Columns: A=Active, B=Project ID, C=Customer (ignored), D=Payment 1 Date,
              E=Payment 2 Date, F=Payment 3 Date, G=Notes, H=Payment 1 Amt,
              I=Payment 2 Amt, J=Payment 3 Amt, K=Materials Actual,
-             L=Comm Payout 1 Date, M=Comm Payout 1 Amt, N=Comm Payout 2 Date,
-             O=Comm Payout 2 Amt, P=Holdback Date, Q=Holdback Amt, R=CT Green Paid
-             (S=Finance Type, T=Stage, U=SC Date are reference-only, ignored here)
+             L=Materials Paid Date, M=Comm Payout 1 Date, N=Comm Payout 1 Amt,
+             O=Comm Payout 2 Date, P=Comm Payout 2 Amt, Q=Holdback Date,
+             R=Holdback Amt, S=CT Green Paid, T=CT Green Paid Date
+             (U=Finance Type, V=Stage, W=SC Date are reference-only, ignored here)
     """
     sheets = svc.spreadsheets()
     try:
         data = sheets.values().get(
             spreadsheetId=CASHFLOW_SHEET_ID,
-            range=f"'{CASHFLOW_OVERRIDES_TAB}'!A2:R200",
+            range=f"'{CASHFLOW_OVERRIDES_TAB}'!A2:T200",
             valueRenderOption="FORMATTED_VALUE",
         ).execute().get("values", [])
     except Exception:
@@ -5636,19 +5638,23 @@ def _read_payment_overrides(svc) -> dict:
         if len(row) > 10 and parse_amt(row[10]) is not None:
             entry["materials"] = parse_amt(row[10])
         if len(row) > 11 and valid_date(row[11]):
-            entry["comm_payout1_date"] = valid_date(row[11])
-        if len(row) > 12 and parse_amt(row[12]) is not None:
-            entry["comm_payout1"] = parse_amt(row[12])
-        if len(row) > 13 and valid_date(row[13]):
-            entry["comm_payout2_date"] = valid_date(row[13])
-        if len(row) > 14 and parse_amt(row[14]) is not None:
-            entry["comm_payout2"] = parse_amt(row[14])
-        if len(row) > 15 and valid_date(row[15]):
-            entry["holdback_date"] = valid_date(row[15])
-        if len(row) > 16 and parse_amt(row[16]) is not None:
-            entry["holdback_amt"] = parse_amt(row[16])
-        if len(row) > 17 and str(row[17]).strip():
+            entry["materials_date"] = valid_date(row[11])
+        if len(row) > 12 and valid_date(row[12]):
+            entry["comm_payout1_date"] = valid_date(row[12])
+        if len(row) > 13 and parse_amt(row[13]) is not None:
+            entry["comm_payout1"] = parse_amt(row[13])
+        if len(row) > 14 and valid_date(row[14]):
+            entry["comm_payout2_date"] = valid_date(row[14])
+        if len(row) > 15 and parse_amt(row[15]) is not None:
+            entry["comm_payout2"] = parse_amt(row[15])
+        if len(row) > 16 and valid_date(row[16]):
+            entry["holdback_date"] = valid_date(row[16])
+        if len(row) > 17 and parse_amt(row[17]) is not None:
+            entry["holdback_amt"] = parse_amt(row[17])
+        if len(row) > 18 and str(row[18]).strip():
             entry["ct_green_paid"] = True
+        if len(row) > 19 and valid_date(row[19]):
+            entry["ct_green_date"] = valid_date(row[19])
         if entry:
             if proj_id in overrides:
                 overrides[proj_id].update(entry)
@@ -6289,7 +6295,7 @@ def _compute_cashflow_row(row: dict, today: datetime.date, zoho_base: str, auror
     # Cash materials cost: $1.26/W at 60% progress (Cash) or Payment 2 (SE) date
     cash_materials_date = cash_materials_amt = ""
     if finance_type in ("CASH", "SE") and system_watts and payment2_date:
-        cash_materials_date = payment2_date
+        cash_materials_date = pov.get("materials_date") or payment2_date
         cash_materials_amt = pov["materials"] if pov.get("materials") is not None else round(system_watts * CASHFLOW_MATERIALS_PPW, 2)
 
     # CT Green Estates cost: $0.25/W, paid once project is fully paid (activation/final)
@@ -6314,8 +6320,12 @@ def _compute_cashflow_row(row: dict, today: datetime.date, zoho_base: str, auror
         else:
             final_date_for_ct = payment1_date
         if final_date_for_ct:
-            ct_green_date = final_date_for_ct
+            ct_green_date = pov.get("ct_green_date") or final_date_for_ct
             ct_green_amt = round(system_watts * CASHFLOW_CT_GREEN_PPW, 2)
+    elif pov.get("ct_green_date") and system_watts and not pov.get("ct_green_paid"):
+        # Manual date set even if auto conditions not met
+        ct_green_date = pov["ct_green_date"]
+        ct_green_amt = round(system_watts * CASHFLOW_CT_GREEN_PPW, 2)
 
     # Pre-compute LR DC holdback so it lands in the pipeline tab (AH/AI columns).
     # Must happen before pipeline_row is constructed; pay_events uses the same vars below.
