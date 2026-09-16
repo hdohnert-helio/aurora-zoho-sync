@@ -5787,17 +5787,13 @@ def _populate_overrides_from_pipeline(svc) -> dict:
         ]
         new_rows.append((False, pipeline_row))
 
-    # Preserve any override rows not in current pipeline (mark stale)
+    # Preserve any override rows not in current pipeline as-is (no stale note)
     for proj_id, ex_row in existing.items():
         if proj_id in seen_in_pipeline:
             continue
         active = str(ex_row[0]).strip().upper() if ex_row else ""
         preserved = list(ex_row) + [""] * (19 - len(ex_row))
-        if active == "TRUE":
-            new_rows.append((True, preserved))
-        else:
-            preserved[6] = f"[not in current pipeline] {preserved[6]}".strip()
-            new_rows.append((False, preserved))
+        new_rows.append((active == "TRUE", preserved))
 
     # Sort: Active=TRUE first, then by project ID
     new_rows.sort(key=lambda x: (not x[0], x[1][1]))
