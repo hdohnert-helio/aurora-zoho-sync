@@ -5497,8 +5497,8 @@ CASHFLOW_OVERRIDES_TAB = "Overrides"
 OVERRIDES_HEADERS = [
     "Active", "Project ID", "Customer", "Payment 1 Date", "Payment 2 Date", "Payment 3 Date",
     "Notes", "Payment 1 Amt", "Payment 2 Amt", "Payment 3 Amt", "Materials Actual",
-    "Comm Payout 1 Amt", "Comm Payout 2 Amt", "Holdback Date", "Holdback Amt",
-    "CT Green Paid",
+    "Comm Payout 1 Date", "Comm Payout 1 Amt", "Comm Payout 2 Date", "Comm Payout 2 Amt",
+    "Holdback Date", "Holdback Amt", "CT Green Paid",
     # Read-only reference columns (populated by /cashflow/populate-overrides, not used by apply-overrides)
     "Finance Type", "Stage", "SC Date",
 ]
@@ -5576,15 +5576,15 @@ def _read_payment_overrides(svc) -> dict:
     Columns: A=Active, B=Project ID, C=Customer (ignored), D=Payment 1 Date,
              E=Payment 2 Date, F=Payment 3 Date, G=Notes, H=Payment 1 Amt,
              I=Payment 2 Amt, J=Payment 3 Amt, K=Materials Actual,
-             L=Comm Payout 1 Amt, M=Comm Payout 2 Amt, N=Holdback Date,
-             O=Holdback Amt, P=CT Green Paid
-             (Q=Finance Type, R=Stage, S=SC Date are reference-only, ignored here)
+             L=Comm Payout 1 Date, M=Comm Payout 1 Amt, N=Comm Payout 2 Date,
+             O=Comm Payout 2 Amt, P=Holdback Date, Q=Holdback Amt, R=CT Green Paid
+             (S=Finance Type, T=Stage, U=SC Date are reference-only, ignored here)
     """
     sheets = svc.spreadsheets()
     try:
         data = sheets.values().get(
             spreadsheetId=CASHFLOW_SHEET_ID,
-            range=f"'{CASHFLOW_OVERRIDES_TAB}'!A2:P200",
+            range=f"'{CASHFLOW_OVERRIDES_TAB}'!A2:R200",
             valueRenderOption="FORMATTED_VALUE",
         ).execute().get("values", [])
     except Exception:
@@ -5635,15 +5635,19 @@ def _read_payment_overrides(svc) -> dict:
             entry["amount3"] = parse_amt(row[9])
         if len(row) > 10 and parse_amt(row[10]) is not None:
             entry["materials"] = parse_amt(row[10])
-        if len(row) > 11 and parse_amt(row[11]) is not None:
-            entry["comm_payout1"] = parse_amt(row[11])
+        if len(row) > 11 and valid_date(row[11]):
+            entry["comm_payout1_date"] = valid_date(row[11])
         if len(row) > 12 and parse_amt(row[12]) is not None:
-            entry["comm_payout2"] = parse_amt(row[12])
+            entry["comm_payout1"] = parse_amt(row[12])
         if len(row) > 13 and valid_date(row[13]):
-            entry["holdback_date"] = valid_date(row[13])
+            entry["comm_payout2_date"] = valid_date(row[13])
         if len(row) > 14 and parse_amt(row[14]) is not None:
-            entry["holdback_amt"] = parse_amt(row[14])
-        if len(row) > 15 and str(row[15]).strip():
+            entry["comm_payout2"] = parse_amt(row[14])
+        if len(row) > 15 and valid_date(row[15]):
+            entry["holdback_date"] = valid_date(row[15])
+        if len(row) > 16 and parse_amt(row[16]) is not None:
+            entry["holdback_amt"] = parse_amt(row[16])
+        if len(row) > 17 and str(row[17]).strip():
             entry["ct_green_paid"] = True
         if entry:
             if proj_id in overrides:
@@ -6238,13 +6242,17 @@ def _compute_cashflow_row(row: dict, today: datetime.date, zoho_base: str, auror
     # Apply manual payment date and amount overrides
     if pov.get("payment1"):
         payment1_date = pov["payment1"]
-        comm_payout1_date = pov["payment1"]
+        comm_payout1_date = pov.get("comm_payout1_date") or pov["payment1"]
     if pov.get("payment2"):
         payment2_date = pov["payment2"]
-        comm_payout2_date = pov["payment2"]
+        comm_payout2_date = pov.get("comm_payout2_date") or pov["payment2"]
     if pov.get("payment3"):
         payment3_date = pov["payment3"]
         comm_payout3_date = pov["payment3"]
+    if pov.get("comm_payout1_date") and not pov.get("payment1"):
+        comm_payout1_date = pov["comm_payout1_date"]
+    if pov.get("comm_payout2_date") and not pov.get("payment2"):
+        comm_payout2_date = pov["comm_payout2_date"]
     if pov.get("amount1") is not None:
         payment1_amt = pov["amount1"]
     if pov.get("amount2") is not None:
