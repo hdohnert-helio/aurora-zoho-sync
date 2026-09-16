@@ -7844,11 +7844,13 @@ def _apply_overrides_to_pipeline_tab(svc, tab_name: str, overrides: dict) -> dic
         if pov.get("payment2") and finance_type in ("CASH", "SE") and current_pay["payment2"]:
             updates.append({"range": f"'{tab_name}'!AD{row_num}", "values": [[pov["payment2"]]]})
 
-        # Standalone comm payout date overrides (when set without a payment date change)
-        if pov.get("comm_payout1_date") and not pov.get("payment1"):
+        # Comm payout date overrides — always applied after PAY_COLS so they win over payment-derived dates
+        if pov.get("comm_payout1_date"):
             updates.append({"range": f"'{tab_name}'!T{row_num}", "values": [[pov["comm_payout1_date"]]]})
-        if pov.get("comm_payout2_date") and not pov.get("payment2"):
+        if pov.get("comm_payout2_date"):
             updates.append({"range": f"'{tab_name}'!V{row_num}", "values": [[pov["comm_payout2_date"]]]})
+        if pov.get("comm_payout3_date"):
+            updates.append({"range": f"'{tab_name}'!X{row_num}", "values": [[pov["comm_payout3_date"]]]})
 
         # CT Green Date override (col AB)
         if pov.get("ct_green_date"):
