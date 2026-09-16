@@ -7837,6 +7837,13 @@ def _apply_overrides_to_pipeline_tab(svc, tab_name: str, overrides: dict) -> dic
         # Holdback date/amount overrides (cols AH/AI)
         if pov.get("holdback_date"):
             updates.append({"range": f"'{tab_name}'!AH{row_num}", "values": [[pov["holdback_date"]]]})
+        elif pov.get("payment2") and finance_type in ("LR", "SG") and current_pay["payment2"]:
+            # Auto-shift holdback 25 days after the overridden activation date
+            try:
+                auto_hb = (datetime.date.fromisoformat(pov["payment2"]) + datetime.timedelta(days=25)).isoformat()
+                updates.append({"range": f"'{tab_name}'!AH{row_num}", "values": [[auto_hb]]})
+            except (ValueError, TypeError):
+                pass
         if pov.get("holdback_amt") is not None:
             updates.append({"range": f"'{tab_name}'!AI{row_num}", "values": [[pov["holdback_amt"]]]})
 
