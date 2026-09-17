@@ -6,7 +6,7 @@ writes artifacts/powerclerk_projects.csv.
 
 Writes nothing to PowerClerk or Zoho.
 """
-import csv, os, pathlib, re, sys
+import csv, json, os, pathlib, re, sys
 from playwright.sync_api import sync_playwright
 
 ART = pathlib.Path("artifacts"); ART.mkdir(exist_ok=True)
@@ -76,86 +76,80 @@ def normalise(headers, row):
 
 
 def collect(page, label, host, pid):
+    """Drive the Vue grid's own API instead of clicking the pager.
+
+    The list page POSTs to /MvcProjects/ProjectList/GetProjectList3 with a
+    DataTables-style body: {"programId": ..., "tableRequest": {"start", "length",
+    "columns":[{"header","property"}...]}}. We capture that request, re-issue it
+    with length=2000, and read every row in one shot.
+    """
+    captured = {}
+
+    def on_req(req):
+        if "GetProjectList3" in req.url and not captured:
+            try:
+                captured["url"] = req.url
+                captured["body"] = json.loads(req.post_data or "{}")
+            except Exception as e:
+                print(f"  capture failed: {e}")
+
+    page.on("request", on_req)
     url = f"https://{host}/MvcProjects/ProjectList?ProgramId={pid}"
     page.goto(url, wait_until="domcontentloaded", timeout=60000)
-    page.wait_for_timeout(3500)
+    page.wait_for_timeout(5000)
+    page.remove_listener("request", on_req)
 
-    body = page.inner_text("body")
-    m = re.search(r"([\d,]+)\s+Projects?\s+Found", body, re.I)
+    body_text = page.inner_text("body")
+    m = re.search(r"([\d,]+)\s+Projects?\s+Found", body_text, re.I)
     total = int(m.group(1).replace(",", "")) if m else 0
     print(f"  {label}: {total} projects reported")
 
-    # --- diagnose the real pager widget ---
-    try:
-        info = page.evaluate("""() => {
-          const hit = [...document.querySelectorAll('*')].reverse().find(
-            e => /Items per page/i.test(e.textContent || '') && e.children.length <= 20);
-          if (!hit) return {found:false};
-          const box = hit.closest('div,nav,footer,section') || hit;
-          const clean = box.outerHTML
-              .replace(/(href|action|src)="[^"]*"/g, '$1="_"')
-              .replace(/\\s+/g, ' ');
-          const clickable = [...box.querySelectorAll('a,button,span,li,select,input')]
-              .map(e => ({tag:e.tagName, role:e.getAttribute('role')||'',
-                          cls:(e.className||'').toString().slice(0,40),
-                          txt:(e.innerText||e.value||'').trim().slice(0,20)}))
-              .filter(x => x.txt || x.tag === 'SELECT' || x.tag === 'INPUT');
-          return {found:true, html: clean.slice(0,1800), clickable: clickable.slice(0,30)};
-        }""")
-        print("  PAGER-DIAG: " + str(info)[:2200])
-    except Exception as e:
-        print(f"  pager diag failed: {e}")
-
-    # --- try to raise the page size by clicking the option text ---
-    for label_txt in ("Custom", "25", "15"):
-        try:
-            el = page.get_by_text(label_txt, exact=True).last
-            if el.count() and el.is_visible():
-                el.click(); page.wait_for_timeout(1500)
-                print(f"  clicked page-size option {label_txt!r}")
-                if label_txt == "Custom":
-                    inp = page.locator("input[type='number'], input[type='text']").last
-                    if inp.count() and inp.is_visible():
-                        inp.fill("500"); inp.press("Enter")
-                        page.wait_for_timeout(3000)
-                        print("  entered custom page size 500")
-                break
-        except Exception as e:
-            print(f"  page-size attempt {label_txt} failed: {e}")
-
-    seen, out, guard = set(), [], 0
-    while guard < 60:
-        guard += 1
+    if not captured:
+        print("  FAIL: never saw GetProjectList3 — falling back to visible rows")
         data = grab_rows(page)
-        headers, rows = data["headers"], data["rows"]
-        new_n = 0
-        for r in rows:
-            rec = normalise(headers, r)
-            key = rec["project_no"]
-            if key and key not in seen:
-                seen.add(key); out.append(rec); new_n += 1
-        print(f"  page {guard}: +{new_n} (total {len(out)}/{total})")
-        if len(out) >= total or new_n == 0:
-            break
-        moved = False
-        for how in ["aria", "chevron", "text"]:
-            try:
-                if how == "aria":
-                    el = page.locator("[aria-label*='next' i], [title*='next' i]").last
-                elif how == "chevron":
-                    el = page.locator("i.fa-chevron-right, i.fa-angle-right, svg.fa-chevron-right").last
-                else:
-                    el = page.get_by_text(">", exact=True).last
-                if el.count() and el.is_visible():
-                    el.click(); moved = True
-                    print(f"  advanced via {how}")
-                    break
-            except Exception:
-                continue
-        if not moved:
-            print("  no Next control found — stopping")
-            break
-        page.wait_for_timeout(2500)
+        return [normalise(data["headers"], r) for r in data["rows"] if r]
+
+    body = captured["body"]
+    tr = body.get("tableRequest", {})
+    tr["start"] = 0
+    tr["length"] = 2000
+    body["tableRequest"] = tr
+
+    resp = page.request.post(captured["url"], data=body,
+                             headers={"Content-Type": "application/json"})
+    if not resp.ok:
+        print(f"  FAIL: API returned {resp.status}")
+        return []
+    payload = resp.json()
+    print(f"  API keys: {list(payload.keys())[:8]}")
+
+    rows = None
+    for k in ("data", "Data", "rows", "aaData"):
+        if isinstance(payload.get(k), list):
+            rows = payload[k]; break
+    if rows is None:
+        print(f"  FAIL: no row array. sample={str(payload)[:300]}")
+        return []
+    print(f"  {label}: API returned {len(rows)} rows")
+
+    # property (ProjectDataN) -> header text, from the captured request
+    prop2head = {c.get("property"): c.get("header", "")
+                 for c in tr.get("columns", []) if c.get("property")}
+
+    out = []
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        headers, vals = [], []
+        for prop, head in prop2head.items():
+            v = r.get(prop)
+            if isinstance(v, dict):
+                v = v.get("value") or v.get("text") or v.get("display") or ""
+            headers.append(head)
+            vals.append(re.sub(r"<[^>]+>", " ", str(v or "")).strip())
+        rec = normalise(headers, vals)
+        if rec["project_no"]:
+            out.append(rec)
 
     print(f"  {label}: collected {len(out)} rows")
     return out
