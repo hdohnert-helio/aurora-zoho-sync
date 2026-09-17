@@ -1,0 +1,39 @@
+name: PowerClerk smoke test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Playwright
+        run: |
+          pip install playwright
+          playwright install --with-deps chromium
+
+      - name: Load PowerClerk credentials from 1Password
+        uses: 1password/load-secrets-action@v2
+        with:
+          export-env: true
+        env:
+          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          PC_USER: op://Helio Automation/PowerClerk UI/username
+          PC_PASS: op://Helio Automation/PowerClerk UI/password
+
+      - name: Run smoke test
+        run: python scripts/powerclerk_smoke.py
+
+      - name: Upload screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: powerclerk-smoke-screenshots
+          path: artifacts/
+          if-no-files-found: warn

@@ -1,0 +1,18 @@
+# Secrets — never commit
+client_secret*.json
+*credentials*.json
+*.gdoc
+.env
+.env.*
+token.json
+*.pem
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Tooling
+.idea/
+.claude/
+artifacts/
