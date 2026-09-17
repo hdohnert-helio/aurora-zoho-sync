@@ -169,6 +169,32 @@ def main():
         browser = p.chromium.launch()
         page = browser.new_context(viewport={"width": 1900, "height": 1400}).new_page()
 
+        # --- capture the XHR/fetch calls the Vue grid makes ---
+        seen_api = []
+
+        def _log_req(req):
+            try:
+                if req.resource_type not in ("xhr", "fetch"):
+                    return
+                from urllib.parse import urlsplit, parse_qs
+                u = urlsplit(req.url)
+                keys = sorted(parse_qs(u.query).keys())
+                body = ""
+                try:
+                    d = req.post_data
+                    if d:
+                        body = d[:300]
+                except Exception:
+                    pass
+                sig = f"{req.method} {u.netloc}{u.path} qkeys={keys} body={body}"
+                if sig not in seen_api:
+                    seen_api.append(sig)
+            except Exception:
+                pass
+
+        page.on("request", _log_req)
+
+
         page.goto(f"https://{LOGIN[0]}/MvcAccount/Login?ProgramId={LOGIN[1]}",
                   wait_until="domcontentloaded", timeout=60000)
         page.wait_for_timeout(1500)
@@ -186,6 +212,10 @@ def main():
             for r in collect(page, label, host, pid):
                 r["program"] = label
                 allrows.append(r)
+        print("\n=== API CALLS OBSERVED ===")
+        for sig in seen_api[:40]:
+            print("  " + sig)
+        print("=== END API ===")
         browser.close()
 
     cols = ["program", "project_no", "name", "street", "city", "status",
