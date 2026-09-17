@@ -1,17 +1,12 @@
 name: PowerClerk sync
 
-# NOTE: the `schedule:` trigger is intentionally not yet enabled. This still
-# logs into PowerClerk for real even with --dry-run (the scrape is what
-# produces the values to diff), which evicts whoever is in the portal. Add
-# the cron back once a --dry-run run's diff against this morning's manually
-# verified 45 records comes back clean:
-#
-# on:
-#   schedule:
-#     - cron: '0 9 * * *'  # 05:00 ET / 09:00 UTC, off-hours
-#   workflow_dispatch: ...
+# Cron enabled 2026-09-17 after the live run's diff was reviewed and matched
+# expectations. 05:00 ET / 09:00 UTC, off-hours -- every login evicts
+# whoever is in the portal (see CLAUDE.md).
 
 on:
+  schedule:
+    - cron: '0 9 * * *'
   workflow_dispatch:
     inputs:
       dry_run:

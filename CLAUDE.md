@@ -273,6 +273,12 @@ login evicts whoever is in the portal; the notifier touches Zoho only.
 Splitting them means a failed scrape still lets the notifier run and report that
 `IC_Portal_Checked` has gone stale.
 
+**Both crons enabled 2026-09-17**, after: the sync's live-run diff was reviewed
+and matched expectations (including the IC_Project_Number-first / no-overwrite
+/ commercial-exemption fixes), and the notifier's dry-run digest, the
+`IC_Alert_Sent` backfill, and a real test SMS were all verified per the test
+order above.
+
 ### Credentials
 
 ```
@@ -295,17 +301,44 @@ Tracks what has already been texted, so a long-running blocker alerts once.
 - The 5am sync CLEARS `IC_Alert_Sent` whenever `IC_Action_Required` goes true->false,
   so a project that gets blocked again later alerts again.
 
+### Field: IC_PTO_Alert_Sent (datetime) -- PTO milestone (2026-09-17)
+
+PTO (permission to operate) is good news, but it's the activation milestone,
+so it belongs in the same digest as blockers, not silence. Mirrors
+`IC_Alert_Sent`'s design exactly, except it is never cleared -- PTO doesn't
+reverse, so there's no "re-block" case to reset for.
+
+- The 5am sync fills `Utility_PTO` with the portal's status date when
+  `IC_Portal_Status` becomes UI's `Energize System` or Eversource's `Level 1
+  - Online` **and** `Utility_PTO` is currently empty. Never overwrites a
+  non-empty `Utility_PTO` -- it may have been entered by hand (David).
+- The 9am notifier announces where `Utility_PTO` is set AND `IC_PTO_Alert_Sent`
+  is null, stamping it only after a confirmed send, same rule as `IC_Alert_Sent`.
+- **This field does not exist in Zoho yet.** `powerclerk_notify.py` probes for
+  it at startup (a cheap 1-record read) and disables PTO announcements for
+  the run if it's missing, logging a note -- the blocker digest is
+  unaffected either way, so this was safe to ship before the field exists.
+- **Before relying on live PTO announcements:** create `IC_PTO_Alert_Sent`
+  (datetime) on Installs, then run `powerclerk_notify.py
+  --backfill-pto-alert-sent` once. Several installs already have (or will
+  shortly get, via the sync's new fill logic) `Utility_PTO` set from before
+  this feature existed -- without the backfill they'd all announce at once
+  the first time the notifier runs with the field present.
+- First install expected to get `Utility_PTO` set by this logic: Mohammed
+  Alamgir | 28 (`INT-119959`), which reached `Level 1 - Online` on 2026-09-17.
+
 ### Message rules
 
-1. **One SMS per run**, a digest -- never one per project.
-2. **Cap at 8.** More than 8 newly-blocked in one run means a scraper bug, not
-   eight utilities acting overnight. Send `"N newly blocked -- check Canvas,
-   likely a sync issue"` and stamp nothing, so the real alerts survive for the
-   next run once the bug is fixed.
+1. **One SMS per run**, a digest -- never one per project. Blocked and PTO
+   items share one message, in labeled sections.
+2. **Cap at 8 total new events** (blocked + PTO combined). More than 8 in one
+   run means a scraper bug, not that many things happening overnight. Send
+   `"N new events -- check Canvas, likely a sync issue"` and stamp nothing,
+   so the real alerts survive for the next run once the bug is fixed.
 3. **Send nothing when there is nothing new.** No "all clear" texts.
 4. If `IC_Portal_Checked` is older than 36h on most active records, send
-   `"Portal sync stale since <date>"` instead of a blocker digest -- the data
-   is not trustworthy enough to alert on.
+   `"Portal sync stale since <date>"` instead of a digest -- the data is not
+   trustworthy enough to alert on.
 
 ### DST caveat
 

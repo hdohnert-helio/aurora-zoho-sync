@@ -1,16 +1,12 @@
 name: PowerClerk notify
 
-# NOTE: the `schedule:` trigger is intentionally not yet enabled -- see the
-# test order in CLAUDE.md's Alerting section. Add it back once the dry-run
-# digest, the IC_Alert_Sent backfill, and a real test SMS have all been
-# verified:
-#
-# on:
-#   schedule:
-#     - cron: '0 13 * * *'  # nominal 09:00 ET; see DST caveat in CLAUDE.md
-#   workflow_dispatch: ...
+# Cron enabled 2026-09-17 after the dry-run digest, the IC_Alert_Sent
+# backfill, and a real test SMS were all verified. Nominal 09:00 ET; see the
+# DST caveat in CLAUDE.md for why this fires an hour early in winter (EST).
 
 on:
+  schedule:
+    - cron: '0 13 * * *'
   workflow_dispatch:
     inputs:
       dry_run:
@@ -19,6 +15,10 @@ on:
         default: true
       backfill_alert_sent:
         description: 'One-time: stamp IC_Alert_Sent=now on every currently-blocked record, then exit (no SMS)'
+        type: boolean
+        default: false
+      backfill_pto_alert_sent:
+        description: 'One-time: stamp IC_PTO_Alert_Sent=now on every record with Utility_PTO already set, then exit (no SMS). Run once after creating that field in Zoho.'
         type: boolean
         default: false
       test_sms:
@@ -57,10 +57,12 @@ jobs:
         env:
           DRY_RUN: ${{ inputs.dry_run }}
           BACKFILL_ALERT_SENT: ${{ inputs.backfill_alert_sent }}
+          BACKFILL_PTO_ALERT_SENT: ${{ inputs.backfill_pto_alert_sent }}
           TEST_SMS: ${{ inputs.test_sms }}
         run: |
           ARGS=()
           if [ "$DRY_RUN" = "true" ]; then ARGS+=(--dry-run); fi
           if [ "$BACKFILL_ALERT_SENT" = "true" ]; then ARGS+=(--backfill-alert-sent); fi
+          if [ "$BACKFILL_PTO_ALERT_SENT" = "true" ]; then ARGS+=(--backfill-pto-alert-sent); fi
           if [ -n "$TEST_SMS" ]; then ARGS+=(--test-sms "$TEST_SMS"); fi
           python -u scripts/powerclerk_notify.py "${ARGS[@]}"

@@ -28,6 +28,11 @@ and "the utility has no record" are different facts. Commercial installs
 the same treatment as out-of-territory -- this only applies when there's
 no match; a commercial install that DOES match syncs normally.
 
+PTO milestone (2026-09-17): when a matched status is UI's "Energize System"
+or Eversource's "Level 1 - Online" and Utility_PTO is empty, fills it with
+the portal's status date. Never overwrites a non-empty Utility_PTO -- it may
+have been entered by hand.
+
 If the scrape itself fails (bad login, no rows), this exits before touching
 Zoho at all: no stamps are written, so IC_Portal_Checked goes stale and
 powerclerk_notify.py's staleness check is the signal that this broke.
@@ -89,7 +94,8 @@ def fetch_active_installs(token):
     """All Installs not in a closed-out stage, via /search (coql is not in our OAuth scope)."""
     criteria = "and".join(f"(Project_Stage:not_equal:{s})" for s in INACTIVE_STAGES)
     fields = ("id,Name,Site_Location,IC_Project_Number,Project_Stage,Utility_Provider,"
-              "Property_Type,IC_Portal_Status,IC_Portal_Status_Date,IC_Action_Required,IC_Alert_Sent")
+              "Property_Type,IC_Portal_Status,IC_Portal_Status_Date,IC_Action_Required,"
+              "IC_Alert_Sent,Utility_PTO")
 
     results, page = [], 1
     while True:
@@ -337,6 +343,16 @@ def parse_status_date(s):
         return None
 
 
+# PTO vocabulary (CLAUDE.md): UI's "Energize System" and Eversource's
+# "Level 1 - Online" both mean permission to operate has been granted.
+_PTO_SUBSTRINGS = ("energize system", "level 1 - online")
+
+
+def is_pto_status(status_text):
+    low = (status_text or "").lower()
+    return any(sub in low for sub in _PTO_SUBSTRINGS)
+
+
 # Recognized placeholder statuses this sync itself writes when there's no
 # real portal match. Used by the regression guard below to tell "this was
 # already a placeholder" from "this was a real matched status".
@@ -383,6 +399,12 @@ def compute_fields(inst, portal_idx, portal_by_number, known_cities, checked_at)
                     fields["IC_Portal_Status"] = (
                         f"{status_text} | CONFLICT: portal is {matched_num}, Zoho has {existing_num}"
                     )
+
+            # PTO milestone: only fill Utility_PTO, never overwrite -- David
+            # may have entered it by hand, and the portal date is our best
+            # guess at when it actually happened, not an authoritative correction.
+            if is_pto_status(status_text) and not (inst.get("Utility_PTO") or "").strip() and date:
+                fields["Utility_PTO"] = date
         elif is_commercial(inst):
             fields["IC_Portal_Status"] = COMMERCIAL_STATUS
             action_required = False
@@ -485,7 +507,7 @@ def main():
     # Fields worth reporting when they change. IC_Portal_Checked is excluded --
     # it changes on every run by design and isn't news.
     REPORT_FIELDS = ["IC_Portal_Status", "IC_Portal_Status_Date", "IC_Action_Required",
-                     "IC_Project_Number", "IC_Alert_Sent"]
+                     "IC_Project_Number", "IC_Alert_Sent", "Utility_PTO"]
 
     updated = no_match = out_of_territory = conflicts = failed = changed_projects = regressions = 0
     for inst in installs:

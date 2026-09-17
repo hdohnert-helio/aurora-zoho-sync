@@ -1,22 +1,32 @@
-"""Zoho-only SMS digest of newly-blocked interconnection projects.
+"""Zoho-only SMS digest of newly-blocked interconnection projects and PTO milestones.
 
 Reads Zoho, sends at most one SMS (a digest, never one per project), and
-stamps IC_Alert_Sent. Never touches PowerClerk -- that is powerclerk_sync.py's
-job, kept in a separate off-hours workflow so a scrape outage doesn't also
-block this from reporting on it.
+stamps IC_Alert_Sent / IC_PTO_Alert_Sent. Never touches PowerClerk -- that is
+powerclerk_sync.py's job, kept in a separate off-hours workflow so a scrape
+outage doesn't also block this from reporting on it.
 
 Message rules (CLAUDE.md):
   1. One SMS per run, a digest.
-  2. Cap at 8 newly-blocked. More than that means a scraper bug, not eight
-     utilities acting overnight -- send a "check Canvas" message and stamp
-     nothing, so the real alerts survive for the next run.
+  2. Cap at 8 total new events (blocked + PTO combined). More than that means
+     a scraper bug, not that many things happening overnight -- send a
+     "check Canvas" message and stamp nothing, so the real alerts survive
+     for the next run.
   3. Send nothing when there is nothing new. No "all clear" texts.
   4. If IC_Portal_Checked is stale on most active records, send a staleness
-     warning instead of a blocker digest -- the data isn't trustworthy.
+     warning instead of a digest -- the data isn't trustworthy.
 
-IC_Alert_Sent is stamped only after Twilio confirms the send (never first --
-a failed send that stamped would silently swallow the alert forever), and
-only if every configured recipient's send succeeded.
+IC_Alert_Sent / IC_PTO_Alert_Sent are stamped only after Twilio confirms the
+send (never first -- a failed send that stamped would silently swallow the
+alert forever), and only if every configured recipient's send succeeded.
+
+PTO announcements (2026-09-17) require the IC_PTO_Alert_Sent field (datetime)
+on Installs. If it doesn't exist yet, this script detects that at startup
+and disables PTO announcements for the run without failing -- the blocker
+digest keeps working either way. Once that field is created, run
+--backfill-pto-alert-sent once before letting this run live: Utility_PTO is
+being backfilled on every already-PTO'd install by powerclerk_sync.py's new
+PTO-fill logic, and without a backfill they'd all announce at once the first
+time this runs with the field present.
 """
 import argparse
 import datetime
@@ -35,6 +45,7 @@ TOKEN_URL = "https://accounts.zoho.com/oauth/v2/token"
 INACTIVE_STAGES = ["Canceled", "Project Closeout"]
 STALE_AFTER_HOURS = 36
 MAX_DIGEST = 8
+PTO_ALERT_FIELD = "IC_PTO_Alert_Sent"
 
 
 def get_zoho_token():
@@ -59,9 +70,25 @@ def zoho_headers(token):
     return {"Authorization": f"Zoho-oauthtoken {token}", "Content-Type": "application/json"}
 
 
-def fetch_active_installs(token):
+def pto_field_available(token):
+    """Probe for IC_PTO_Alert_Sent -- Zoho rejects the WHOLE request for an
+    unknown field name, so this can't just be included optimistically in the
+    main fetch below."""
+    r = requests.get(
+        f"{API_DOMAIN}/crm/v7/Installs",
+        headers=zoho_headers(token),
+        params={"fields": f"id,{PTO_ALERT_FIELD}", "per_page": 1},
+        timeout=30,
+    )
+    return r.status_code == 200
+
+
+def fetch_active_installs(token, include_pto_alert=False):
     criteria = "and".join(f"(Project_Stage:not_equal:{s})" for s in INACTIVE_STAGES)
-    fields = "id,Name,IC_Portal_Status,IC_Action_Required,IC_Alert_Sent,IC_Portal_Checked"
+    fields = ("id,Name,IC_Portal_Status,IC_Action_Required,IC_Alert_Sent,"
+              "IC_Portal_Checked,Utility_PTO")
+    if include_pto_alert:
+        fields += f",{PTO_ALERT_FIELD}"
     results, page = [], 1
     while True:
         r = requests.get(
@@ -143,6 +170,12 @@ def parse_args():
                          "currently at IC_Action_Required=true, then exit. No SMS. Run this "
                          "before the first live run so pre-existing blockers don't all fire "
                          "at once through the cap.")
+    p.add_argument("--backfill-pto-alert-sent", action="store_true",
+                    help="One-time maintenance: stamp IC_PTO_Alert_Sent=now on every record "
+                         "that already has Utility_PTO set, then exit. No SMS. Run this once "
+                         "after creating IC_PTO_Alert_Sent in Zoho, before letting PTO "
+                         "announcements go live -- otherwise every already-PTO'd install "
+                         "announces at once the first time this runs with the field present.")
     p.add_argument("--test-sms", metavar="TEXT",
                     help="Send TEXT verbatim to every configured recipient and exit. "
                          "Bypasses Zoho entirely -- for confirming Twilio delivery only.")
@@ -160,7 +193,35 @@ def main():
         return 0 if ok else 1
 
     token = get_zoho_token()
-    installs = fetch_active_installs(token)
+    pto_enabled = pto_field_available(token)
+    if not pto_enabled:
+        print(f"NOTE: {PTO_ALERT_FIELD} not found in Zoho -- PTO announcements disabled "
+              f"for this run (blocker digest is unaffected). Create it to enable them.")
+
+    if args.backfill_pto_alert_sent:
+        if not pto_enabled:
+            print(f"FAIL: {PTO_ALERT_FIELD} does not exist -- create it in Zoho first")
+            return 1
+        installs = fetch_active_installs(token, include_pto_alert=True)
+        pto_done = [i for i in installs if (i.get("Utility_PTO") or "").strip()]
+        print(f"{len(pto_done)} installs already have Utility_PTO set")
+        if args.dry_run:
+            for i in pto_done:
+                print(f"  [dry-run] would stamp {PTO_ALERT_FIELD}: {i.get('Name')}")
+            return 0
+        now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00")
+        failed = 0
+        for i in pto_done:
+            try:
+                update_install(i["id"], {PTO_ALERT_FIELD: now}, token)
+                print(f"  stamped {i.get('Name')}")
+            except Exception as e:
+                failed += 1
+                print(f"  FAIL stamping {i.get('Name')}: {e}")
+        print(f"backfill done: {len(pto_done) - failed} stamped, {failed} failures")
+        return 1 if failed else 0
+
+    installs = fetch_active_installs(token, include_pto_alert=pto_enabled)
     print(f"{len(installs)} active installs in Zoho")
 
     if args.backfill_alert_sent:
@@ -197,12 +258,19 @@ def main():
     ]
     print(f"{len(newly_blocked)} newly-blocked (action required, not yet alerted)")
 
-    if not newly_blocked:
+    newly_pto = []
+    if pto_enabled:
+        newly_pto = [i for i in installs
+                     if (i.get("Utility_PTO") or "").strip() and not i.get(PTO_ALERT_FIELD)]
+        print(f"{len(newly_pto)} newly-PTO'd (not yet announced)")
+
+    total = len(newly_blocked) + len(newly_pto)
+    if total == 0:
         print("nothing new -- no SMS sent")
         return 0
 
-    if len(newly_blocked) > MAX_DIGEST:
-        msg = f"{len(newly_blocked)} newly blocked -- check Canvas, likely a sync issue"
+    if total > MAX_DIGEST:
+        msg = f"{total} new events -- check Canvas, likely a sync issue"
         print(msg)
         if args.dry_run:
             print(f"  [dry-run] would send: {msg!r}")
@@ -210,18 +278,26 @@ def main():
         send_digest(msg, recipients)  # stamp nothing -- let real alerts survive for next run
         return 0
 
-    lines = [f"{i.get('Name')}: {i.get('IC_Portal_Status') or '(no status)'}" for i in newly_blocked]
-    msg = f"{len(newly_blocked)} newly blocked:\n" + "\n".join(lines)
+    parts = []
+    if newly_blocked:
+        lines = [f"{i.get('Name')}: {i.get('IC_Portal_Status') or '(no status)'}"
+                  for i in newly_blocked]
+        parts.append(f"{len(newly_blocked)} newly blocked:\n" + "\n".join(lines))
+    if newly_pto:
+        pto_lines = [f"{i.get('Name')}: PTO {i.get('Utility_PTO')}" for i in newly_pto]
+        parts.append(f"{len(newly_pto)} PTO granted:\n" + "\n".join(pto_lines))
+    msg = "\n\n".join(parts)
 
     if args.dry_run:
         print("=== DRY RUN -- would send this digest ===")
         print(msg)
         print(f"=== to: {recipients} ===")
-        print(f"would then stamp IC_Alert_Sent on {len(newly_blocked)} record(s)")
+        print(f"would then stamp IC_Alert_Sent on {len(newly_blocked)} record(s), "
+              f"{PTO_ALERT_FIELD} on {len(newly_pto)} record(s)")
         return 0
 
     if not send_digest(msg, recipients):
-        print("send not fully confirmed -- IC_Alert_Sent left unstamped, will retry next run")
+        print("send not fully confirmed -- nothing stamped, will retry next run")
         return 1
 
     now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00")
@@ -232,8 +308,14 @@ def main():
         except Exception as e:
             failed += 1
             print(f"  FAIL stamping IC_Alert_Sent for {i.get('Name')}: {e}")
+    for i in newly_pto:
+        try:
+            update_install(i["id"], {PTO_ALERT_FIELD: now}, token)
+        except Exception as e:
+            failed += 1
+            print(f"  FAIL stamping {PTO_ALERT_FIELD} for {i.get('Name')}: {e}")
 
-    print(f"done: digest sent, {len(newly_blocked) - failed} stamped, {failed} stamp failures")
+    print(f"done: digest sent, {total - failed} stamped, {failed} stamp failures")
     return 1 if failed else 0
 
 
