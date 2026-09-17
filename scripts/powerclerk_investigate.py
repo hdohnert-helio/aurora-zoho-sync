@@ -131,6 +131,27 @@ def main():
                 print("landing page URL:", page.url)
                 print("page title:", page.title())
 
+                # A "What's new?" modal with a dark backdrop seems to be
+                # intercepting every click in earlier runs. Try to dismiss it.
+                for label in ("Got it", "Close", "Dismiss", "×", "OK"):
+                    try:
+                        btn = page.get_by_text(label, exact=False).first
+                        if btn.is_visible(timeout=1000):
+                            btn.click(timeout=2000)
+                            print(f"dismissed a modal via label {label!r}")
+                            page.wait_for_timeout(1000)
+                            break
+                    except Exception:
+                        pass
+                try:
+                    close_x = page.locator("button[aria-label='Close'], .btn-close, .modal-header button").first
+                    if close_x.is_visible(timeout=1000):
+                        close_x.click(timeout=2000)
+                        print("dismissed a modal via close-icon selector")
+                        page.wait_for_timeout(1000)
+                except Exception:
+                    pass
+
                 idx = page.inner_text("body").find("Communications")
                 print("'Communications' found in body text at index:", idx)
                 if idx >= 0:
@@ -156,17 +177,28 @@ def main():
                 print("\ntable[3] (Communications) outerHTML, first 3000 chars:")
                 print(html[:3000])
 
-                print("\nattempting to click the first 'View' and catch a new tab/page...")
+                print("\nattempting to click the first 'View' (force, past any remaining overlay)...")
+                seen_reqs = []
+                page.on("request", lambda req: seen_reqs.append(req.url))
                 try:
                     view_el = comm_table.get_by_text("View", exact=True).first
-                    with page.context.expect_page(timeout=15000) as new_page_info:
-                        view_el.click()
-                    new_page = new_page_info.value
-                    new_page.wait_for_load_state("domcontentloaded", timeout=15000)
-                    print("new page URL:", new_page.url)
+                    try:
+                        with page.context.expect_page(timeout=10000) as new_page_info:
+                            view_el.click(force=True, timeout=10000)
+                        new_page = new_page_info.value
+                        new_page.wait_for_load_state("domcontentloaded", timeout=15000)
+                        print("new page URL:", new_page.url)
+                    except Exception as e:
+                        print("no new tab within 10s:", e)
+                        print("current page URL (in case it navigated in place):", page.url)
                 except Exception as e:
-                    print("click-and-catch-new-tab failed:", e)
-                    print("current page URL (in case it navigated in place):", page.url)
+                    print("click failed entirely:", e)
+                page.wait_for_timeout(1500)
+                comm_reqs = [u for u in seen_reqs if "ommunication" in u]
+                print(f"\n{len(seen_reqs)} requests seen since page load; "
+                      f"{len(comm_reqs)} mention 'communication':")
+                for u in comm_reqs[:10]:
+                    print(" ", u)
             except Exception as e:
                 print("landing-page investigation failed:", e)
         else:
