@@ -120,10 +120,13 @@ def update_install(record_id, fields, token):
 # the documented behavior for an unmatched active project, not a crash.
 
 _UNIT_RE = re.compile(
-    r"\b(FL|FLOOR|UNIT|APT|APARTMENT|BLDG|BUILDING|BSMT|BASEMENT|LOT|STE|SUITE)\b\.?\s*[\w-]*",
+    # Greedy to end-of-string: PowerClerk unit suffixes are often multiple
+    # trailing words ("UNIT OWNERS MTR", "BLDG OWNERS MTR"), not just one.
+    r"\b(FL|FLOOR|UNIT|APT|APARTMENT|BLDG|BUILDING|BSMT|BASEMENT|LOT|STE|SUITE)\b.*$",
     re.I,
 )
-_DIRECTIONAL_RE = re.compile(r"^\s*(NE|NW|SE|SW|N|S|E|W|NORTH|SOUTH|EAST|WEST)\b\.?\s+", re.I)
+_DIRECTIONALS = {"N", "S", "E", "W", "NE", "NW", "SE", "SW",
+                  "NORTH", "SOUTH", "EAST", "WEST"}
 _STREET_TYPE_MAP = {
     "ST": "STREET", "AVE": "AVENUE", "AV": "AVENUE", "RD": "ROAD", "LN": "LANE",
     "DR": "DRIVE", "CT": "COURT", "PL": "PLACE", "BLVD": "BOULEVARD", "CIR": "CIRCLE",
@@ -136,8 +139,7 @@ def normalize_street(s):
     if not s:
         return ""
     s = re.sub(r"[.,]", "", s.upper().strip())
-    s = _UNIT_RE.sub("", s)
-    s = _DIRECTIONAL_RE.sub("", s)
+    s = _UNIT_RE.sub("", s).strip()
     tokens = s.split()
     out = []
     for i, tok in enumerate(tokens):
@@ -145,6 +147,10 @@ def normalize_street(s):
         # naive parsing otherwise splits it and leaks "30" into the street name.
         if i == 0 and re.match(r"^\d+-\d+$", tok):
             out.append(tok)
+            continue
+        # drop a directional wherever it falls -- "N Main St" and "40 W High
+        # St" both put it in a different position relative to the house number.
+        if tok in _DIRECTIONALS:
             continue
         out.append(_STREET_TYPE_MAP.get(tok, tok))
     return " ".join(t for t in out if t)
