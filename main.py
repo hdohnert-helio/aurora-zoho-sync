@@ -1610,6 +1610,15 @@ def _send_sms(to_number: str, body: str):
     except Exception:
         logger.exception(f"_send_sms: failed to send to {to_number}")
 
+class SmsSendRequest(BaseModel):
+    to: str
+    message: str
+
+@app.post("/sms/send")
+async def sms_send(req: SmsSendRequest):
+    _send_sms(req.to, req.message)
+    return {"status": "sent", "to": req.to}
+
 @app.post("/webhook/zoho/note-added")
 async def zoho_note_added(request: Request):
     try:
