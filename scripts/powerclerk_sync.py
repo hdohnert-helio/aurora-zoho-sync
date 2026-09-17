@@ -101,7 +101,7 @@ def update_install(record_id, fields, token):
     body = {
         "data": [{"id": record_id, **fields}],
         "trigger": [],
-        "skip_feature_execution": ["assignment_rules", "connected_workflows"],
+        "skip_feature_execution": [{"name": "assignment_rules"}, {"name": "connected_workflows"}],
     }
     r = requests.put(f"{API_DOMAIN}/crm/v7/Installs", headers=zoho_headers(token),
                       json=body, timeout=30)
