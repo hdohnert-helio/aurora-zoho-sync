@@ -315,3 +315,144 @@ Rd) before the first live run. `Site_Location` is assumed to be
 nothing in this repo can query Zoho outside of GitHub Actions. If the
 `--dry-run` diff comes back full of false disagreements, check this
 assumption first.
+
+## Phase 2: pulling the actual correction text (verified in Chrome 2026-09-17)
+
+The grid gives the status; the *reason* lives in each project's Communications
+list. Both portals work identically. Confirmed on DER-55743 (Feola, UI) and
+INT-119883 (Mabud, Eversource).
+
+### URL patterns -- identical shape on both hosts
+
+```
+/MvcProjects/LandingPage?ProgramId=<PID>&ProjectId=<OPAQUE>
+/MvcProjects/ViewCommunication?ProgramId=<PID>&ProjectId=<OPAQUE>&CommunicationId=<OPAQUE>
+```
+
+`ProjectId` is an opaque 12-char token, **not** the DER-/INT- number. It is not
+in the grid payload. Get it by opening the row's expander and following
+"View/Edit Project", or check whether `GetProjectList3` returns it under another
+key before resorting to clicking.
+
+Both pages render as plain server-side HTML -- `get_page_text` returns the full
+body. No JS rendering, no PDF. The correction text is inline in the email body.
+
+### Where the reason lives
+
+Landing page has a `Communications Sent to installs@helio.solar` table:
+Date | Status | Subject | View. Newest first. The View button opens
+`ViewCommunication` in a NEW TAB (target=_blank) -- handle the tab, or fetch
+the URL directly once the CommunicationId is known.
+
+Subjects that carry corrections:
+- UI: `Application Validation ON HOLD - Response Required for <PROJ> <ADDRESS>`
+- Eversource: `Action needed on application update for project #<PROJ>, <NAME>`
+
+### Parsing
+
+UI bodies have a literal `Corrections Required:` header followed by one line per
+item -- parse that block. Eversource writes prose with no delimiter; take the
+paragraphs between the opening "some required information was missing" sentence
+and the closing "Please log in to this customer's application" sentence.
+
+Store in a new long-text field `IC_Correction_Detail` (create it; does not exist
+yet). Also store the communication date -- it differs from the grid's status
+timestamp and is the real "how long have we been sitting on this" clock.
+
+### Better signal than string matching
+
+Both portals have a built-in filter tab that already isolates blocked projects,
+which beats matching on status substrings:
+
+- UI: `Application Corrections Required` (returned exactly Feola + Webb),
+  plus `Technical Review Feedback`. UI's Program Home also shows live counts
+  per view.
+- Eversource: `Customer Action Required` and
+  `Impact Study in Process- Customer Action Required`.
+
+Consider driving `IC_Action_Required` off view membership instead of, or as a
+cross-check on, the substring rule.
+
+### Also noted
+
+Eversource's project list has an **Export to CSV** button. Worth testing --
+it may replace the `GetProjectList3` replay entirely.
+
+### Investigation results (2026-09-17, before building sync integration)
+
+**ProjectId is already in the grid -- no clicking needed.** Each
+`GetProjectList3` row is `{ProjectData, ProjectId, StatusId, CanDelete,
+CanAssign, QueuePosition, Highlights}` -- `ProjectId` sits right alongside
+`ProjectData`. `powerclerk_sync.py` can build
+`/MvcProjects/LandingPage?ProgramId=..&ProjectId=..` directly from the same
+scrape it already does; the grid's own `<a>` tags are 0 (it's a Vue app, no
+real row links) so clicking was never going to work anyway.
+
+**Export to CSV: inconclusive, not worth pursuing.** The button is real and
+clickable, but firing it produces neither a download event nor a new tab
+within 40s, tried twice. Moot now that ProjectId comes from the grid directly.
+
+**The Communications table is real and reachable without any clicking most
+of the way.** Landing page has 6 `<table>` elements; the Communications one
+(Date / Status / Subject) reads fine via plain DOM/text scraping -- confirmed
+against DER-55749 (Jeffrey Webb), whose newest entry read `9/15/2026 12:05:55
+PM | Received | Response Required: 5 BOYSENBERRY LN, SHELTON CT 06484,
+Project ID # DER-55749`. So **the notice date and subject are available with
+zero extra permission** -- only the message body requires opening
+`ViewCommunication`.
+
+**Blocker: opening a communication requires MFA, confirmed on both portals.**
+"View" is a `<button data-test-role="view-communication-button">`, not an
+`<a>` -- clicking it (after dismissing a "What's new?" onboarding modal that
+otherwise intercepts every click) throws: *"Multi-Factor Authentication
+Required -- Your account must have Multi-Factor Authentication enabled in
+order to perform this operation."* No new tab opens, no network request
+fires -- the app refuses client-side before anything is requested. Verified
+on a real blocked project on **both** UI (DER-55749) and Eversource
+(INT-121765). Login and grid browsing do NOT require MFA; only opening a
+communication's body does.
+
+This means `IC_Correction_Detail` (the verbatim ask text) cannot be
+populated without either enabling MFA on the PowerClerk service account(s)
+and teaching the automation to supply a TOTP code (a 1Password TOTP field
+plus a `pyotp`-based step in the login flow), or some other access path not
+yet found. `IC_Correction_Date`, however, needs no such access -- it can be
+read straight off the Communications table by matching Subject text against
+the known correction-notice patterns (`Application Validation ON HOLD -
+Response Required` / `Action needed on application update`), which the
+existing scrape-and-login flow already reaches.
+
+### Live examples captured
+
+DER-55743 Feola, UI, "Validation On Hold | Corrections Required" since 9/8:
+  - existing system size does not match UI records
+  - Total System Size (AC_kW) needed on the line diagram
+  - wiring schematics blurry, upload a clear image
+  NOTE: 9/3 on hold -> 9/4 corrections submitted -> 9/8 on hold again. Bounced twice.
+
+INT-119883 Mabud, Eversource, on hold since 5/26 (114 days):
+  Eversource cannot verify the scheduled HES date of 10/15/2026. Needs the HES
+  audit project #, and the HES vendor must enter the scheduled date into
+  Eversource's internal Tracksys before review resumes.
+
+### Fields for correction detail (created 2026-09-17)
+
+| API name | Type | Meaning |
+|---|---|---|
+| `IC_Correction_Detail` | textarea (large, 32k) | Verbatim ask from the utility's correction notice |
+| `IC_Correction_Date`   | date | Date the notice was sent -- the real aging clock |
+
+Already backfilled by hand on Gene Feola (`5264387000095379017`) and
+Abdul Mabud (`5264387000086240028`). Use those two as the formatting reference:
+a one-line header naming the utility and notice type, then numbered asks, then
+any note about who the actual blocker is.
+
+Sync behaviour:
+- Populate both only when `IC_Action_Required` is true.
+- When a project stops being blocked, CLEAR both, same as `IC_Alert_Sent`.
+  Stale correction text on an unblocked project is worse than none.
+- If the newest correction notice is newer than `IC_Correction_Date`, replace
+  the detail and re-alert -- a second round of corrections is new news even
+  though `IC_Action_Required` never flipped false. Feola bounced 9/3 -> 9/4 ->
+  9/8 and a naive false->true check would have missed the second round.
+- Include the first ~2 asks in the SMS, truncated. Full text lives in Zoho.
