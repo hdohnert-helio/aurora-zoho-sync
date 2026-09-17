@@ -1,0 +1,33 @@
+name: PowerClerk investigate (temporary)
+
+# One-off investigation for Phase 2. Delete this workflow and
+# scripts/powerclerk_investigate.py once its findings are captured.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  investigate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install Playwright
+        run: |
+          pip install playwright
+          playwright install --with-deps chromium
+
+      - name: Load PowerClerk credentials from 1Password
+        uses: 1password/load-secrets-action@v2
+        with:
+          export-env: true
+        env:
+          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          PC_USER: op://Helio Automation/PowerClerk UI/username
+          PC_PASS: op://Helio Automation/PowerClerk UI/password
+
+      - name: Run investigation
+        timeout-minutes: 10
+        run: python -u scripts/powerclerk_investigate.py
