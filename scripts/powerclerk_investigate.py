@@ -93,32 +93,59 @@ def main():
 
         # --- Q1: does the row payload carry ProjectId? ---
         print("=== Q1: GetProjectList3 row keys (UI) ===")
-        payload = capture_and_replay(page, UI[0], UI[1])
+        payload = capture_and_replay(page, UI[0], UI[1], length=2000)
+        blocked_project_id = None
         if payload:
             rows = (payload.get("Data") or {}).get("ProjectListData", {}).get("data", [])
             if rows:
                 print("row0 top-level keys:", list(rows[0].keys()))
-                print("row0 full JSON (untruncated except very long values):")
-                print(json.dumps(rows[0])[:4000])
+                for k in ("ProjectId", "StatusId", "CanDelete", "CanAssign",
+                          "QueuePosition", "Highlights"):
+                    print(f"  row0[{k!r}] =", rows[0].get(k))
+                # find a project whose status contains "Corrections Required" so
+                # Q4 has a real blocked project to inspect.
+                for r in rows:
+                    fields = r.get("ProjectData") or []
+                    status_val = next(
+                        (f.get("Value") for f in fields if f.get("BuiltInFieldConstantId") == 2), "")
+                    if status_val and "corrections required" in str(status_val).lower():
+                        blocked_project_id = r.get("ProjectId")
+                        proj_no = next(
+                            (f.get("Value") for f in fields if f.get("BuiltInFieldConstantId") == 1), "?")
+                        print(f"  found blocked project {proj_no} -> ProjectId={blocked_project_id!r} "
+                              f"status={status_val!r}")
+                        break
             else:
                 print("no rows in reply")
         print()
 
-        # --- Q2: what does clicking a project row actually give us? ---
-        print("=== Q2: row link / expander behavior (UI) ===")
-        page.goto(f"https://{UI[0]}/MvcProjects/ProjectList?ProgramId={UI[1]}",
-                  wait_until="domcontentloaded", timeout=60000)
-        page.wait_for_timeout(4000)
-        try:
-            links = page.locator("table tbody tr a").all()
-            print(f"found {len(links)} <a> tags in the grid body; first 5 hrefs:")
-            for l in links[:5]:
-                try:
-                    print(" ", l.get_attribute("href"))
-                except Exception as e:
-                    print("  (failed to read href)", e)
-        except Exception as e:
-            print("row-link inspection failed:", e)
+        # --- Q4: landing page Communications table + View link hrefs ---
+        # Navigate DIRECTLY using the ProjectId from Q1 -- no clicking needed.
+        print("=== Q4: Communications table via direct landing-page URL ===")
+        if blocked_project_id:
+            url = (f"https://{UI[0]}/MvcProjects/LandingPage"
+                   f"?ProgramId={UI[1]}&ProjectId={blocked_project_id}")
+            try:
+                page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                page.wait_for_timeout(3000)
+                print("landing page URL:", page.url)
+
+                comm_table = page.locator("table", has_text="Communications").first
+                html = comm_table.evaluate("el => el.outerHTML")
+                print("communications table HTML (first 5000 chars):")
+                print(html[:5000])
+
+                view_links = comm_table.locator("a").all()
+                print(f"\n{len(view_links)} <a> tags in the communications table; hrefs:")
+                for l in view_links[:6]:
+                    try:
+                        print(" ", l.get_attribute("href"), "| text:", l.inner_text())
+                    except Exception as e:
+                        print("  (failed to read href)", e)
+            except Exception as e:
+                print("landing-page investigation failed:", e)
+        else:
+            print("skipped -- no blocked project found in first page of rows")
         print()
 
         # --- Q3: Eversource Export to CSV ---
@@ -127,9 +154,13 @@ def main():
                   wait_until="domcontentloaded", timeout=60000)
         page.wait_for_timeout(4000)
         try:
+            # dismiss any lingering overlay before clicking
+            page.keyboard.press("Escape")
+            page.wait_for_timeout(500)
             btn = page.get_by_text("Export to CSV", exact=False).first
+            btn.scroll_into_view_if_needed()
             with page.expect_download(timeout=20000) as dl_info:
-                btn.click()
+                btn.click(force=True)
             download = dl_info.value
             path = download.path()
             with open(path, "r", errors="replace") as f:
@@ -139,39 +170,6 @@ def main():
             print(content[:2000])
         except Exception as e:
             print("export-to-csv failed:", e)
-        print()
-
-        # --- Q4: landing page Communications table + View link hrefs ---
-        # Use the UI "Application Corrections Required" tab to find a blocked
-        # project (CLAUDE.md says this returns Feola + Webb), then open it.
-        print("=== Q4: Communications table on a real landing page ===")
-        page.goto(f"https://{UI[0]}/MvcProjects/ProjectList?ProgramId={UI[1]}",
-                  wait_until="domcontentloaded", timeout=60000)
-        page.wait_for_timeout(4000)
-        try:
-            tab = page.get_by_text("Application Corrections Required", exact=False).first
-            tab.click()
-            page.wait_for_timeout(3000)
-            row_link = page.locator("table tbody tr a").first
-            row_link.click()
-            page.wait_for_load_state("domcontentloaded", timeout=30000)
-            page.wait_for_timeout(2000)
-            print("landing page URL:", page.url)
-
-            comm_table = page.locator("table", has_text="Communications").first
-            html = comm_table.evaluate("el => el.outerHTML")
-            print("communications table HTML (first 4000 chars):")
-            print(html[:4000])
-
-            view_links = comm_table.locator("a").all()
-            print(f"\n{len(view_links)} links in the communications table; hrefs:")
-            for l in view_links[:6]:
-                try:
-                    print(" ", l.get_attribute("href"))
-                except Exception as e:
-                    print("  (failed to read href)", e)
-        except Exception as e:
-            print("landing-page investigation failed:", e)
 
         browser.close()
     return 0
