@@ -64,6 +64,23 @@ def dump_full_record(token, record_id, label):
 def main():
     token = get_token()
 
+    print("=== GVFC ASnell (name search failed earlier -- parens break Zoho criteria) ===")
+    r = requests.get(
+        f"{API_DOMAIN}/crm/v7/Installs/search",
+        headers=headers(token),
+        params={"criteria": "(Name:starts_with:GVFC)", "fields": "id,Name"},
+        timeout=30,
+    )
+    if r.status_code == 200 and r.json().get("data"):
+        rid = r.json()["data"][0]["id"]
+        rec = dump_full_record(token, rid, "GVFC ASnell")
+        for k in ("Name", "Property_Type", "IC_Project_Number", "Site_Location",
+                  "IC_Portal_Status", "IC_Action_Required"):
+            print(f"  {k}: {rec.get(k)!r}")
+    else:
+        print(f"  not found: HTTP {r.status_code} | {r.text[:200]}")
+    print()
+
     print("=== Commercial installs ===")
     commercial_records = {}
     for name in COMMERCIAL_NAMES:
