@@ -199,6 +199,18 @@ def main():
                       f"{len(comm_reqs)} mention 'communication':")
                 for u in comm_reqs[:10]:
                     print(" ", u)
+
+                # No new tab, no request -- check for an in-page modal/dialog instead.
+                n_dialogs = page.locator("[role='dialog'], .modal, .modal-content").count()
+                print(f"\n{n_dialogs} dialog/modal-like elements on the page after the click")
+                for i in range(min(n_dialogs, 3)):
+                    d = page.locator("[role='dialog'], .modal, .modal-content").nth(i)
+                    try:
+                        print(f"  dialog[{i}] text (first 1500 chars):")
+                        print(" ", d.inner_text()[:1500].replace("\n", " | "))
+                    except Exception as e:
+                        print(f"  dialog[{i}]: (failed: {e})")
+
             except Exception as e:
                 print("landing-page investigation failed:", e)
         else:
