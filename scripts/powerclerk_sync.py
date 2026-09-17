@@ -393,7 +393,12 @@ def main():
               f"{disagreements} disagree with current Zoho values")
         return 0
 
-    updated = no_match = out_of_territory = conflicts = failed = 0
+    # Fields worth reporting when they change. IC_Portal_Checked is excluded --
+    # it changes on every run by design and isn't news.
+    REPORT_FIELDS = ["IC_Portal_Status", "IC_Portal_Status_Date", "IC_Action_Required",
+                     "IC_Project_Number", "IC_Alert_Sent"]
+
+    updated = no_match = out_of_territory = conflicts = failed = changed_projects = 0
     for inst in installs:
         rid = inst["id"]
         name = inst.get("Name", rid)
@@ -405,15 +410,23 @@ def main():
         if conflict:
             conflicts += 1
 
+        changes = [(f, inst.get(f), fields[f]) for f in REPORT_FIELDS
+                   if f in fields and inst.get(f) != fields[f]]
+
         try:
             update_install(rid, fields, token)
             updated += 1
+            if changes:
+                changed_projects += 1
+                print(f"CHANGED: {name}")
+                for f, old, new in changes:
+                    print(f"    {f}: {old!r} -> {new!r}")
         except Exception as e:
             failed += 1
             print(f"  FAIL updating {name}: {e}")
 
-    print(f"done: {updated} updated, {no_match} no portal match, "
-          f"{out_of_territory} outside CT (not tracked), "
+    print(f"done: {updated} updated ({changed_projects} with a real field change), "
+          f"{no_match} no portal match, {out_of_territory} outside CT (not tracked), "
           f"{conflicts} project-number conflicts, {failed} write failures")
     return 1 if failed else 0
 
