@@ -127,21 +127,37 @@ def main():
                    f"?ProgramId={UI[1]}&ProjectId={blocked_project_id}")
             try:
                 page.goto(url, wait_until="domcontentloaded", timeout=30000)
-                page.wait_for_timeout(3000)
+                page.wait_for_timeout(6000)
                 print("landing page URL:", page.url)
+                print("page title:", page.title())
 
-                comm_table = page.locator("table", has_text="Communications").first
-                html = comm_table.evaluate("el => el.outerHTML")
-                print("communications table HTML (first 5000 chars):")
-                print(html[:5000])
+                idx = page.inner_text("body").find("Communications")
+                print("'Communications' found in body text at index:", idx)
+                if idx >= 0:
+                    body_text = page.inner_text("body")
+                    print("surrounding text:")
+                    print(body_text[max(0, idx - 200): idx + 1500])
 
-                view_links = comm_table.locator("a").all()
-                print(f"\n{len(view_links)} <a> tags in the communications table; hrefs:")
-                for l in view_links[:6]:
+                n_tables = page.locator("table").count()
+                print(f"\n{n_tables} <table> elements on the page")
+                for i in range(min(n_tables, 8)):
+                    t = page.locator("table").nth(i)
+                    try:
+                        txt = t.inner_text()[:300].replace("\n", " | ")
+                        print(f"  table[{i}]: {txt}")
+                    except Exception as e:
+                        print(f"  table[{i}]: (failed: {e})")
+
+                all_links = page.locator("a").all()
+                view_like = [l for l in all_links
+                             if "view" in (l.inner_text() or "").lower()
+                             or "communication" in (l.get_attribute("href") or "").lower()]
+                print(f"\n{len(all_links)} total <a> tags; {len(view_like)} look communication/view-related:")
+                for l in view_like[:10]:
                     try:
                         print(" ", l.get_attribute("href"), "| text:", l.inner_text())
                     except Exception as e:
-                        print("  (failed to read href)", e)
+                        print("  (failed to read)", e)
             except Exception as e:
                 print("landing-page investigation failed:", e)
         else:
@@ -159,15 +175,23 @@ def main():
             page.wait_for_timeout(500)
             btn = page.get_by_text("Export to CSV", exact=False).first
             btn.scroll_into_view_if_needed()
-            with page.expect_download(timeout=20000) as dl_info:
-                btn.click(force=True)
-            download = dl_info.value
-            path = download.path()
-            with open(path, "r", errors="replace") as f:
-                content = f.read()
-            print("export downloaded ok, length:", len(content))
-            print("first 2000 chars:")
-            print(content[:2000])
+            try:
+                with page.expect_download(timeout=40000) as dl_info:
+                    btn.click(force=True)
+                download = dl_info.value
+                path = download.path()
+                with open(path, "r", errors="replace") as f:
+                    content = f.read()
+                print("export downloaded ok, length:", len(content))
+                print("first 2000 chars:")
+                print(content[:2000])
+            except Exception as e:
+                print("no download event within 40s:", e)
+                print("checking for a new tab/page instead...")
+                pages_now = page.context.pages
+                print(f"{len(pages_now)} open pages/tabs in context")
+                for p2 in pages_now:
+                    print("  page url:", p2.url)
         except Exception as e:
             print("export-to-csv failed:", e)
 
