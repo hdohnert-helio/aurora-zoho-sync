@@ -85,54 +85,77 @@ def collect(page, label, host, pid):
     total = int(m.group(1).replace(",", "")) if m else 0
     print(f"  {label}: {total} projects reported")
 
-    # Diagnose the pager once so we know what we are dealing with.
+    # --- diagnose the real pager widget ---
     try:
-        pager = page.evaluate("""() => {
-          const el = [...document.querySelectorAll('*')].find(
-            e => /Items per page/i.test(e.textContent||'') && e.children.length < 12);
-          return el ? el.innerText.replace(/\\s+/g,' ').slice(0,200) : 'no pager text';
+        info = page.evaluate("""() => {
+          const hit = [...document.querySelectorAll('*')].reverse().find(
+            e => /Items per page/i.test(e.textContent || '') && e.children.length <= 20);
+          if (!hit) return {found:false};
+          const box = hit.closest('div,nav,footer,section') || hit;
+          const clean = box.outerHTML
+              .replace(/(href|action|src)="[^"]*"/g, '$1="_"')
+              .replace(/\\s+/g, ' ');
+          const clickable = [...box.querySelectorAll('a,button,span,li,select,input')]
+              .map(e => ({tag:e.tagName, role:e.getAttribute('role')||'',
+                          cls:(e.className||'').toString().slice(0,40),
+                          txt:(e.innerText||e.value||'').trim().slice(0,20)}))
+              .filter(x => x.txt || x.tag === 'SELECT' || x.tag === 'INPUT');
+          return {found:true, html: clean.slice(0,1800), clickable: clickable.slice(0,30)};
         }""")
-        print(f"  pager: {pager}")
+        print("  PAGER-DIAG: " + str(info)[:2200])
     except Exception as e:
-        print(f"  pager probe failed: {e}")
+        print(f"  pager diag failed: {e}")
 
-    # Prefer raising the page size; fall back to clicking Next.
-    for opt in ("500", "250", "100", "50", "25"):
+    # --- try to raise the page size by clicking the option text ---
+    for label_txt in ("Custom", "25", "15"):
         try:
-            sel = page.locator("select").filter(has_text=re.compile(r"\b(10|15|25)\b")).first
-            if sel.count():
-                sel.select_option(opt); page.wait_for_timeout(3000)
-                print(f"  page size -> {opt}"); break
-        except Exception:
-            continue
+            el = page.get_by_text(label_txt, exact=True).last
+            if el.count() and el.is_visible():
+                el.click(); page.wait_for_timeout(1500)
+                print(f"  clicked page-size option {label_txt!r}")
+                if label_txt == "Custom":
+                    inp = page.locator("input[type='number'], input[type='text']").last
+                    if inp.count() and inp.is_visible():
+                        inp.fill("500"); inp.press("Enter")
+                        page.wait_for_timeout(3000)
+                        print("  entered custom page size 500")
+                break
+        except Exception as e:
+            print(f"  page-size attempt {label_txt} failed: {e}")
 
     seen, out, guard = set(), [], 0
     while guard < 60:
         guard += 1
         data = grab_rows(page)
         headers, rows = data["headers"], data["rows"]
-        new = 0
+        new_n = 0
         for r in rows:
             rec = normalise(headers, r)
             key = rec["project_no"]
             if key and key not in seen:
-                seen.add(key); out.append(rec); new += 1
-        print(f"  page {guard}: +{new} (total {len(out)}/{total})")
-        if len(out) >= total or new == 0:
+                seen.add(key); out.append(rec); new_n += 1
+        print(f"  page {guard}: +{new_n} (total {len(out)}/{total})")
+        if len(out) >= total or new_n == 0:
             break
-        clicked = False
-        for nsel in ["a[aria-label*='Next' i]", "button[aria-label*='Next' i]",
-                     "a[title*='Next' i]", "li.next a", "a.next", "text=Next"]:
+        moved = False
+        for how in ["aria", "chevron", "text"]:
             try:
-                el = page.locator(nsel).last
-                if el.count() and el.is_visible() and el.is_enabled():
-                    el.click(); clicked = True; break
+                if how == "aria":
+                    el = page.locator("[aria-label*='next' i], [title*='next' i]").last
+                elif how == "chevron":
+                    el = page.locator("i.fa-chevron-right, i.fa-angle-right, svg.fa-chevron-right").last
+                else:
+                    el = page.get_by_text(">", exact=True).last
+                if el.count() and el.is_visible():
+                    el.click(); moved = True
+                    print(f"  advanced via {how}")
+                    break
             except Exception:
                 continue
-        if not clicked:
+        if not moved:
             print("  no Next control found — stopping")
             break
-        page.wait_for_timeout(3000)
+        page.wait_for_timeout(2500)
 
     print(f"  {label}: collected {len(out)} rows")
     return out
