@@ -158,9 +158,8 @@ def collect(page, label, host, pid):
     if rows:
         print(f"  sample row 0: {json.dumps(rows[0])[:2000]}")
 
-    # builtInFieldConstantId -> header text, from the captured request columns
-    id2head = {c.get("builtInFieldConstantId"): c.get("header", "")
-               for c in tr.get("columns", []) if c.get("builtInFieldConstantId") is not None}
+    # ProjectData is positional: element i lines up with columns[i] from the request.
+    col_heads = [c.get("header", "") for c in tr.get("columns", [])]
 
     out = []
     for r in rows:
@@ -170,16 +169,13 @@ def collect(page, label, host, pid):
         if not isinstance(fields, list):
             continue
         headers, vals = [], []
-        for f in fields:
-            if not isinstance(f, dict):
-                continue
-            head = id2head.get(f.get("BuiltInFieldConstantId"))
-            if head is None:
+        for i, f in enumerate(fields):
+            if not isinstance(f, dict) or i >= len(col_heads):
                 continue
             v = f.get("Value")
             if isinstance(v, dict):
                 v = v.get("value") or v.get("text") or v.get("display") or ""
-            headers.append(head)
+            headers.append(col_heads[i])
             vals.append(re.sub(r"<[^>]+>", " ", str(v or "")).strip())
         rec = normalise(headers, vals)
         if rec["project_no"]:
