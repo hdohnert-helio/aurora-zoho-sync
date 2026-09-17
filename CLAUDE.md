@@ -185,3 +185,108 @@ returns **HTTP 200 and is accepted as a real write** -- it does not error as
 "no updatable data". It bumps `Modified_Time` / `Modified_By` on that record.
 Never use a bare-id PUT as a permission probe or a dry run. `ZohoCRM.modules.ALL`
 grants read and write together, so a successful read already proves write access.
+
+## Alerting (SMS to Harry)
+
+Two separate workflows. The scrape must stay off-hours because every PowerClerk
+login evicts whoever is in the portal; the notifier touches Zoho only.
+
+| Workflow | Cron (UTC) | ET | Does |
+|---|---|---|---|
+| `powerclerk-sync.yml`   | `0 9 * * *`  | 05:00 | Scrape both portals, write `IC_Portal_*` |
+| `powerclerk-notify.yml` | `0 13 * * *` | 09:00 | Read Zoho, send one SMS digest |
+
+Splitting them means a failed scrape still lets the notifier run and report that
+`IC_Portal_Checked` has gone stale.
+
+### Credentials
+
+```
+op://Helio Automation/Twilio/TWILIO_ACCOUNT_SID
+op://Helio Automation/Twilio/TWILIO_AUTH_TOKEN
+op://Helio Automation/Twilio/TWILIO_FROM_NUMBER
+op://Helio Automation/Twilio/ALERT_SMS_TO
+```
+
+`ALERT_SMS_TO` may hold a comma-separated list; split on commas and send to each.
+Reuse `_send_sms()` from `main.py` rather than writing a new Twilio client.
+
+### Field: IC_Alert_Sent (datetime)
+
+Tracks what has already been texted, so a long-running blocker alerts once.
+
+- Notify where `IC_Action_Required = true` AND `IC_Alert_Sent` is null.
+- Stamp `IC_Alert_Sent` only after Twilio confirms the send. Never stamp first --
+  a failed send that stamped would silently swallow the alert forever.
+- The 5am sync CLEARS `IC_Alert_Sent` whenever `IC_Action_Required` goes true->false,
+  so a project that gets blocked again later alerts again.
+
+### Message rules
+
+1. **One SMS per run**, a digest -- never one per project.
+2. **Cap at 8.** More than 8 newly-blocked in one run means a scraper bug, not
+   eight utilities acting overnight. Send `"N newly blocked -- check Canvas,
+   likely a sync issue"` and stamp nothing, so the real alerts survive for the
+   next run once the bug is fixed.
+3. **Send nothing when there is nothing new.** No "all clear" texts.
+4. If `IC_Portal_Checked` is older than 36h on most active records, send
+   `"Portal sync stale since <date>"` instead of a blocker digest -- the data
+   is not trustworthy enough to alert on.
+
+### DST caveat
+
+GitHub cron is UTC and does not shift. `0 13 * * *` is 09:00 EDT but 08:00 EST.
+Either accept the winter hour or have the notifier check ET local time and exit
+if it is before 09:00, with the cron set an hour early year-round.
+
+**Decision:** accept the winter hour. This is a single daily trigger --a hard
+"exit if before 9am ET" gate would mean it never fires at all in winter, since
+there's no later same-day trigger to catch the real 9am mark. Running an hour
+early in EST is a much smaller problem than never running.
+
+## Sync + notify implementation (2026-09-17)
+
+Built `scripts/powerclerk_sync.py` (+`.github/workflows/powerclerk-sync.yml`,
+cron `0 9 * * *`) and `scripts/powerclerk_notify.py`
+(+`.github/workflows/powerclerk-notify.yml`, cron `0 13 * * *`), per the rules
+above. Both use `/search`, never `/coql`. `powerclerk_sync.py` imports
+`scrape_all_projects()` from `powerclerk_audit.py` rather than duplicating the
+login/replay logic. `powerclerk_notify.py` imports `_send_sms` directly from
+`main.py` (repo root added to `sys.path`) -- confirmed safe to import
+standalone: no module-level network calls or scheduler side effects outside
+the FastAPI `startup` event. `_send_sms` was changed to return the Twilio
+`sid` (or `None`) instead of nothing, so a caller can tell whether the send
+was actually confirmed -- existing callers that ignored the return value are
+unaffected.
+
+**Both crons are commented out for now.** Test order before enabling them:
+1. `powerclerk_notify.py --dry-run` -- prints the digest it would send.
+2. `--backfill-alert-sent` -- stamps `IC_Alert_Sent=now` on every
+   currently-blocked record, so the first live run doesn't page on
+   pre-existing blockers.
+3. `--test-sms "..."` -- one real, fixed-text send to confirm Twilio delivery
+   without touching Zoho.
+4. `powerclerk_sync.py --dry-run` -- still logs into PowerClerk for real (the
+   scrape is what produces the values to diff), but writes nothing to Zoho.
+   Diffs derived `IC_Portal_Status`/`IC_Action_Required` against what's
+   already stored and reports every disagreement. This is the one that
+   matters: this morning's 45 hand-verified records are a known-good
+   reference that stops being trustworthy the moment the sync runs live, so
+   this is the only chance to catch a matcher regression against it.
+5. Only then uncomment the `schedule:` blocks in both workflow files.
+
+All workflow_dispatch inputs default to the safe choice (`dry_run: true`,
+`backfill_alert_sent: false`, `test_sms: ''`).
+
+### Address matching, as implemented
+
+`normalize_street` / `normalize_city` in `powerclerk_sync.py` handle the cases
+called out above: unit/floor suffix stripping, street-type expansion (ST ->
+STREET etc.), leading directional removal, and keeping a hyphenated
+house-number range (`28-30`) as one token. Verified against the specific
+addresses in this file's Open Items list (28-30 Aberdeen, 130 Shelter Rock
+Rd) before the first live run. `Site_Location` is assumed to be
+`"street, city[, state zip]"` -- not yet verified against real data, since
+nothing in this repo can query Zoho outside of GitHub Actions. If the
+`--dry-run` diff comes back full of false disagreements, check this
+assumption first.

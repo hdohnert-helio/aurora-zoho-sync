@@ -1,0 +1,66 @@
+name: PowerClerk notify
+
+# NOTE: the `schedule:` trigger is intentionally not yet enabled -- see the
+# test order in CLAUDE.md's Alerting section. Add it back once the dry-run
+# digest, the IC_Alert_Sent backfill, and a real test SMS have all been
+# verified:
+#
+# on:
+#   schedule:
+#     - cron: '0 13 * * *'  # nominal 09:00 ET; see DST caveat in CLAUDE.md
+#   workflow_dispatch: ...
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run: compute and print what would be sent/stamped, send/write nothing'
+        type: boolean
+        default: true
+      backfill_alert_sent:
+        description: 'One-time: stamp IC_Alert_Sent=now on every currently-blocked record, then exit (no SMS)'
+        type: boolean
+        default: false
+      test_sms:
+        description: 'Send this exact text to every recipient and exit (bypasses Zoho entirely). Leave blank to skip.'
+        type: string
+        default: ''
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Load Zoho + Twilio credentials from 1Password
+        uses: 1password/load-secrets-action@v2
+        with:
+          export-env: true
+        env:
+          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          ZOHO_CLIENT_ID: op://Helio Automation/Zoho API/ZOHO_CLIENT_ID
+          ZOHO_CLIENT_SECRET: op://Helio Automation/Zoho API/ZOHO_CLIENT_SECRET
+          ZOHO_REFRESH_TOKEN: op://Helio Automation/Zoho API/ZOHO_REFRESH_TOKEN
+          TWILIO_ACCOUNT_SID: op://Helio Automation/Twilio/TWILIO_ACCOUNT_SID
+          TWILIO_AUTH_TOKEN: op://Helio Automation/Twilio/TWILIO_AUTH_TOKEN
+          TWILIO_FROM_NUMBER: op://Helio Automation/Twilio/TWILIO_FROM_NUMBER
+          ALERT_SMS_TO: op://Helio Automation/Twilio/ALERT_SMS_TO
+
+      - name: Run notifier
+        timeout-minutes: 5
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
+          BACKFILL_ALERT_SENT: ${{ inputs.backfill_alert_sent }}
+          TEST_SMS: ${{ inputs.test_sms }}
+        run: |
+          ARGS=()
+          if [ "$DRY_RUN" = "true" ]; then ARGS+=(--dry-run); fi
+          if [ "$BACKFILL_ALERT_SENT" = "true" ]; then ARGS+=(--backfill-alert-sent); fi
+          if [ -n "$TEST_SMS" ]; then ARGS+=(--test-sms "$TEST_SMS"); fi
+          python -u scripts/powerclerk_notify.py "${ARGS[@]}"

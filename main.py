@@ -1592,6 +1592,8 @@ def _normalize_sms(text: str) -> str:
     text = text.encode("ascii", errors="ignore").decode("ascii")
     return text
 def _send_sms(to_number: str, body: str):
+    """Returns the Twilio message sid on confirmed send, None on failure.
+    Existing callers that ignore the return value are unaffected."""
     from twilio.rest import Client
     body = _normalize_sms(body)
     max_len = 1200
@@ -1608,8 +1610,10 @@ def _send_sms(to_number: str, body: str):
             body=body,
         )
         logger.info(f"_send_sms: sent to {to_number}, sid={msg.sid}, status={msg.status}")
+        return msg.sid
     except Exception:
         logger.exception(f"_send_sms: failed to send to {to_number}")
+        return None
 
 class SmsSendRequest(BaseModel):
     to: str

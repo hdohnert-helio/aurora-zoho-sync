@@ -191,9 +191,15 @@ def collect(page, label, host, pid):
     return out
 
 
-def main():
+def scrape_all_projects():
+    """Log in once, scrape UI + Eversource via the GetProjectList3 replay.
+
+    Returns a list of row dicts (see `normalise`, plus a "program" key).
+    Raises on login failure so callers never mistake "no rows" for
+    "everything was actually empty".
+    """
     if not USER or not PASS:
-        print("FAIL: credentials missing."); return 1
+        raise RuntimeError("PC_USER / PC_PASS not set")
 
     with sync_playwright() as p:
         browser = p.chromium.launch()
@@ -234,7 +240,8 @@ def main():
         page.wait_for_load_state("domcontentloaded", timeout=60000)
         page.wait_for_timeout(2500)
         if "/MvcAccount/Login" in page.url:
-            print("FAIL: login rejected"); return 1
+            browser.close()
+            raise RuntimeError("PowerClerk login rejected")
         print("logged in")
 
         allrows = []
@@ -247,6 +254,16 @@ def main():
             print("  " + sig)
         print("=== END API ===")
         browser.close()
+
+    return allrows
+
+
+def main():
+    try:
+        allrows = scrape_all_projects()
+    except RuntimeError as e:
+        print(f"FAIL: {e}")
+        return 1
 
     cols = ["program", "project_no", "name", "street", "city", "status",
             "status_at", "assignee", "queue"]

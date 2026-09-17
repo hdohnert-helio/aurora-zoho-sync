@@ -1,0 +1,54 @@
+name: PowerClerk sync
+
+# NOTE: the `schedule:` trigger is intentionally not yet enabled. This still
+# logs into PowerClerk for real even with --dry-run (the scrape is what
+# produces the values to diff), which evicts whoever is in the portal. Add
+# the cron back once a --dry-run run's diff against this morning's manually
+# verified 45 records comes back clean:
+#
+# on:
+#   schedule:
+#     - cron: '0 9 * * *'  # 05:00 ET / 09:00 UTC, off-hours
+#   workflow_dispatch: ...
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run: scrape + compute, diff against current Zoho values, write nothing'
+        type: boolean
+        default: true
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: |
+          pip install playwright requests
+          playwright install --with-deps chromium
+
+      - name: Load PowerClerk + Zoho credentials from 1Password
+        uses: 1password/load-secrets-action@v2
+        with:
+          export-env: true
+        env:
+          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          PC_USER: op://Helio Automation/PowerClerk UI/username
+          PC_PASS: op://Helio Automation/PowerClerk UI/password
+          ZOHO_CLIENT_ID: op://Helio Automation/Zoho API/ZOHO_CLIENT_ID
+          ZOHO_CLIENT_SECRET: op://Helio Automation/Zoho API/ZOHO_CLIENT_SECRET
+          ZOHO_REFRESH_TOKEN: op://Helio Automation/Zoho API/ZOHO_REFRESH_TOKEN
+
+      - name: Run sync
+        timeout-minutes: 15
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          ARGS=()
+          if [ "$DRY_RUN" = "true" ]; then ARGS+=(--dry-run); fi
+          python -u scripts/powerclerk_sync.py "${ARGS[@]}"
