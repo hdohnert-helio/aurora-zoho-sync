@@ -94,7 +94,7 @@ if r.status_code == 200:
     for fname in NEW_FIELDS:
         check(f"field {fname} exists", fname in present)
 else:
-    check("can read field metadata", False, f"HTTP {r.status_code}")
+    check("can read field metadata", False, f"HTTP {r.status_code} | {r.text[:200]}")
 
 # 5. The blocked-project filter works end to end
 r = requests.post(
@@ -113,7 +113,7 @@ if r.status_code == 200:
     if len(rows) > 5:
         print(f"         ... and {len(rows) - 5} more")
 else:
-    check("IC_Action_Required query", False, f"HTTP {r.status_code}")
+    check("IC_Action_Required query", False, f"HTTP {r.status_code} | {r.text[:200]}")
 
 print("=" * 64)
 if failures:
