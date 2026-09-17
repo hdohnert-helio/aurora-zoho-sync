@@ -15,6 +15,19 @@ connected_workflows, per CLAUDE.md's sync rules. Never overwrites a
 non-empty IC_Project_Number -- a mismatch is recorded in IC_Portal_Status
 instead of silently changed.
 
+Matching (2026-09-17 revision): IC_Project_Number is checked first when
+set -- it's an exact key the utility assigned, not a heuristic. Address
+matching is a fallback for installs with no project number recorded yet.
+A CT, non-commercial install that WAS matched before and now isn't is
+treated as a matcher failure, not a portal change: the previous status
+and IC_Action_Required are left untouched and it's logged for review,
+rather than overwritten with "NO APPLICATION FOUND" -- "I can't find it"
+and "the utility has no record" are different facts. Commercial installs
+(Property_Type not a residential type) that have no portal match get
+"Commercial - not tracked by this sync" / IC_Action_Required=false,
+the same treatment as out-of-territory -- this only applies when there's
+no match; a commercial install that DOES match syncs normally.
+
 If the scrape itself fails (bad login, no rows), this exits before touching
 Zoho at all: no stamps are written, so IC_Portal_Checked goes stale and
 powerclerk_notify.py's staleness check is the signal that this broke.
@@ -76,7 +89,7 @@ def fetch_active_installs(token):
     """All Installs not in a closed-out stage, via /search (coql is not in our OAuth scope)."""
     criteria = "and".join(f"(Project_Stage:not_equal:{s})" for s in INACTIVE_STAGES)
     fields = ("id,Name,Site_Location,IC_Project_Number,Project_Stage,Utility_Provider,"
-              "IC_Portal_Status,IC_Portal_Status_Date,IC_Action_Required,IC_Alert_Sent")
+              "Property_Type,IC_Portal_Status,IC_Portal_Status_Date,IC_Action_Required,IC_Alert_Sent")
 
     results, page = [], 1
     while True:
@@ -226,11 +239,28 @@ def build_portal_index(rows):
     return idx
 
 
+def build_portal_index_by_number(rows):
+    idx = {}
+    for row in rows:
+        num = (row.get("project_no") or "").strip().upper()
+        if num:
+            idx.setdefault(num, row)  # first occurrence wins on a rare duplicate
+    return idx
+
+
 def known_cities_from(rows):
     return {row.get("city", "").strip() for row in rows if row.get("city", "").strip()}
 
 
-def match_install(install, portal_idx, known_cities):
+def match_install(install, portal_idx, portal_by_number, known_cities):
+    """IC_Project_Number first when set -- it's an exact key the utility
+    assigned. Only fall back to address matching when it's blank; a number
+    that's set but not found in this scrape is NOT retried by address (the
+    number is authoritative, not a hint)."""
+    existing_num = (install.get("IC_Project_Number") or "").strip().upper()
+    if existing_num:
+        return portal_by_number.get(existing_num)
+
     street, city, _ = split_site_location(install.get("Site_Location", ""), known_cities)
     key = (normalize_street(street), normalize_city(city))
     candidates = portal_idx.get(key)
@@ -257,6 +287,33 @@ def is_in_territory(inst):
     return bool(_UTILITY_IN_TERRITORY_RE.search(inst.get("Utility_Provider") or ""))
 
 
+# ── Commercial ───────────────────────────────────────────────────────────────
+# Commercial jobs follow a different interconnection process and often have
+# no record in these two portals at all. Only matters when there's no portal
+# match -- a commercial install that DOES match (e.g. Carl Guild, INT-117499)
+# syncs completely normally.
+#
+# Signal used: Property_Type, a real-estate/parcel-data field already on
+# Installs (not something matching the word "Commercial" in Name). Verified
+# against 5 known records: residential installs all read 'SINGLE FAMILY
+# RESIDENCE'; commercial ones read 'COMMERCIAL', 'OFFICE BUILDING', and
+# 'EXEMPT' (a tax-exempt org, not literally the word "commercial" -- this is
+# why an allowlist of commercial-sounding values would have missed it).
+# Classify by ABSENCE of a residential marker rather than presence of a
+# commercial one, since the commercial side has many more possible values.
+
+COMMERCIAL_STATUS = "Commercial - not tracked by this sync"
+_RESIDENTIAL_PROPERTY_TYPE_RE = re.compile(
+    r"RESIDEN|FAMILY|CONDO|TOWNHOUSE|DUPLEX|TRIPLEX", re.I)
+
+
+def is_commercial(inst):
+    ptype = (inst.get("Property_Type") or "").strip()
+    if not ptype:
+        return False  # no signal either way -- don't guess commercial from silence
+    return not _RESIDENTIAL_PROPERTY_TYPE_RE.search(ptype)
+
+
 # ── Status rules ─────────────────────────────────────────────────────────────
 
 def is_action_required(status_text):
@@ -280,19 +337,32 @@ def parse_status_date(s):
         return None
 
 
-def compute_fields(inst, portal_idx, known_cities, checked_at):
-    """Pure derivation: install + portal index -> the field dict this record
+# Recognized placeholder statuses this sync itself writes when there's no
+# real portal match. Used by the regression guard below to tell "this was
+# already a placeholder" from "this was a real matched status".
+_PLACEHOLDER_STATUSES = (NO_APPLICATION_STATUS, OUT_OF_TERRITORY_STATUS, COMMERCIAL_STATUS)
+
+
+def compute_fields(inst, portal_idx, portal_by_number, known_cities, checked_at):
+    """Pure derivation: install + portal indexes -> the field dict this record
     would be updated with. No I/O, so --dry-run can call the exact same logic
-    the real write path uses."""
+    the real write path uses.
+
+    Returns (fields, matched, conflict, regression). `regression` means: this
+    CT, non-commercial install had a real matched status before, has none
+    now, and the previous status/action were deliberately left untouched
+    pending review -- that's a matcher failure, not a portal change.
+    """
     fields = {"IC_Portal_Checked": checked_at}
     matched = False
     conflict = False
+    regression = False
 
     if not is_in_territory(inst):
         fields["IC_Portal_Status"] = OUT_OF_TERRITORY_STATUS
         action_required = False
     else:
-        match = match_install(inst, portal_idx, known_cities)
+        match = match_install(inst, portal_idx, portal_by_number, known_cities)
         matched = bool(match)
 
         if match:
@@ -302,21 +372,32 @@ def compute_fields(inst, portal_idx, known_cities, checked_at):
             if date:
                 fields["IC_Portal_Status_Date"] = date
             action_required = is_action_required(status_text)
-        else:
-            status_text = NO_APPLICATION_STATUS
-            fields["IC_Portal_Status"] = status_text
-            action_required = True
 
-        existing_num = (inst.get("IC_Project_Number") or "").strip()
-        matched_num = (match or {}).get("project_no") or ""
-        if matched_num:
-            if not existing_num:
-                fields["IC_Project_Number"] = matched_num
-            elif existing_num != matched_num:
-                conflict = True
-                fields["IC_Portal_Status"] = (
-                    f"{status_text} | CONFLICT: portal is {matched_num}, Zoho has {existing_num}"
-                )
+            existing_num = (inst.get("IC_Project_Number") or "").strip()
+            matched_num = match.get("project_no") or ""
+            if matched_num:
+                if not existing_num:
+                    fields["IC_Project_Number"] = matched_num
+                elif existing_num != matched_num:
+                    conflict = True
+                    fields["IC_Portal_Status"] = (
+                        f"{status_text} | CONFLICT: portal is {matched_num}, Zoho has {existing_num}"
+                    )
+        elif is_commercial(inst):
+            fields["IC_Portal_Status"] = COMMERCIAL_STATUS
+            action_required = False
+        else:
+            existing_status = inst.get("IC_Portal_Status") or ""
+            if existing_status and existing_status not in _PLACEHOLDER_STATUSES:
+                # Was a real matched status before; losing the match now is a
+                # matcher failure, not evidence the utility dropped the
+                # record. Keep it untouched and surface it for review instead.
+                regression = True
+                fields["IC_Portal_Status"] = existing_status
+                action_required = bool(inst.get("IC_Action_Required"))
+            else:
+                fields["IC_Portal_Status"] = NO_APPLICATION_STATUS
+                action_required = True
 
     fields["IC_Action_Required"] = action_required
 
@@ -324,7 +405,7 @@ def compute_fields(inst, portal_idx, known_cities, checked_at):
     if was_required and not action_required and inst.get("IC_Alert_Sent"):
         fields["IC_Alert_Sent"] = None
 
-    return fields, matched, conflict
+    return fields, matched, conflict, regression
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
@@ -345,6 +426,7 @@ def main():
     portal_rows = scrape_all_projects()  # raises on login failure -- nothing gets stamped
     print(f"scraped {len(portal_rows)} portal projects")
     portal_idx = build_portal_index(portal_rows)
+    portal_by_number = build_portal_index_by_number(portal_rows)
     known_cities = known_cities_from(portal_rows)
 
     token = get_zoho_token()
@@ -358,14 +440,21 @@ def main():
         disagreements = 0
         no_match = 0
         out_of_territory = 0
+        regressions = 0
         for inst in installs:
             name = inst.get("Name", inst["id"])
             in_territory = is_in_territory(inst)
-            fields, matched, conflict = compute_fields(inst, portal_idx, known_cities, checked_at)
+            fields, matched, conflict, regression = compute_fields(
+                inst, portal_idx, portal_by_number, known_cities, checked_at)
             if not in_territory:
                 out_of_territory += 1
             elif not matched:
                 no_match += 1
+            if regression:
+                regressions += 1
+                print(f"REGRESSION (previously matched, no match now -- kept existing "
+                      f"status untouched): {name}")
+                print(f"    IC_Portal_Status stays: {inst.get('IC_Portal_Status')!r}")
 
             cur_status = inst.get("IC_Portal_Status") or ""
             cur_action = bool(inst.get("IC_Action_Required"))
@@ -379,7 +468,7 @@ def main():
                 print(f"    IC_Action_Required:  {cur_action} -> {new_action}")
                 if conflict:
                     print("    (project-number conflict, not overwritten)")
-                if not matched and is_in_territory(inst):
+                if not matched and is_in_territory(inst) and not is_commercial(inst):
                     loc = inst.get("Site_Location") or ""
                     street, city, state = split_site_location(loc, known_cities)
                     key = (normalize_street(street), normalize_city(city))
@@ -389,8 +478,8 @@ def main():
                     print(f"    key in portal index: {key in portal_idx}")
 
         print(f"\n{len(installs)} active installs, {no_match} with no portal match, "
-              f"{out_of_territory} outside CT (not tracked), "
-              f"{disagreements} disagree with current Zoho values")
+              f"{out_of_territory} outside CT (not tracked), {regressions} matcher "
+              f"regressions (kept untouched), {disagreements} disagree with current Zoho values")
         return 0
 
     # Fields worth reporting when they change. IC_Portal_Checked is excluded --
@@ -398,17 +487,23 @@ def main():
     REPORT_FIELDS = ["IC_Portal_Status", "IC_Portal_Status_Date", "IC_Action_Required",
                      "IC_Project_Number", "IC_Alert_Sent"]
 
-    updated = no_match = out_of_territory = conflicts = failed = changed_projects = 0
+    updated = no_match = out_of_territory = conflicts = failed = changed_projects = regressions = 0
     for inst in installs:
         rid = inst["id"]
         name = inst.get("Name", rid)
-        fields, matched, conflict = compute_fields(inst, portal_idx, known_cities, checked_at)
+        fields, matched, conflict, regression = compute_fields(
+            inst, portal_idx, portal_by_number, known_cities, checked_at)
         if not is_in_territory(inst):
             out_of_territory += 1
         elif not matched:
             no_match += 1
         if conflict:
             conflicts += 1
+        if regression:
+            regressions += 1
+            print(f"REGRESSION (previously matched, no match now -- kept existing "
+                  f"status untouched, needs review): {name}")
+            print(f"    IC_Portal_Status stays: {inst.get('IC_Portal_Status')!r}")
 
         changes = [(f, inst.get(f), fields[f]) for f in REPORT_FIELDS
                    if f in fields and inst.get(f) != fields[f]]
@@ -427,6 +522,7 @@ def main():
 
     print(f"done: {updated} updated ({changed_projects} with a real field change), "
           f"{no_match} no portal match, {out_of_territory} outside CT (not tracked), "
+          f"{regressions} matcher regressions (kept untouched), "
           f"{conflicts} project-number conflicts, {failed} write failures")
     return 1 if failed else 0
 

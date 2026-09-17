@@ -157,6 +157,55 @@ Found via the sync's first dry-run: Michael Duke (South Salem, NY) and Alex
 Starr (Scarsdale, NY) were both flipping to a false "action required" alarm
 before this rule existed.
 
+### Matching priority (revised 2026-09-17, after the first live run)
+
+Try `IC_Project_Number` first when it's set -- it's an exact key the utility
+assigned, not a heuristic. Only fall back to address matching when it's
+blank. A number that IS set but not found in the current scrape is **not**
+retried by address -- the number is authoritative, not a hint.
+
+Found via the first live run: Mohammed Alamgir | 28 (`INT-119959`) and Chris
+Anderson (`DER-55435`) both carry the correct project number, but
+address-only matching failed on both (28 vs the portal's combined "28-30
+Aberdeen" record; 153 vs the portal's 155 Cowles St) and overwrote a real
+status with `NO APPLICATION FOUND`. Matching by number first fixes both.
+
+### Never overwrite a real status with "no application found"
+
+If a CT, non-commercial install had a real matched status before and has no
+match this run, that's a **matcher failure**, not evidence the utility
+dropped the record -- "I can't find it" and "the utility has no record" are
+different facts, and before this fix they produced identical output. Keep
+the previous `IC_Portal_Status` and `IC_Action_Required` untouched (nothing
+gets written differently) and log it as a regression for manual review
+instead. This only applies when the existing status is a real one -- a
+record that was already one of this sync's own placeholders (`NO
+APPLICATION FOUND...`, `Outside UI/Eversource territory...`, `Commercial -
+not tracked...`) just gets re-evaluated normally.
+
+### Commercial installs
+
+Commercial jobs follow a different interconnection process and often have no
+record in either portal at all -- same false-alarm problem as out-of-state,
+same fix shape: only matters when there's **no portal match**. A commercial
+install that DOES match (Carl Guild, `INT-117499`) syncs completely
+normally.
+
+Signal used: **`Property_Type`**, a real-estate/parcel-data field already on
+Installs -- not matching the word "Commercial" in `Name`. Verified against 5
+real records: residential installs all read `SINGLE FAMILY RESIDENCE`;
+commercial ones read `COMMERCIAL`, `OFFICE BUILDING`, and `EXEMPT` (a
+tax-exempt org -- not literally the word "commercial", which is why an
+allowlist of commercial-sounding values would have missed it). Classified by
+**absence** of a residential marker (`RESIDEN`/`FAMILY`/`CONDO`/`TOWNHOUSE`/
+`DUPLEX`/`TRIPLEX`) rather than presence of a commercial one, since the
+commercial side has many more possible values than the residential side. A
+blank `Property_Type` is treated as residential (no signal either way, don't
+guess commercial from silence).
+
+Commercial + no match gets `IC_Portal_Status = "Commercial - not tracked by
+this sync"`, `IC_Action_Required = false`, same treatment as out-of-territory.
+
 ### Sync rules (non-negotiable)
 
 1. NEVER overwrite a non-empty `IC_Project_Number`. Fill blanks only; on conflict,
