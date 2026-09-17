@@ -90,6 +90,10 @@ def collect(page, label, host, pid):
             try:
                 captured["url"] = req.url
                 captured["body"] = json.loads(req.post_data or "{}")
+                try:
+                    captured["headers"] = req.all_headers()
+                except Exception:
+                    captured["headers"] = {}
             except Exception as e:
                 print(f"  capture failed: {e}")
 
@@ -115,12 +119,26 @@ def collect(page, label, host, pid):
     tr["length"] = 2000
     body["tableRequest"] = tr
 
-    resp = page.request.post(captured["url"], data=body,
-                             headers={"Content-Type": "application/json"})
-    if not resp.ok:
-        print(f"  FAIL: API returned {resp.status}")
+    hdrs = {k: v for k, v in (captured.get("headers") or {}).items()
+            if not k.startswith(":") and k.lower() not in
+            ("content-length", "host", "accept-encoding", "connection")}
+    hdrs["content-type"] = "application/json"
+
+    payload = page.evaluate(
+        """async ([url, body, hdrs]) => {
+             const r = await fetch(url, {method: 'POST', credentials: 'same-origin',
+                                         headers: hdrs, body: JSON.stringify(body)});
+             try { return await r.json(); }
+             catch (e) { return {status: 'parse_error', http: r.status}; }
+           }""",
+        [captured["url"], body, hdrs])
+
+    if not isinstance(payload, dict):
+        print(f"  FAIL: unexpected payload type {type(payload)}")
         return []
-    payload = resp.json()
+    if payload.get("status") == "error":
+        print(f"  API error: {str(payload.get('error'))[:160]}")
+        return []
     print(f"  API keys: {list(payload.keys())[:8]}")
 
     rows = None
