@@ -154,12 +154,45 @@ def normalize_city(c):
     return re.sub(r"\s+", " ", c.upper().strip()) if c else ""
 
 
-def split_site_location(loc):
-    """Site_Location is free text; assume 'street, city[, state zip]'."""
-    parts = [p.strip() for p in (loc or "").split(",") if p.strip()]
-    street = parts[0] if parts else ""
-    city = parts[1] if len(parts) > 1 else ""
-    return street, city
+# Site_Location is inconsistent: sometimes "street, city, state zip" (comma
+# before city), sometimes "street city, state zip" (no comma before city --
+# city is jammed onto the street, comma only appears before the state). A
+# plain comma-split misreads the state as the city on the second form. So:
+# strip country/zip/state off the end first, then split on a comma if one is
+# left, else find which of the portal's own known city names the remainder
+# ends with.
+_ZIP_RE = re.compile(r"\d{5}(-\d{4})?$")
+_COUNTRY_RE = re.compile(r"(united states|usa)$", re.I)
+_STATE_RE = re.compile(r"(connecticut|ct|massachusetts|ma|new york|ny|rhode island|ri)$", re.I)
+
+
+def _strip_end(s, pattern):
+    s = s.rstrip(", ")
+    m = pattern.search(s)
+    return s[:m.start()].rstrip(", ") if m else s
+
+
+def _match_known_city_suffix(remainder, known_cities):
+    upper = remainder.upper()
+    for city in sorted(known_cities, key=len, reverse=True):
+        cu = city.upper().strip()
+        if not cu or not upper.endswith(cu):
+            continue
+        boundary = len(upper) - len(cu) - 1
+        if boundary < 0 or not upper[boundary].isalnum():
+            return remainder[: len(remainder) - len(city)].strip(), remainder[-len(city):].strip()
+    return remainder.strip(), ""
+
+
+def split_site_location(loc, known_cities=()):
+    s = (loc or "").strip()
+    s = _strip_end(s, _COUNTRY_RE)
+    s = _strip_end(s, _ZIP_RE)
+    s = _strip_end(s, _STATE_RE)
+    if "," in s:
+        street, city = s.rsplit(",", 1)
+        return street.strip(), city.strip()
+    return _match_known_city_suffix(s, known_cities)
 
 
 def build_portal_index(rows):
@@ -170,8 +203,12 @@ def build_portal_index(rows):
     return idx
 
 
-def match_install(install, portal_idx):
-    street, city = split_site_location(install.get("Site_Location", ""))
+def known_cities_from(rows):
+    return {row.get("city", "").strip() for row in rows if row.get("city", "").strip()}
+
+
+def match_install(install, portal_idx, known_cities):
+    street, city = split_site_location(install.get("Site_Location", ""), known_cities)
     key = (normalize_street(street), normalize_city(city))
     candidates = portal_idx.get(key)
     return candidates[0] if candidates else None
@@ -200,11 +237,11 @@ def parse_status_date(s):
         return None
 
 
-def compute_fields(inst, portal_idx, checked_at):
+def compute_fields(inst, portal_idx, known_cities, checked_at):
     """Pure derivation: install + portal index -> the field dict this record
     would be updated with. No I/O, so --dry-run can call the exact same logic
     the real write path uses."""
-    match = match_install(inst, portal_idx)
+    match = match_install(inst, portal_idx, known_cities)
     fields = {"IC_Portal_Checked": checked_at}
 
     if match:
@@ -258,6 +295,7 @@ def main():
     portal_rows = scrape_all_projects()  # raises on login failure -- nothing gets stamped
     print(f"scraped {len(portal_rows)} portal projects")
     portal_idx = build_portal_index(portal_rows)
+    known_cities = known_cities_from(portal_rows)
 
     token = get_zoho_token()
     installs = fetch_active_installs(token)
@@ -271,7 +309,7 @@ def main():
         no_match = 0
         for inst in installs:
             name = inst.get("Name", inst["id"])
-            fields, matched, conflict = compute_fields(inst, portal_idx, checked_at)
+            fields, matched, conflict = compute_fields(inst, portal_idx, known_cities, checked_at)
             if not matched:
                 no_match += 1
 
@@ -289,7 +327,7 @@ def main():
                     print("    (project-number conflict, not overwritten)")
                 if not matched:
                     loc = inst.get("Site_Location") or ""
-                    street, city = split_site_location(loc)
+                    street, city = split_site_location(loc, known_cities)
                     key = (normalize_street(street), normalize_city(city))
                     print(f"    Site_Location: {loc!r}")
                     print(f"    parsed street/city: {street!r} / {city!r}")
@@ -304,7 +342,7 @@ def main():
     for inst in installs:
         rid = inst["id"]
         name = inst.get("Name", rid)
-        fields, matched, conflict = compute_fields(inst, portal_idx, checked_at)
+        fields, matched, conflict = compute_fields(inst, portal_idx, known_cities, checked_at)
         if not matched:
             no_match += 1
         if conflict:
