@@ -177,3 +177,11 @@ invalidates the current one, which is shared with the Render service
 | `GET /crm/v7/settings/fields` | request the field in `?fields=` on a record read |
 
 Read/write on `Installs` (GET, PUT, POST) is confirmed working under this scope.
+
+## Zoho PUT gotcha
+
+A `PUT /crm/v7/Installs` with `{"data": [{"id": "..."}]}` and no other fields
+returns **HTTP 200 and is accepted as a real write** -- it does not error as
+"no updatable data". It bumps `Modified_Time` / `Modified_By` on that record.
+Never use a bare-id PUT as a permission probe or a dry run. `ZohoCRM.modules.ALL`
+grants read and write together, so a successful read already proves write access.

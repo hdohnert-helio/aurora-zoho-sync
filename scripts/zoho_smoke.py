@@ -125,21 +125,19 @@ else:
     check("IC_Action_Required search", False,
           f"HTTP {r.status_code} | {r.text[:200]}")
 
-# 6. Write capability, without actually changing anything: a PUT with only an
-#    id is rejected for having no updatable data, but an auth/scope failure
-#    would surface as 401 instead. Distinguishes "can't write" from "no scope".
-probe = requests.get(f"{API_DOMAIN}/crm/v7/Installs", headers=hdrs,
-                     params={"fields": "Name", "per_page": 1}, timeout=30)
-if probe.status_code == 200 and probe.json().get("data"):
-    rid = probe.json()["data"][0]["id"]
-    w = requests.put(f"{API_DOMAIN}/crm/v7/Installs", headers=hdrs,
-                     json={"data": [{"id": rid}], "trigger": []}, timeout=30)
-    check("write scope present (no data written)", w.status_code != 401,
-          f"HTTP {w.status_code} -- expected a data-validation error, not 401")
+# NOTE: there is deliberately no write test here.
+# An earlier version sent a PUT carrying only an id, on the assumption Zoho
+# would reject it as having no updatable data. Zoho returned HTTP 200 and
+# accepted it as a real write, bumping Modified_Time/Modified_By on an
+# arbitrary live record (Garry Thibodeau, 2026-09-17 13:00). No field values
+# changed, but the probe was not read-only as its name claimed.
+# Write scope cannot be verified without writing. ZohoCRM.modules.ALL covers
+# read and write together, so the reads above already prove it. Do not
+# reintroduce a write probe in a smoke test.
 
 print("=" * 64)
 if failures:
     print(f"RESULT: FAIL ({len(failures)}) -- " + "; ".join(failures))
     sys.exit(1)
 print("RESULT: PASS -- Zoho reachable from Actions, new fields live, "
-      "read+write scope confirmed")
+      "read scope confirmed")
