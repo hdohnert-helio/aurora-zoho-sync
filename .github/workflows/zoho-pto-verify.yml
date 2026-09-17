@@ -1,0 +1,21 @@
+name: Zoho PTO backfill verify (temporary)
+on:
+  workflow_dispatch:
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install requests
+      - uses: 1password/load-secrets-action@v2
+        with:
+          export-env: true
+        env:
+          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          ZOHO_CLIENT_ID: op://Helio Automation/Zoho API/ZOHO_CLIENT_ID
+          ZOHO_CLIENT_SECRET: op://Helio Automation/Zoho API/ZOHO_CLIENT_SECRET
+          ZOHO_REFRESH_TOKEN: op://Helio Automation/Zoho API/ZOHO_REFRESH_TOKEN
+      - run: python -u scripts/zoho_pto_verify.py
