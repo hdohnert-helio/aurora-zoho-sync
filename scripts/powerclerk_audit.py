@@ -142,25 +142,41 @@ def collect(page, label, host, pid):
     print(f"  API keys: {list(payload.keys())[:8]}")
 
     rows = None
-    for k in ("data", "Data", "rows", "aaData"):
-        if isinstance(payload.get(k), list):
-            rows = payload[k]; break
+    pld = payload.get("Data") or {}
+    if isinstance(pld, dict):
+        plist = pld.get("ProjectListData") or {}
+        if isinstance(plist, dict) and isinstance(plist.get("data"), list):
+            rows = plist["data"]
+    if rows is None:
+        for k in ("data", "Data", "rows", "aaData"):
+            if isinstance(payload.get(k), list):
+                rows = payload[k]; break
     if rows is None:
         print(f"  FAIL: no row array. sample={str(payload)[:300]}")
         return []
     print(f"  {label}: API returned {len(rows)} rows")
+    if rows:
+        print(f"  sample row 0: {json.dumps(rows[0])[:2000]}")
 
-    # property (ProjectDataN) -> header text, from the captured request
-    prop2head = {c.get("property"): c.get("header", "")
-                 for c in tr.get("columns", []) if c.get("property")}
+    # builtInFieldConstantId -> header text, from the captured request columns
+    id2head = {c.get("builtInFieldConstantId"): c.get("header", "")
+               for c in tr.get("columns", []) if c.get("builtInFieldConstantId") is not None}
 
     out = []
     for r in rows:
         if not isinstance(r, dict):
             continue
+        fields = r.get("ProjectData")
+        if not isinstance(fields, list):
+            continue
         headers, vals = [], []
-        for prop, head in prop2head.items():
-            v = r.get(prop)
+        for f in fields:
+            if not isinstance(f, dict):
+                continue
+            head = id2head.get(f.get("BuiltInFieldConstantId"))
+            if head is None:
+                continue
+            v = f.get("Value")
             if isinstance(v, dict):
                 v = v.get("value") or v.get("text") or v.get("display") or ""
             headers.append(head)
