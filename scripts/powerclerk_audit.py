@@ -182,16 +182,10 @@ def collect(page, label, host, pid):
             headers.append(col_heads[i])
             vals.append(re.sub(r"<[^>]+>", " ", str(v or "")).strip())
         rec = normalise(headers, vals)
-        if rec["project_no"]:
-            out.append(rec)
-        else:
+        if not rec["project_no"]:
             skipped += 1
-            if skipped <= 5:
-                # structural only — no customer data in this log line
-                proj_val_present = bool(fields and fields[0].get("Value"))
-                print(f"  skip (no project_no): nfields={len(fields)} "
-                      f"ncols={len(col_heads)} field0_has_value={proj_val_present}")
-    print(f"  {label}: skipped {skipped} rows without project_no")
+        out.append(rec)
+    print(f"  {label}: {skipped} rows had no project_no (kept anyway)")
 
     print(f"  {label}: collected {len(out)} rows")
     return out
