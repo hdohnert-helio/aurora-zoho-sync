@@ -160,13 +160,17 @@ def collect(page, label, host, pid):
 
     # ProjectData is positional: element i lines up with columns[i] from the request.
     col_heads = [c.get("header", "") for c in tr.get("columns", [])]
+    print(f"  columns ({len(col_heads)}): {col_heads}")
 
     out = []
+    skipped = 0
     for r in rows:
         if not isinstance(r, dict):
+            skipped += 1
             continue
         fields = r.get("ProjectData")
         if not isinstance(fields, list):
+            skipped += 1
             continue
         headers, vals = [], []
         for i, f in enumerate(fields):
@@ -180,6 +184,14 @@ def collect(page, label, host, pid):
         rec = normalise(headers, vals)
         if rec["project_no"]:
             out.append(rec)
+        else:
+            skipped += 1
+            if skipped <= 5:
+                # structural only — no customer data in this log line
+                proj_val_present = bool(fields and fields[0].get("Value"))
+                print(f"  skip (no project_no): nfields={len(fields)} "
+                      f"ncols={len(col_heads)} field0_has_value={proj_val_present}")
+    print(f"  {label}: skipped {skipped} rows without project_no")
 
     print(f"  {label}: collected {len(out)} rows")
     return out
