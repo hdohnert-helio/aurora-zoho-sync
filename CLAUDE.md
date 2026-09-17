@@ -127,10 +127,35 @@ badly (house number parses as "28", remainder keeps "30") -- handle hyphenated r
 
 ### IC_Action_Required rule
 
-True when the portal status contains any of: `Corrections Required`,
+True when the portal status contains any of: `Corrections`,
 `Customer Action Required`, `InComplete`, `Unsubmitted`, `On Hold`,
 `Awaiting Meter Fee`. False for `Re-Review` (utility is working).
-Also true when no portal application is found at all for an active project.
+Also true when no portal application is found at all for an active CT
+project (see territory rule below -- out-of-state installs are exempt).
+
+**2026-09-17 revision:** was `Corrections Required` (exact phrase); changed to
+bare `Corrections` after the sync's first dry-run flagged Ramsey Goodrich
+(`Pending Witness Test Corrections`) as a disagreement -- that status is a
+real blocker and the narrower phrase missed it. Confirmed: every portal
+status containing `Corrections` is a blocker.
+
+### Territory rule
+
+The scrape only covers UI (CT) and Eversource-CT, so an install outside
+Connecticut will never have a portal record -- without an exemption it would
+show `NO APPLICATION FOUND` and `IC_Action_Required = true` forever, a
+permanent false alarm, not a real blocker.
+
+Detect territory from the state parsed out of `Site_Location`. Only fall back
+to `Utility_Provider` (checked for "eversource" or "illuminating") when the
+address didn't yield a recognizable state at all -- a state that parsed and
+just isn't CT is a real answer, not a parse failure, so it does not fall
+back. Out-of-territory installs get `IC_Portal_Status = "Outside
+UI/Eversource territory - not tracked by this sync"`, `IC_Action_Required =
+false`, and still get `IC_Portal_Checked` stamped like any other record.
+Found via the sync's first dry-run: Michael Duke (South Salem, NY) and Alex
+Starr (Scarsdale, NY) were both flipping to a false "action required" alarm
+before this rule existed.
 
 ### Sync rules (non-negotiable)
 

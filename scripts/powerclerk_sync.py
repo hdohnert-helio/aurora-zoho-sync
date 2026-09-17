@@ -39,7 +39,7 @@ INACTIVE_STAGES = ["Canceled", "Project Closeout"]
 NO_APPLICATION_STATUS = "NO APPLICATION FOUND in UI or Eversource portal"
 
 _ACTION_REQUIRED_SUBSTRINGS = [
-    "corrections required",
+    "corrections",
     "customer action required",
     "incomplete",
     "unsubmitted",
@@ -75,7 +75,7 @@ def zoho_headers(token):
 def fetch_active_installs(token):
     """All Installs not in a closed-out stage, via /search (coql is not in our OAuth scope)."""
     criteria = "and".join(f"(Project_Stage:not_equal:{s})" for s in INACTIVE_STAGES)
-    fields = ("id,Name,Site_Location,IC_Project_Number,Project_Stage,"
+    fields = ("id,Name,Site_Location,IC_Project_Number,Project_Stage,Utility_Provider,"
               "IC_Portal_Status,IC_Portal_Status_Date,IC_Action_Required,IC_Alert_Sent")
 
     results, page = [], 1
@@ -170,6 +170,12 @@ def normalize_city(c):
 _ZIP_RE = re.compile(r"\d{5}(-\d{4})?$")
 _COUNTRY_RE = re.compile(r"(united states|usa)$", re.I)
 _STATE_RE = re.compile(r"(connecticut|ct|massachusetts|ma|new york|ny|rhode island|ri)$", re.I)
+_STATE_ABBR = {
+    "CONNECTICUT": "CT", "CT": "CT",
+    "MASSACHUSETTS": "MA", "MA": "MA",
+    "NEW YORK": "NY", "NY": "NY",
+    "RHODE ISLAND": "RI", "RI": "RI",
+}
 
 
 def _strip_end(s, pattern):
@@ -191,14 +197,25 @@ def _match_known_city_suffix(remainder, known_cities):
 
 
 def split_site_location(loc, known_cities=()):
+    """Returns (street, city, state). state is a 2-letter code, or None if no
+    recognizable state token was found at all (not the same as "found and it's
+    not CT" -- see detect_territory)."""
     s = (loc or "").strip()
     s = _strip_end(s, _COUNTRY_RE)
     s = _strip_end(s, _ZIP_RE)
-    s = _strip_end(s, _STATE_RE)
+
+    state = None
+    stripped = s.rstrip(", ")
+    m = _STATE_RE.search(stripped)
+    if m:
+        state = _STATE_ABBR.get(m.group(0).upper())
+        s = stripped[:m.start()].rstrip(", ")
+
     if "," in s:
         street, city = s.rsplit(",", 1)
-        return street.strip(), city.strip()
-    return _match_known_city_suffix(s, known_cities)
+        return street.strip(), city.strip(), state
+    street, city = _match_known_city_suffix(s, known_cities)
+    return street, city, state
 
 
 def build_portal_index(rows):
@@ -214,10 +231,30 @@ def known_cities_from(rows):
 
 
 def match_install(install, portal_idx, known_cities):
-    street, city = split_site_location(install.get("Site_Location", ""), known_cities)
+    street, city, _ = split_site_location(install.get("Site_Location", ""), known_cities)
     key = (normalize_street(street), normalize_city(city))
     candidates = portal_idx.get(key)
     return candidates[0] if candidates else None
+
+
+# ── Territory ────────────────────────────────────────────────────────────────
+# The scrape only covers UI (CT) and Eversource-CT. An out-of-state install
+# would show "no application found" on every run forever -- that's not a
+# blocker, it's just not this sync's territory. Detect from the state parsed
+# out of Site_Location; only fall back to Utility_Provider when the address
+# didn't yield a recognizable state at all (not when it yielded one that
+# happens not to be CT -- that's a real answer, not a parse failure).
+
+IN_TERRITORY_STATE = "CT"
+OUT_OF_TERRITORY_STATUS = "Outside UI/Eversource territory - not tracked by this sync"
+_UTILITY_IN_TERRITORY_RE = re.compile(r"eversource|illuminating", re.I)
+
+
+def is_in_territory(inst):
+    _, _, state = split_site_location(inst.get("Site_Location", ""))
+    if state:
+        return state == IN_TERRITORY_STATE
+    return bool(_UTILITY_IN_TERRITORY_RE.search(inst.get("Utility_Provider") or ""))
 
 
 # ── Status rules ─────────────────────────────────────────────────────────────
@@ -247,20 +284,39 @@ def compute_fields(inst, portal_idx, known_cities, checked_at):
     """Pure derivation: install + portal index -> the field dict this record
     would be updated with. No I/O, so --dry-run can call the exact same logic
     the real write path uses."""
-    match = match_install(inst, portal_idx, known_cities)
     fields = {"IC_Portal_Checked": checked_at}
+    matched = False
+    conflict = False
 
-    if match:
-        status_text = match.get("status") or ""
-        fields["IC_Portal_Status"] = status_text
-        date = parse_status_date(match.get("status_at"))
-        if date:
-            fields["IC_Portal_Status_Date"] = date
-        action_required = is_action_required(status_text)
+    if not is_in_territory(inst):
+        fields["IC_Portal_Status"] = OUT_OF_TERRITORY_STATUS
+        action_required = False
     else:
-        status_text = NO_APPLICATION_STATUS
-        fields["IC_Portal_Status"] = status_text
-        action_required = True
+        match = match_install(inst, portal_idx, known_cities)
+        matched = bool(match)
+
+        if match:
+            status_text = match.get("status") or ""
+            fields["IC_Portal_Status"] = status_text
+            date = parse_status_date(match.get("status_at"))
+            if date:
+                fields["IC_Portal_Status_Date"] = date
+            action_required = is_action_required(status_text)
+        else:
+            status_text = NO_APPLICATION_STATUS
+            fields["IC_Portal_Status"] = status_text
+            action_required = True
+
+        existing_num = (inst.get("IC_Project_Number") or "").strip()
+        matched_num = (match or {}).get("project_no") or ""
+        if matched_num:
+            if not existing_num:
+                fields["IC_Project_Number"] = matched_num
+            elif existing_num != matched_num:
+                conflict = True
+                fields["IC_Portal_Status"] = (
+                    f"{status_text} | CONFLICT: portal is {matched_num}, Zoho has {existing_num}"
+                )
 
     fields["IC_Action_Required"] = action_required
 
@@ -268,19 +324,7 @@ def compute_fields(inst, portal_idx, known_cities, checked_at):
     if was_required and not action_required and inst.get("IC_Alert_Sent"):
         fields["IC_Alert_Sent"] = None
 
-    existing_num = (inst.get("IC_Project_Number") or "").strip()
-    matched_num = (match or {}).get("project_no") or ""
-    conflict = False
-    if matched_num:
-        if not existing_num:
-            fields["IC_Project_Number"] = matched_num
-        elif existing_num != matched_num:
-            conflict = True
-            fields["IC_Portal_Status"] = (
-                f"{status_text} | CONFLICT: portal is {matched_num}, Zoho has {existing_num}"
-            )
-
-    return fields, bool(match), conflict
+    return fields, matched, conflict
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
@@ -313,10 +357,14 @@ def main():
         print("\n=== DRY RUN -- no Zoho writes ===")
         disagreements = 0
         no_match = 0
+        out_of_territory = 0
         for inst in installs:
             name = inst.get("Name", inst["id"])
+            in_territory = is_in_territory(inst)
             fields, matched, conflict = compute_fields(inst, portal_idx, known_cities, checked_at)
-            if not matched:
+            if not in_territory:
+                out_of_territory += 1
+            elif not matched:
                 no_match += 1
 
             cur_status = inst.get("IC_Portal_Status") or ""
@@ -331,25 +379,28 @@ def main():
                 print(f"    IC_Action_Required:  {cur_action} -> {new_action}")
                 if conflict:
                     print("    (project-number conflict, not overwritten)")
-                if not matched:
+                if not matched and is_in_territory(inst):
                     loc = inst.get("Site_Location") or ""
-                    street, city = split_site_location(loc, known_cities)
+                    street, city, state = split_site_location(loc, known_cities)
                     key = (normalize_street(street), normalize_city(city))
                     print(f"    Site_Location: {loc!r}")
-                    print(f"    parsed street/city: {street!r} / {city!r}")
+                    print(f"    parsed street/city/state: {street!r} / {city!r} / {state!r}")
                     print(f"    normalized key: {key!r}")
                     print(f"    key in portal index: {key in portal_idx}")
 
         print(f"\n{len(installs)} active installs, {no_match} with no portal match, "
+              f"{out_of_territory} outside CT (not tracked), "
               f"{disagreements} disagree with current Zoho values")
         return 0
 
-    updated = no_match = conflicts = failed = 0
+    updated = no_match = out_of_territory = conflicts = failed = 0
     for inst in installs:
         rid = inst["id"]
         name = inst.get("Name", rid)
         fields, matched, conflict = compute_fields(inst, portal_idx, known_cities, checked_at)
-        if not matched:
+        if not is_in_territory(inst):
+            out_of_territory += 1
+        elif not matched:
             no_match += 1
         if conflict:
             conflicts += 1
@@ -362,6 +413,7 @@ def main():
             print(f"  FAIL updating {name}: {e}")
 
     print(f"done: {updated} updated, {no_match} no portal match, "
+          f"{out_of_territory} outside CT (not tracked), "
           f"{conflicts} project-number conflicts, {failed} write failures")
     return 1 if failed else 0
 
