@@ -69,6 +69,83 @@ def capture_and_replay(page, host, pid, length=5):
     return payload
 
 
+def find_blocked_project(page, host, pid, status_substrings):
+    payload = capture_and_replay(page, host, pid, length=2000)
+    if not payload:
+        return None, None
+    rows = (payload.get("Data") or {}).get("ProjectListData", {}).get("data", [])
+    print(f"  ({len(rows)} rows)")
+    for r in rows:
+        fields = r.get("ProjectData") or []
+        status_val = next(
+            (f.get("Value") for f in fields if f.get("BuiltInFieldConstantId") == 2), "")
+        if status_val and any(s in str(status_val).lower() for s in status_substrings):
+            proj_no = next(
+                (f.get("Value") for f in fields if f.get("BuiltInFieldConstantId") == 1), "?")
+            return r.get("ProjectId"), (proj_no, status_val)
+    return None, None
+
+
+def investigate_view_click(page, label, host, pid, project_id, proj_info):
+    proj_no, status_val = proj_info
+    print(f"--- {label}: {proj_no}, ProjectId={project_id!r}, status={status_val!r} ---")
+    url = f"https://{host}/MvcProjects/LandingPage?ProgramId={pid}&ProjectId={project_id}"
+    try:
+        page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        page.wait_for_timeout(6000)
+        print("landing page URL:", page.url)
+
+        for dismiss_label in ("Got it", "Close", "Dismiss", "×", "OK"):
+            try:
+                btn = page.get_by_text(dismiss_label, exact=False).first
+                if btn.is_visible(timeout=1000):
+                    btn.click(timeout=2000)
+                    print(f"dismissed a modal via label {dismiss_label!r}")
+                    page.wait_for_timeout(1000)
+                    break
+            except Exception:
+                pass
+
+        n_tables = page.locator("table").count()
+        comm_table = None
+        for i in range(n_tables):
+            t = page.locator("table").nth(i)
+            try:
+                if "Subject" in t.inner_text() and "View" in t.inner_text():
+                    comm_table = t
+                    break
+            except Exception:
+                continue
+        if comm_table is None:
+            print("could not find the Communications table on this page")
+            return
+
+        view_el = comm_table.get_by_text("View", exact=True).first
+        try:
+            with page.context.expect_page(timeout=8000):
+                view_el.click(force=True, timeout=8000)
+            print("a new tab opened (unexpected given prior runs -- check its URL manually)")
+        except Exception:
+            pass
+        page.wait_for_timeout(1500)
+
+        n_dialogs = page.locator("[role='dialog'], .modal, .modal-content").count()
+        mfa_seen = False
+        for i in range(min(n_dialogs, 3)):
+            d = page.locator("[role='dialog'], .modal, .modal-content").nth(i)
+            try:
+                txt = d.inner_text()[:300]
+                if "Multi-Factor" in txt or "MFA" in txt:
+                    mfa_seen = True
+                print(f"  dialog[{i}]: {txt[:200].strip()!r}")
+            except Exception:
+                pass
+        print(f"MFA-required modal seen: {mfa_seen}")
+    except Exception as e:
+        print(f"{label} investigation failed:", e)
+    print()
+
+
 def main():
     if not USER or not PASS:
         print("FAIL: credentials missing"); return 1
@@ -91,136 +168,24 @@ def main():
             print("FAIL: login rejected"); return 1
         print("logged in\n")
 
-        # --- Q1: does the row payload carry ProjectId? ---
-        print("=== Q1: GetProjectList3 row keys (UI) ===")
-        payload = capture_and_replay(page, UI[0], UI[1], length=2000)
-        blocked_project_id = None
-        if payload:
-            rows = (payload.get("Data") or {}).get("ProjectListData", {}).get("data", [])
-            if rows:
-                print("row0 top-level keys:", list(rows[0].keys()))
-                for k in ("ProjectId", "StatusId", "CanDelete", "CanAssign",
-                          "QueuePosition", "Highlights"):
-                    print(f"  row0[{k!r}] =", rows[0].get(k))
-                # find a project whose status contains "Corrections Required" so
-                # Q4 has a real blocked project to inspect.
-                for r in rows:
-                    fields = r.get("ProjectData") or []
-                    status_val = next(
-                        (f.get("Value") for f in fields if f.get("BuiltInFieldConstantId") == 2), "")
-                    if status_val and "corrections required" in str(status_val).lower():
-                        blocked_project_id = r.get("ProjectId")
-                        proj_no = next(
-                            (f.get("Value") for f in fields if f.get("BuiltInFieldConstantId") == 1), "?")
-                        print(f"  found blocked project {proj_no} -> ProjectId={blocked_project_id!r} "
-                              f"status={status_val!r}")
-                        break
-            else:
-                print("no rows in reply")
-        print()
-
-        # --- Q4: landing page Communications table + View link hrefs ---
-        # Navigate DIRECTLY using the ProjectId from Q1 -- no clicking needed.
-        print("=== Q4: Communications table via direct landing-page URL ===")
-        if blocked_project_id:
-            url = (f"https://{UI[0]}/MvcProjects/LandingPage"
-                   f"?ProgramId={UI[1]}&ProjectId={blocked_project_id}")
-            try:
-                page.goto(url, wait_until="domcontentloaded", timeout=30000)
-                page.wait_for_timeout(6000)
-                print("landing page URL:", page.url)
-                print("page title:", page.title())
-
-                # A "What's new?" modal with a dark backdrop seems to be
-                # intercepting every click in earlier runs. Try to dismiss it.
-                for label in ("Got it", "Close", "Dismiss", "×", "OK"):
-                    try:
-                        btn = page.get_by_text(label, exact=False).first
-                        if btn.is_visible(timeout=1000):
-                            btn.click(timeout=2000)
-                            print(f"dismissed a modal via label {label!r}")
-                            page.wait_for_timeout(1000)
-                            break
-                    except Exception:
-                        pass
-                try:
-                    close_x = page.locator("button[aria-label='Close'], .btn-close, .modal-header button").first
-                    if close_x.is_visible(timeout=1000):
-                        close_x.click(timeout=2000)
-                        print("dismissed a modal via close-icon selector")
-                        page.wait_for_timeout(1000)
-                except Exception:
-                    pass
-
-                idx = page.inner_text("body").find("Communications")
-                print("'Communications' found in body text at index:", idx)
-                if idx >= 0:
-                    body_text = page.inner_text("body")
-                    print("surrounding text:")
-                    print(body_text[max(0, idx - 200): idx + 1500])
-
-                n_tables = page.locator("table").count()
-                print(f"\n{n_tables} <table> elements on the page")
-                for i in range(min(n_tables, 8)):
-                    t = page.locator("table").nth(i)
-                    try:
-                        txt = t.inner_text()[:300].replace("\n", " | ")
-                        print(f"  table[{i}]: {txt}")
-                    except Exception as e:
-                        print(f"  table[{i}]: (failed: {e})")
-
-                # table[3] is Date/Status/Subject/View -- dump its raw HTML to see
-                # what element "View" actually is (the site's own <a> tags didn't
-                # include it, so it's likely a button/span with a JS handler).
-                comm_table = page.locator("table").nth(3)
-                html = comm_table.evaluate("el => el.outerHTML")
-                print("\ntable[3] (Communications) outerHTML, first 3000 chars:")
-                print(html[:3000])
-
-                print("\nattempting to click the first 'View' (force, past any remaining overlay)...")
-                seen_reqs = []
-                page.on("request", lambda req: seen_reqs.append(req.url))
-                try:
-                    view_el = comm_table.get_by_text("View", exact=True).first
-                    try:
-                        with page.context.expect_page(timeout=10000) as new_page_info:
-                            view_el.click(force=True, timeout=10000)
-                        new_page = new_page_info.value
-                        new_page.wait_for_load_state("domcontentloaded", timeout=15000)
-                        print("new page URL:", new_page.url)
-                    except Exception as e:
-                        print("no new tab within 10s:", e)
-                        print("current page URL (in case it navigated in place):", page.url)
-                except Exception as e:
-                    print("click failed entirely:", e)
-                page.wait_for_timeout(1500)
-                comm_reqs = [u for u in seen_reqs if "ommunication" in u]
-                print(f"\n{len(seen_reqs)} requests seen since page load; "
-                      f"{len(comm_reqs)} mention 'communication':")
-                for u in comm_reqs[:10]:
-                    print(" ", u)
-
-                # No new tab, no request -- check for an in-page modal/dialog instead.
-                n_dialogs = page.locator("[role='dialog'], .modal, .modal-content").count()
-                print(f"\n{n_dialogs} dialog/modal-like elements on the page after the click")
-                for i in range(min(n_dialogs, 3)):
-                    d = page.locator("[role='dialog'], .modal, .modal-content").nth(i)
-                    try:
-                        print(f"  dialog[{i}] text (first 1500 chars):")
-                        print(" ", d.inner_text()[:1500].replace("\n", " | "))
-                    except Exception as e:
-                        print(f"  dialog[{i}]: (failed: {e})")
-
-            except Exception as e:
-                print("landing-page investigation failed:", e)
+        print("=== Q1/Q4/Q5: UI ===")
+        pid, info = find_blocked_project(page, UI[0], UI[1], ["corrections required"])
+        if pid:
+            investigate_view_click(page, "UI", UI[0], UI[1], pid, info)
         else:
-            print("skipped -- no blocked project found in first page of rows")
-        print()
+            print("no blocked UI project found in first page of rows")
+
+        print("=== Q1/Q4/Q5: Eversource ===")
+        pid2, info2 = find_blocked_project(
+            page, EVERSOURCE[0], EVERSOURCE[1], ["customer action required"])
+        if pid2:
+            investigate_view_click(page, "EVERSOURCE", EVERSOURCE[0], EVERSOURCE[1], pid2, info2)
+        else:
+            print("no blocked Eversource project found in first page of rows")
 
         # Q3 (Eversource Export to CSV) was tried twice: the button is real and
         # clickable, but it fires neither a download event nor a new tab within
         # 40s -- inconclusive, and moot now that Q1 gives ProjectId directly.
-        # Not worth further investigation time.
 
         browser.close()
     return 0
