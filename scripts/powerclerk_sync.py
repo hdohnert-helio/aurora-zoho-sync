@@ -287,6 +287,14 @@ def main():
                 print(f"    IC_Action_Required:  {cur_action} -> {new_action}")
                 if conflict:
                     print("    (project-number conflict, not overwritten)")
+                if not matched:
+                    loc = inst.get("Site_Location") or ""
+                    street, city = split_site_location(loc)
+                    key = (normalize_street(street), normalize_city(city))
+                    print(f"    Site_Location: {loc!r}")
+                    print(f"    parsed street/city: {street!r} / {city!r}")
+                    print(f"    normalized key: {key!r}")
+                    print(f"    key in portal index: {key in portal_idx}")
 
         print(f"\n{len(installs)} active installs, {no_match} with no portal match, "
               f"{disagreements} disagree with current Zoho values")
