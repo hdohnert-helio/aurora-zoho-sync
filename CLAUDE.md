@@ -157,3 +157,23 @@ Also true when no portal application is found at all for an active project.
   (Online 2025) and INT-116999 (awaiting town approval). Possibly a second array.
 - **John Fiorello** -- INT-117227 is 24 Brightwood (matches Zoho). INT-117263 is
   22 Brightwood and has no Zoho record; unclear if it is also ours.
+
+## Zoho OAuth scope constraint (verified 2026-09-17)
+
+The connected app grants record-level scope only (`ZohoCRM.modules.ALL`).
+It does **not** grant `ZohoCRM.settings.fields.READ` or `ZohoCRM.coql.READ`;
+calls to `/crm/v7/settings/fields` and `/crm/v7/coql` return
+**HTTP 401 OAUTH_SCOPE_MISMATCH**.
+
+Do not re-authorize the app to add scopes. Re-minting the refresh token
+invalidates the current one, which is shared with the Render service
+(`aurora-zoho-sync.onrender.com`) and the `sync-aurora-users` /
+`sync-hea-status` workflows. Everything the sync needs works within
+`ZohoCRM.modules.ALL`:
+
+| Instead of | Use |
+|---|---|
+| `POST /crm/v7/coql` | `GET /crm/v7/Installs/search?criteria=(...)` |
+| `GET /crm/v7/settings/fields` | request the field in `?fields=` on a record read |
+
+Read/write on `Installs` (GET, PUT, POST) is confirmed working under this scope.

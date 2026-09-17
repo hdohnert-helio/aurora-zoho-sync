@@ -82,41 +82,64 @@ r = requests.get(
 )
 check("can read Installs module", r.status_code == 200, f"HTTP {r.status_code}")
 
-# 4. New fields exist
+# 4. New fields exist -- read them on a record instead of settings/fields,
+#    which needs ZohoCRM.settings.fields.READ (not granted, and not needed).
 r = requests.get(
-    f"{API_DOMAIN}/crm/v7/settings/fields",
+    f"{API_DOMAIN}/crm/v7/Installs",
     headers=hdrs,
-    params={"module": "Installs"},
-    timeout=30,
-)
-if r.status_code == 200:
-    present = {f.get("api_name") for f in r.json().get("fields", [])}
-    for fname in NEW_FIELDS:
-        check(f"field {fname} exists", fname in present)
-else:
-    check("can read field metadata", False, f"HTTP {r.status_code} | {r.text[:200]}")
-
-# 5. The blocked-project filter works end to end
-r = requests.post(
-    f"{API_DOMAIN}/crm/v7/coql",
-    headers=hdrs,
-    json={"select_query":
-          "select Name, IC_Portal_Status from Installs "
-          "where IC_Action_Required = true limit 30"},
+    params={"fields": "Name," + ",".join(NEW_FIELDS), "per_page": 1},
     timeout=30,
 )
 if r.status_code == 200:
     rows = r.json().get("data", [])
-    check("IC_Action_Required query returns rows", len(rows) > 0, f"{len(rows)} blocked")
+    returned = set(rows[0].keys()) if rows else set()
+    for fname in NEW_FIELDS:
+        check(f"field {fname} readable", fname in returned)
+else:
+    # Zoho rejects the whole request naming an unknown field, so a 400 here
+    # means at least one of the four is missing or misspelled.
+    check("new fields readable", False,
+          f"HTTP {r.status_code} | {r.json().get('message', r.text[:200])}")
+
+# 5. The blocked-project filter works end to end.
+#    Uses /search (ZohoCRM.modules.ALL) rather than /coql, which needs
+#    ZohoCRM.coql.READ -- not granted, and not required by the sync.
+r = requests.get(
+    f"{API_DOMAIN}/crm/v7/Installs/search",
+    headers=hdrs,
+    params={"criteria": "(IC_Action_Required:equals:true)",
+            "fields": "Name,IC_Portal_Status",
+            "per_page": 30},
+    timeout=30,
+)
+if r.status_code == 200:
+    rows = r.json().get("data", [])
+    check("IC_Action_Required search returns rows", len(rows) > 0, f"{len(rows)} blocked")
     for row in rows[:5]:
-        print(f"         - {row['Name']}: {row['IC_Portal_Status']}")
+        print(f"         - {row.get('Name')}: {row.get('IC_Portal_Status')}")
     if len(rows) > 5:
         print(f"         ... and {len(rows) - 5} more")
+elif r.status_code == 204:
+    check("IC_Action_Required search returns rows", False, "204 no content")
 else:
-    check("IC_Action_Required query", False, f"HTTP {r.status_code} | {r.text[:200]}")
+    check("IC_Action_Required search", False,
+          f"HTTP {r.status_code} | {r.text[:200]}")
+
+# 6. Write capability, without actually changing anything: a PUT with only an
+#    id is rejected for having no updatable data, but an auth/scope failure
+#    would surface as 401 instead. Distinguishes "can't write" from "no scope".
+probe = requests.get(f"{API_DOMAIN}/crm/v7/Installs", headers=hdrs,
+                     params={"fields": "Name", "per_page": 1}, timeout=30)
+if probe.status_code == 200 and probe.json().get("data"):
+    rid = probe.json()["data"][0]["id"]
+    w = requests.put(f"{API_DOMAIN}/crm/v7/Installs", headers=hdrs,
+                     json={"data": [{"id": rid}], "trigger": []}, timeout=30)
+    check("write scope present (no data written)", w.status_code != 401,
+          f"HTTP {w.status_code} -- expected a data-validation error, not 401")
 
 print("=" * 64)
 if failures:
     print(f"RESULT: FAIL ({len(failures)}) -- " + "; ".join(failures))
     sys.exit(1)
-print("RESULT: PASS -- Zoho is reachable from Actions and the new fields are live")
+print("RESULT: PASS -- Zoho reachable from Actions, new fields live, "
+      "read+write scope confirmed")
