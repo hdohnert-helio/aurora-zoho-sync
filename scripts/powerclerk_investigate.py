@@ -148,52 +148,35 @@ def main():
                     except Exception as e:
                         print(f"  table[{i}]: (failed: {e})")
 
-                all_links = page.locator("a").all()
-                view_like = [l for l in all_links
-                             if "view" in (l.inner_text() or "").lower()
-                             or "communication" in (l.get_attribute("href") or "").lower()]
-                print(f"\n{len(all_links)} total <a> tags; {len(view_like)} look communication/view-related:")
-                for l in view_like[:10]:
-                    try:
-                        print(" ", l.get_attribute("href"), "| text:", l.inner_text())
-                    except Exception as e:
-                        print("  (failed to read)", e)
+                # table[3] is Date/Status/Subject/View -- dump its raw HTML to see
+                # what element "View" actually is (the site's own <a> tags didn't
+                # include it, so it's likely a button/span with a JS handler).
+                comm_table = page.locator("table").nth(3)
+                html = comm_table.evaluate("el => el.outerHTML")
+                print("\ntable[3] (Communications) outerHTML, first 3000 chars:")
+                print(html[:3000])
+
+                print("\nattempting to click the first 'View' and catch a new tab/page...")
+                try:
+                    view_el = comm_table.get_by_text("View", exact=True).first
+                    with page.context.expect_page(timeout=15000) as new_page_info:
+                        view_el.click()
+                    new_page = new_page_info.value
+                    new_page.wait_for_load_state("domcontentloaded", timeout=15000)
+                    print("new page URL:", new_page.url)
+                except Exception as e:
+                    print("click-and-catch-new-tab failed:", e)
+                    print("current page URL (in case it navigated in place):", page.url)
             except Exception as e:
                 print("landing-page investigation failed:", e)
         else:
             print("skipped -- no blocked project found in first page of rows")
         print()
 
-        # --- Q3: Eversource Export to CSV ---
-        print("=== Q3: Eversource Export to CSV ===")
-        page.goto(f"https://{EVERSOURCE[0]}/MvcProjects/ProjectList?ProgramId={EVERSOURCE[1]}",
-                  wait_until="domcontentloaded", timeout=60000)
-        page.wait_for_timeout(4000)
-        try:
-            # dismiss any lingering overlay before clicking
-            page.keyboard.press("Escape")
-            page.wait_for_timeout(500)
-            btn = page.get_by_text("Export to CSV", exact=False).first
-            btn.scroll_into_view_if_needed()
-            try:
-                with page.expect_download(timeout=40000) as dl_info:
-                    btn.click(force=True)
-                download = dl_info.value
-                path = download.path()
-                with open(path, "r", errors="replace") as f:
-                    content = f.read()
-                print("export downloaded ok, length:", len(content))
-                print("first 2000 chars:")
-                print(content[:2000])
-            except Exception as e:
-                print("no download event within 40s:", e)
-                print("checking for a new tab/page instead...")
-                pages_now = page.context.pages
-                print(f"{len(pages_now)} open pages/tabs in context")
-                for p2 in pages_now:
-                    print("  page url:", p2.url)
-        except Exception as e:
-            print("export-to-csv failed:", e)
+        # Q3 (Eversource Export to CSV) was tried twice: the button is real and
+        # clickable, but it fires neither a download event nor a new tab within
+        # 40s -- inconclusive, and moot now that Q1 gives ProjectId directly.
+        # Not worth further investigation time.
 
         browser.close()
     return 0
