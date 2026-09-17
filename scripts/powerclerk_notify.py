@@ -89,7 +89,8 @@ def update_install(record_id, fields, token):
     }
     r = requests.put(f"{API_DOMAIN}/crm/v7/Installs", headers=zoho_headers(token),
                       json=body, timeout=30)
-    r.raise_for_status()
+    if r.status_code >= 400:
+        raise RuntimeError(f"HTTP {r.status_code} | {r.text[:300]}")
     result = r.json().get("data", [{}])[0]
     if result.get("status") != "success":
         raise RuntimeError(f"Zoho rejected update: {result}")
