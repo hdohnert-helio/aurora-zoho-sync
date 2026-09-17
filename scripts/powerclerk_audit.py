@@ -19,20 +19,22 @@ PROGRAMS = [
 ]
 
 # header-name -> normalised field. lowercased substring match.
-FIELD_HINTS = {
-    "project #":            "project_no",
-    "current status":       "status",
-    "status timestamp":     "status_at",
-    "timestamp":            "status_at",
-    "customer name":        "name",
-    "address last":         "name_last",
-    "address first":        "name_first",
-    "street address":       "street",
-    "address line 1":       "street",
-    "city":                 "city",
-    "assignee":             "assignee",
-    "queue position":       "queue",
-}
+FIELD_HINTS = [
+    ("project #",            "project_no"),
+    ("current status timestamp", "status_at"),
+    ("status timestamp",     "status_at"),
+    ("timestamp",            "status_at"),
+    ("current status",       "status"),
+    ("queue position",       "queue"),
+    ("assignee",             "assignee"),
+    ("customer name",        "name"),
+    ("address last",         "name_last"),
+    ("address first",        "name_first"),
+    ("street address",       "street"),
+    ("address line 1",       "street"),
+    ("address city",         "city"),
+    ("city",                 "city"),
+]
 
 
 def grab_rows(page):
@@ -53,7 +55,7 @@ def normalise(headers, row):
     out = {}
     for i, h in enumerate(headers):
         hl = h.lower()
-        for hint, field in FIELD_HINTS.items():
+        for hint, field in FIELD_HINTS:
             if hint in hl and i < len(row):
                 if field not in out or not out[field]:
                     out[field] = row[i]
@@ -83,41 +85,54 @@ def collect(page, label, host, pid):
     total = int(m.group(1).replace(",", "")) if m else 0
     print(f"  {label}: {total} projects reported")
 
-    # Try to raise the page size so we page less.
+    # Diagnose the pager once so we know what we are dealing with.
     try:
-        for sel in page.locator("select").all():
-            opts = [o.strip() for o in sel.inner_text().split("\n") if o.strip()]
-            if any(o in ("10", "15", "25") for o in opts):
-                biggest = max((int(o) for o in opts if o.isdigit()), default=0)
-                if biggest:
-                    sel.select_option(str(biggest))
-                    page.wait_for_timeout(2500)
-                    print(f"  page size set to {biggest}")
-                break
+        pager = page.evaluate("""() => {
+          const el = [...document.querySelectorAll('*')].find(
+            e => /Items per page/i.test(e.textContent||'') && e.children.length < 12);
+          return el ? el.innerText.replace(/\\s+/g,' ').slice(0,200) : 'no pager text';
+        }""")
+        print(f"  pager: {pager}")
     except Exception as e:
-        print(f"  (page-size step skipped: {e})")
+        print(f"  pager probe failed: {e}")
+
+    # Prefer raising the page size; fall back to clicking Next.
+    for opt in ("500", "250", "100", "50", "25"):
+        try:
+            sel = page.locator("select").filter(has_text=re.compile(r"\b(10|15|25)\b")).first
+            if sel.count():
+                sel.select_option(opt); page.wait_for_timeout(3000)
+                print(f"  page size -> {opt}"); break
+        except Exception:
+            continue
 
     seen, out, guard = set(), [], 0
-    while guard < 80:
+    while guard < 60:
         guard += 1
         data = grab_rows(page)
         headers, rows = data["headers"], data["rows"]
         new = 0
         for r in rows:
             rec = normalise(headers, r)
-            key = rec["project_no"] or f"{rec['name']}|{rec['street']}"
+            key = rec["project_no"]
             if key and key not in seen:
                 seen.add(key); out.append(rec); new += 1
+        print(f"  page {guard}: +{new} (total {len(out)}/{total})")
         if len(out) >= total or new == 0:
             break
-        nxt = page.locator("a,button").filter(has_text=re.compile(r"^\s*Next\s*$", re.I)).first
-        if not nxt.count() or not nxt.is_enabled():
+        clicked = False
+        for nsel in ["a[aria-label*='Next' i]", "button[aria-label*='Next' i]",
+                     "a[title*='Next' i]", "li.next a", "a.next", "text=Next"]:
+            try:
+                el = page.locator(nsel).last
+                if el.count() and el.is_visible() and el.is_enabled():
+                    el.click(); clicked = True; break
+            except Exception:
+                continue
+        if not clicked:
+            print("  no Next control found — stopping")
             break
-        try:
-            nxt.click()
-        except Exception:
-            break
-        page.wait_for_timeout(2500)
+        page.wait_for_timeout(3000)
 
     print(f"  {label}: collected {len(out)} rows")
     return out
