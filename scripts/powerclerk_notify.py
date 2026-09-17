@@ -71,16 +71,30 @@ def zoho_headers(token):
 
 
 def pto_field_available(token):
-    """Probe for IC_PTO_Alert_Sent -- Zoho rejects the WHOLE request for an
-    unknown field name, so this can't just be included optimistically in the
-    main fetch below."""
-    r = requests.get(
-        f"{API_DOMAIN}/crm/v7/Installs",
-        headers=zoho_headers(token),
-        params={"fields": f"id,{PTO_ALERT_FIELD}", "per_page": 1},
-        timeout=30,
-    )
-    return r.status_code == 200
+    """Whether IC_PTO_Alert_Sent actually exists in Zoho.
+
+    Verified empirically (2026-09-17) that neither a GET with an unknown name
+    in `fields=` nor a PUT naming an unknown field in `data` errors -- Zoho
+    returns HTTP 200 / status "success" either way and just silently drops
+    the unrecognized key (a PUT to a real record ID still legitimately
+    updates Modified_Time, so it isn't even a no-op). So the only reliable
+    test found is: fetch one real record directly by ID with no `fields`
+    param (which returns every REAL field, nulls included) and check whether
+    the key is present at all.
+    """
+    r = requests.get(f"{API_DOMAIN}/crm/v7/Installs", headers=zoho_headers(token),
+                      params={"fields": "id", "per_page": 1}, timeout=30)
+    if r.status_code != 200:
+        return False
+    data = r.json().get("data", [])
+    if not data:
+        return False
+    rr = requests.get(f"{API_DOMAIN}/crm/v7/Installs/{data[0]['id']}",
+                       headers=zoho_headers(token), timeout=30)
+    if rr.status_code != 200:
+        return False
+    rec = rr.json().get("data", [{}])[0]
+    return PTO_ALERT_FIELD in rec
 
 
 def fetch_active_installs(token, include_pto_alert=False):

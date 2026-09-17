@@ -314,10 +314,10 @@ reverse, so there's no "re-block" case to reset for.
   non-empty `Utility_PTO` -- it may have been entered by hand (David).
 - The 9am notifier announces where `Utility_PTO` is set AND `IC_PTO_Alert_Sent`
   is null, stamping it only after a confirmed send, same rule as `IC_Alert_Sent`.
-- **This field does not exist in Zoho yet.** `powerclerk_notify.py` probes for
-  it at startup (a cheap 1-record read) and disables PTO announcements for
-  the run if it's missing, logging a note -- the blocker digest is
-  unaffected either way, so this was safe to ship before the field exists.
+- **This field does not exist in Zoho yet** -- confirmed empirically, not
+  assumed (see the gotcha below). `powerclerk_notify.py` detects that at
+  startup and disables PTO announcements for the run, logging a note -- the
+  blocker digest is unaffected either way.
 - **Before relying on live PTO announcements:** create `IC_PTO_Alert_Sent`
   (datetime) on Installs, then run `powerclerk_notify.py
   --backfill-pto-alert-sent` once. Several installs already have (or will
@@ -326,6 +326,29 @@ reverse, so there's no "re-block" case to reset for.
   the first time the notifier runs with the field present.
 - First install expected to get `Utility_PTO` set by this logic: Mohammed
   Alamgir | 28 (`INT-119959`), which reached `Level 1 - Online` on 2026-09-17.
+
+### Zoho gotcha: an unknown field name does NOT error, on read OR write
+
+Verified 2026-09-17 while building the above, the hard way: a GET's `fields=`
+naming a field that doesn't exist returns **HTTP 200**, silently omitting it
+-- it does not 400 the way a genuinely malformed request does (contradicting
+what earlier smoke-test comments assumed, which had just never actually been
+tested against a truly nonexistent name). Worse: a **PUT** naming an unknown
+field in `data` also returns **HTTP 200, `"status":"success"`, `"message":
+"record updated"`** -- because the record ID itself is valid, Zoho legitimately
+updates `Modified_Time` and reports success, while silently dropping the one
+key it didn't recognize. `powerclerk_notify.py`'s first version probed with a
+scoped `fields=id,IC_PTO_Alert_Sent` GET, got HTTP 200, concluded the field
+existed, and "backfilled" 12 records that reported `"success"` -- all silently
+no-ops. Caught before the notify cron's first real firing only because a
+direct-by-ID GET (no `fields` param, which returns every real field including
+nulls) showed the key was never actually present.
+
+**The only reliable existence check found:** fetch one real record directly
+by ID with no `fields` param, and check whether the field name is a literal
+key in the response dict. Never infer existence from a 200 on either a
+scoped GET or a PUT -- both succeed unconditionally regardless of whether
+the field is real.
 
 ### Message rules
 
