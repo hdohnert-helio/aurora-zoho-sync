@@ -1,4 +1,5 @@
 from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
+from pydantic import BaseModel
 from urllib.parse import quote
 import os
 import re
