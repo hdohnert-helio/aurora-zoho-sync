@@ -5787,7 +5787,7 @@ def _read_payment_overrides(svc) -> dict:
             entry["holdback_date"] = valid_date(row[16])
         if len(row) > 17 and parse_amt(row[17]) is not None:
             entry["holdback_amt"] = parse_amt(row[17])
-        if len(row) > 18 and str(row[18]).strip():
+        if len(row) > 18 and str(row[18]).strip().upper() == "TRUE":
             entry["ct_green_paid"] = True
         if len(row) > 19 and valid_date(row[19]):
             entry["ct_green_date"] = valid_date(row[19])
