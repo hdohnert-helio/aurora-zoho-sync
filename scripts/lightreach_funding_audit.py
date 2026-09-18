@@ -263,26 +263,40 @@ def ledger_row_to_transaction(account_id, project_name, vals):
 
 # ── Per-account scrape ───────────────────────────────────────────────────────
 
-def scrape_account(page, account_id, debug=False):
+def scrape_account(page, account_id, debug=False, retries=2):
+    """Retries a timed-out render before giving up. The first full run
+    (2026-09-18, 136 accounts) skipped 29 with a suspiciously regular
+    ~4-5-account spacing -- more consistent with transient rate-limiting or
+    a flaky response than genuine per-account slowness, so a retry is worth
+    it before logging a real skip."""
     url = f"{FUNDING_HOST}/accounts/{account_id}/funding"
-    page.goto(url, wait_until="domcontentloaded", timeout=60000)
-    page.wait_for_function(
-        "() => document.body.innerText.includes('PAYMENT PLAN')",
-        timeout=PAYMENT_PLAN_TIMEOUT_MS,
-    )
-    text = page.inner_text("body")
-    if debug:
-        print(f"  DEBUG raw page text for {account_id} (first 4000 chars):")
-        print(text[:4000])
-    lines = [l.strip() for l in text.split("\n") if l.strip()]
-    fields = parse_funding_fields(lines)
-    fields["funding_url"] = url
-    ledger_rows = extract_ledger(page)
-    if debug:
-        print(f"  DEBUG ledger rows for {account_id}: {len(ledger_rows)}")
-        for row in ledger_rows[:3]:
-            print("   ", row)
-    return fields, ledger_rows
+    last_err = None
+    for attempt in range(1, retries + 1):
+        try:
+            page.goto(url, wait_until="domcontentloaded", timeout=60000)
+            page.wait_for_function(
+                "() => document.body.innerText.includes('PAYMENT PLAN')",
+                timeout=PAYMENT_PLAN_TIMEOUT_MS,
+            )
+            text = page.inner_text("body")
+            if debug:
+                print(f"  DEBUG raw page text for {account_id} (first 4000 chars):")
+                print(text[:4000])
+            lines = [l.strip() for l in text.split("\n") if l.strip()]
+            fields = parse_funding_fields(lines)
+            fields["funding_url"] = url
+            ledger_rows = extract_ledger(page)
+            if debug:
+                print(f"  DEBUG ledger rows for {account_id}: {len(ledger_rows)}")
+                for row in ledger_rows[:3]:
+                    print("   ", row)
+            return fields, ledger_rows
+        except PlaywrightTimeout as e:
+            last_err = e
+            if attempt < retries:
+                print(f"  ({account_id}: attempt {attempt}/{retries} timed out, retrying)")
+                page.wait_for_timeout(3000)
+    raise last_err
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
@@ -291,9 +305,16 @@ def main():
     if not LR_USER or not LR_PASS:
         print("FAIL: LR_USER / LR_PASS not set"); return 1
 
+    only = os.environ.get("LR_ONLY", "").strip()  # debug: comma-separated account IDs
+
     token = get_zoho_token()
     installs = fetch_lr_installs(token)
     print(f"{len(installs)} Installs with a LightReach_Account_ID (expected ~136)")
+
+    if only:
+        wanted = {a.strip() for a in only.split(",") if a.strip()}
+        installs = [i for i in installs if i["LightReach_Account_ID"] in wanted]
+        print(f"LR_ONLY set -- restricting to {len(installs)} account(s): {wanted}")
 
     project_rows = []
     transaction_rows = []

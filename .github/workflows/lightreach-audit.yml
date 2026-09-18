@@ -2,6 +2,11 @@ name: LightReach funding audit
 
 on:
   workflow_dispatch:
+    inputs:
+      only:
+        description: 'Debug: comma-separated LightReach_Account_ID(s) to restrict to. Leave blank for all.'
+        type: string
+        default: ''
 
 jobs:
   audit:
@@ -30,6 +35,8 @@ jobs:
 
       - name: Run funding audit
         timeout-minutes: 45
+        env:
+          LR_ONLY: ${{ inputs.only }}
         run: python -u scripts/lightreach_funding_audit.py
 
       - name: Upload CSVs
