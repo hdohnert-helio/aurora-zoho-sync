@@ -1264,3 +1264,91 @@ Final subcontractor allowlist (four patterns, no exceptions):
 - `A. EQUIP: Critter Guard`
 
 Everything else internal by default; unknown names flagged, never absorbed.
+
+## Money-out reconciliation: bills vs. the cashflow forecast (2026-09-18)
+
+Mirrors the money-in problem above (LightReach batch matching, QB invoice
+matching for cash deals), but for the other side of the ledger: did the bills
+the cashflow file said were coming due actually get paid?
+
+### The shape of it
+
+`cashflow.py`'s Pipeline tab already generates expected outflows with dates --
+commissions, subcontractor payments, CT Green Estates, materials. Same
+plumbing as the deposit-matching work (SimpleFIN pull over a window, propose
+matches against a known list), applied to debits instead of credits:
+
+For each expected outflow whose date has passed, look for a matching Chase
+debit by amount and rough date. Three outcomes:
+
+1. **Matched** -- confirmed paid, close it out.
+2. **No match** -- either it hasn't gone out yet, it was forecast wrong, or
+   someone forgot. Needs a human look, not a silent assumption either way.
+3. **Chase debit with no forecast match at all** -- an outflow the cashflow
+   file never knew about. This is the one worth watching: it catches a
+   surprise expense before it becomes a cash problem instead of after.
+
+### Sequencing
+
+This is a natural next build on the same SimpleFIN plumbing, but sits behind
+the money-in work already queued above:
+
+1. Subcontractor cost classification fixes (three defects, 2026-09-18 section
+   above) -- the Pipeline tab's outflow amounts depend on this being correct.
+2. Palmetto ledger completeness fix (scrape from Palmetto's Accounts list, not
+   Zoho's `LightReach_Account_ID`) -- needed so the money-in side of the
+   ledger is verified end to end before adding a money-out reconciliation on
+   top of it.
+3. Only then: build the bills-vs-outflows matcher described above.
+
+### Caveat
+
+Same as the available-cash caveat: this produces an operational match/flag
+list, not an accounting determination. A debit with no forecast match is a
+flag for Harry to explain, not evidence on its own that something was missed.
+
+## Palmetto Accounts list: the real backing API (found 2026-09-18)
+
+The "Accounts" nav item is a Kanban-style board over a JSON API, not a plain
+HTML table -- found by capturing network traffic during page load:
+
+```
+GET https://palmetto.finance/api/accounts/summary
+  ?currentMilestone=undefined&pageNum=<n>&advancedFilters=%5B%5D
+  &searchTerm=undefined&includeCompletedAccounts=<bool>
+  &onlyCancelledAccounts=false&onlyPostActivationAccounts=false&sort=NEWEST
+```
+
+Auth is via the browser session cookie set at login -- `page.request.get(url)`
+inside the same Playwright context works directly, no token wrangling needed.
+
+Response shape: `{total, pageNum, data: {accounts: [...], milestoneSummary}}`.
+20 accounts per page. `accounts[].currentMilestone.type` is one of
+`initialAccountDetails` (Qualification), `noticeToProceed`, `install`,
+`activation`.
+
+**`includeCompletedAccounts=false` (the default the UI's own nav uses) hides
+every completed/funded account.** Confirmed by toggling it: total went from
+1286 to 1373, and the entire +87 delta landed in the `activation` milestone
+count (3 -> 90). A completed account never leaves the `activation` milestone
+type -- it just carries a different `status` on it. So the full historical
+LightReach book only surfaces with this flag set to `true`; the visible nav
+counts (Qualification 1 / Notice to Proceed 1265 / Install 17 / Activation 3)
+are the in-progress-only default view, not the whole universe.
+
+**1265 of 1286 default-view accounts sit at Notice to Proceed.** Harry
+confirmed these are mostly pre-contract leads, not funded projects -- nothing
+to scrape on a /funding page. Only `install` and `activation` milestone
+accounts are worth scraping (`FUNDED_MILESTONE_TYPES` in
+`lightreach_funding_audit.py`).
+
+**`externalReference` on an account is NOT the Aurora Project ID** -- checked
+directly against a known Zoho record (Abdul Mabud: externalReference
+`5f30be1b-...` vs Aurora_Project_ID `19c7d101-...`, different UUIDs). Some
+other system's reference, unconfirmed what. Don't use it as a join key.
+
+**The Zoho join is address-based**, reusing `normalize_street`/
+`normalize_city`/`split_site_location` from `powerclerk_sync.py` (the same
+messy-free-text-address problem PowerClerk matching already solved) --
+`LightReach_Account_ID` exact match first, address fallback second, marked
+unmatched (not dropped) otherwise.

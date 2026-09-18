@@ -1,10 +1,27 @@
 """LightReach (palmetto.finance) funding-page audit -- read-only.
 
-Queries Zoho for every Install with a LightReach_Account_ID, logs into
-palmetto.finance once via Auth0, and scrapes each account's /funding page
-for the payment plan, holdback, pricing-setting and transaction-ledger data
-that exists nowhere else (not in webhooks, not in Zoho). See CLAUDE.md's
-"LightReach Funding page" section.
+Enumerates accounts from PALMETTO'S OWN Accounts list (via its
+/api/accounts/summary JSON API, discovered 2026-09-18 -- see CLAUDE.md's
+"Chase via SimpleFIN + Palmetto deposit matching" section), not from Zoho's
+LightReach_Account_ID. The old Zoho-driven enumeration missed any LightReach
+project not linked in the CRM, which was the root cause of 6 unmatched
+Chase deposit batches (every gap was positive -- money LightReach paid on a
+project this scrape never knew to look for).
+
+Zoho stays in the picture as an ANNOTATION: each Palmetto account is joined
+back to a Zoho Install by LightReach_Account_ID first, then by normalized
+address, and marked unmatched (not dropped) when neither works.
+
+Filters to accounts whose currentMilestone is Install or Activation --
+Qualification/Notice to Proceed accounts are pre-contract leads (confirmed
+by Harry 2026-09-18) with nothing to scrape on a /funding page. Completed/
+funded accounts stay tagged currentMilestone=activation (just with a
+different status), so passing includeCompletedAccounts=true on the summary
+call is what actually surfaces them -- the default view hides them.
+
+Then scrapes each qualifying account's /funding page for the payment plan,
+holdback, pricing-setting and transaction-ledger data that exists nowhere
+else (not in webhooks, not in Zoho).
 
 Writes nothing to Zoho or to LightReach. Two CSVs land in artifacts/:
   lr_funding_projects.csv     -- one row per project
@@ -23,6 +40,9 @@ import sys
 import requests
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from powerclerk_sync import normalize_street, normalize_city, split_site_location  # noqa: E402
+
 ART = pathlib.Path("artifacts")
 ART.mkdir(exist_ok=True)
 
@@ -35,8 +55,15 @@ TOKEN_URL = "https://accounts.zoho.com/oauth/v2/token"
 FUNDING_HOST = "https://palmetto.finance"
 PAYMENT_PLAN_TIMEOUT_MS = 45000  # confirmed >10s on at least one account; be generous
 
+# Milestone types worth scraping -- Qualification/Notice to Proceed accounts
+# are pre-contract leads with no funding activity (Harry, 2026-09-18).
+FUNDED_MILESTONE_TYPES = {"install", "activation"}
+
 PROJECT_COLUMNS = [
-    "zoho_id", "Name", "LightReach_Account_ID", "Contract_Total", "System_kW_DC",
+    "palmetto_account_id", "primary_applicant_name", "address1", "city", "state",
+    "current_milestone_type", "current_milestone_status",
+    "zoho_matched", "zoho_match_method", "zoho_id", "Name",
+    "LightReach_Account_ID", "Contract_Total", "System_kW_DC",
     "Battery_kWh", "Module_Model", "Inverter_Model", "Inverters", "Equipment_Invoice_Total",
     "Project_Stage",
     "total_project_value", "install_approved_amount", "install_approved_pct",
@@ -100,6 +127,103 @@ def fetch_lr_installs(token):
         page += 1
     # Defensive client-side filter -- never trust the criteria alone.
     return [r for r in results if (r.get("LightReach_Account_ID") or "").strip()]
+
+
+def fetch_all_zoho_installs(token):
+    """Every Install, any stage, with just the fields needed to join a Palmetto
+    account back to Zoho -- by LightReach_Account_ID first, by address as a
+    fallback. No stage filter: an already-cancelled or closed-out install can
+    still carry a LightReach_Account_ID/address worth matching against."""
+    fields = "id,Name,Site_Location,LightReach_Account_ID"
+    results, page = [], 1
+    while True:
+        r = requests.get(
+            f"{API_DOMAIN}/crm/v7/Installs/search",
+            headers=zoho_headers(token),
+            params={"criteria": "(id:not_equal:null)", "fields": fields, "page": page, "per_page": 200},
+            timeout=30,
+        )
+        if r.status_code == 204:
+            break
+        if r.status_code >= 400:
+            raise RuntimeError(f"Zoho search failed: HTTP {r.status_code} | {r.text[:300]}")
+        body = r.json()
+        results.extend(body.get("data", []))
+        if not body.get("info", {}).get("more_records"):
+            break
+        page += 1
+    return results
+
+
+def build_zoho_join_indexes(installs, known_cities):
+    """Returns (by_lr_id, by_address) lookup dicts for matching a Palmetto
+    account back to one of these Zoho Installs."""
+    by_lr_id = {}
+    by_address = {}
+    for inst in installs:
+        lr_id = (inst.get("LightReach_Account_ID") or "").strip()
+        if lr_id:
+            by_lr_id[lr_id] = inst
+        street, city, _state = split_site_location(inst.get("Site_Location") or "", known_cities)
+        key = (normalize_street(street), normalize_city(city))
+        if key[0] and key[1]:
+            by_address.setdefault(key, []).append(inst)
+    return by_lr_id, by_address
+
+
+def match_palmetto_account(account, by_lr_id, by_address):
+    """Returns (zoho_install_or_None, method_str)."""
+    acc_id = account.get("id")
+    if acc_id in by_lr_id:
+        return by_lr_id[acc_id], "lightreach_account_id"
+    addr = account.get("address") or {}
+    key = (normalize_street(addr.get("address1") or ""), normalize_city(addr.get("city") or ""))
+    if key[0] and key[1] and key in by_address:
+        candidates = by_address[key]
+        return candidates[0], "address" if len(candidates) == 1 else "address (ambiguous, multiple Zoho matches)"
+    return None, "none"
+
+
+# ── Palmetto Accounts list ───────────────────────────────────────────────────
+
+def fetch_palmetto_accounts(page, milestone_types=FUNDED_MILESTONE_TYPES, page_size=20):
+    """Pages through /api/accounts/summary (the real backing API for the
+    Accounts nav, found via network capture 2026-09-18) with
+    includeCompletedAccounts=true -- the default view hides completed/funded
+    accounts entirely (confirmed: Activation count went from 3 to 90 once
+    this flag was set, and 90 + 17 Install = the bulk of the historically
+    LightReach-funded book). Filters client-side to milestone_types since the
+    API's own currentMilestone param wasn't confirmed to accept a specific
+    value server-side.
+
+    Returns the full raw account list (all milestones) plus the filtered
+    (funded-only) subset, so the caller can report Palmetto's total account
+    count as context even though only the funded subset gets scraped.
+    """
+    all_accounts = []
+    page_num = 1
+    total = None
+    while True:
+        url = (
+            f"{FUNDING_HOST}/api/accounts/summary?currentMilestone=undefined&pageNum={page_num}"
+            "&advancedFilters=%5B%5D&searchTerm=undefined&includeCompletedAccounts=true"
+            "&onlyCancelledAccounts=false&onlyPostActivationAccounts=false&sort=NEWEST"
+        )
+        resp = page.request.get(url, timeout=30000)
+        if not resp.ok:
+            raise RuntimeError(f"/api/accounts/summary page {page_num} failed: HTTP {resp.status}")
+        body = resp.json()
+        if total is None:
+            total = body.get("total", 0)
+        batch = (body.get("data") or {}).get("accounts") or []
+        if not batch:
+            break
+        all_accounts.extend(batch)
+        if len(all_accounts) >= total:
+            break
+        page_num += 1
+    funded = [a for a in all_accounts if (a.get("currentMilestone") or {}).get("type") in milestone_types]
+    return all_accounts, funded
 
 
 # ── Auth0 login ──────────────────────────────────────────────────────────────
@@ -592,16 +716,13 @@ def main():
                 browser.close()
         return 0
 
-    only = os.environ.get("LR_ONLY", "").strip()  # debug: comma-separated account IDs
+    only = os.environ.get("LR_ONLY", "").strip()  # debug: comma-separated Palmetto account IDs
 
     token = get_zoho_token()
-    installs = fetch_lr_installs(token)
-    print(f"{len(installs)} Installs with a LightReach_Account_ID (expected ~136)")
-
-    if only:
-        wanted = {a.strip() for a in only.split(",") if a.strip()}
-        installs = [i for i in installs if i["LightReach_Account_ID"] in wanted]
-        print(f"LR_ONLY set -- restricting to {len(installs)} account(s): {wanted}")
+    zoho_installs = fetch_all_zoho_installs(token)
+    zoho_lr_linked = [i for i in zoho_installs if (i.get("LightReach_Account_ID") or "").strip()]
+    print(f"{len(zoho_installs)} total Zoho Installs, {len(zoho_lr_linked)} with a "
+          f"LightReach_Account_ID (the old enumeration source, expected ~136)")
 
     project_rows = []
     transaction_rows = []
@@ -619,11 +740,47 @@ def main():
             return 1
         print("logged in")
 
-        for idx, inst in enumerate(installs):
-            account_id = inst["LightReach_Account_ID"]
-            name = inst.get("Name", inst["id"])
-            row = {c: inst.get(c) for c in PROJECT_COLUMNS if c in inst}
-            row["zoho_id"] = inst["id"]
+        all_accounts, funded_accounts = fetch_palmetto_accounts(page)
+        print(f"Palmetto: {len(all_accounts)} total accounts, "
+              f"{len(funded_accounts)} at Install/Activation milestone (the funded subset)")
+
+        # known_cities for split_site_location's no-comma fallback comes from
+        # Palmetto's own (clean, separate) city field -- not from Zoho's messy
+        # free-text Site_Location, which is the very thing being split.
+        known_cities = {(a.get("address") or {}).get("city", "").strip()
+                         for a in funded_accounts if (a.get("address") or {}).get("city")}
+        by_lr_id, by_address = build_zoho_join_indexes(zoho_installs, known_cities)
+
+        if only:
+            wanted = {a.strip() for a in only.split(",") if a.strip()}
+            funded_accounts = [a for a in funded_accounts if a.get("id") in wanted]
+            print(f"LR_ONLY set -- restricting to {len(funded_accounts)} account(s): {wanted}")
+
+        unmatched = []
+        for idx, account in enumerate(funded_accounts):
+            account_id = account.get("id")
+            addr = account.get("address") or {}
+            name = account.get("primaryApplicantName") or account_id
+            zoho_install, method = match_palmetto_account(account, by_lr_id, by_address)
+
+            row = {c: None for c in PROJECT_COLUMNS}
+            row.update({
+                "palmetto_account_id": account_id,
+                "primary_applicant_name": name,
+                "address1": addr.get("address1"),
+                "city": addr.get("city"),
+                "state": addr.get("state"),
+                "current_milestone_type": (account.get("currentMilestone") or {}).get("type"),
+                "current_milestone_status": (account.get("currentMilestone") or {}).get("status"),
+                "zoho_matched": bool(zoho_install),
+                "zoho_match_method": method,
+            })
+            if zoho_install:
+                row["zoho_id"] = zoho_install.get("id")
+                row["Name"] = zoho_install.get("Name")
+                row["LightReach_Account_ID"] = zoho_install.get("LightReach_Account_ID")
+            else:
+                unmatched.append(account)
 
             try:
                 fields, ledger_rows = scrape_account(page, account_id, debug=(idx == 0))
@@ -632,17 +789,17 @@ def main():
                 ok += 1
                 for vals in ledger_rows:
                     transaction_rows.append(ledger_row_to_transaction(account_id, name, vals))
-                print(f"  [{idx + 1}/{len(installs)}] OK {name} ({account_id}): "
-                      f"{len(ledger_rows)} ledger rows")
+                print(f"  [{idx + 1}/{len(funded_accounts)}] OK {name} ({account_id}) "
+                      f"[zoho: {method}]: {len(ledger_rows)} ledger rows")
             except PlaywrightTimeout:
                 row["scrape_status"] = "skipped: funding panel never rendered"
                 skipped += 1
-                print(f"  [{idx + 1}/{len(installs)}] SKIP {name} ({account_id}): "
+                print(f"  [{idx + 1}/{len(funded_accounts)}] SKIP {name} ({account_id}): "
                       f"PAYMENT PLAN never appeared within {PAYMENT_PLAN_TIMEOUT_MS}ms")
             except Exception as e:
                 row["scrape_status"] = f"error: {e}"
                 failed += 1
-                print(f"  [{idx + 1}/{len(installs)}] FAIL {name} ({account_id}): {e}")
+                print(f"  [{idx + 1}/{len(funded_accounts)}] FAIL {name} ({account_id}): {e}")
 
             project_rows.append(row)
 
@@ -660,6 +817,15 @@ def main():
 
     print(f"\ndone: {ok} ok, {skipped} skipped, {failed} failed "
           f"({len(transaction_rows)} total ledger rows)")
+    print(f"\nPalmetto funded accounts: {len(funded_accounts)} vs {len(zoho_lr_linked)} "
+          f"Zoho knew about via LightReach_Account_ID")
+    print(f"Unmatched (no Zoho Install found -- LightReach-funded but not linked/found in CRM): "
+          f"{len(unmatched)}")
+    for a in unmatched:
+        addr = a.get("address") or {}
+        print(f"  {a.get('id')}  {a.get('primaryApplicantName')}  "
+              f"{addr.get('address1')}, {addr.get('city')} {addr.get('state')}  "
+              f"milestone={(a.get('currentMilestone') or {}).get('type')}")
     return 0
 
 
