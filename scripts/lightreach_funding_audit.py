@@ -209,7 +209,18 @@ def fetch_palmetto_accounts(page, milestone_types=FUNDED_MILESTONE_TYPES, page_s
             "&advancedFilters=%5B%5D&searchTerm=undefined&includeCompletedAccounts=true"
             "&onlyCancelledAccounts=false&onlyPostActivationAccounts=false&sort=NEWEST"
         )
-        resp = page.request.get(url, timeout=30000)
+        # ~69 pages at 20/page hit HTTP 429 around page 30 on the first real
+        # run (2026-09-18) -- back off and retry a few times before giving up,
+        # same shape as scrape_account's retry for a timed-out render.
+        resp = None
+        for attempt in range(1, 6):
+            resp = page.request.get(url, timeout=30000)
+            if resp.status != 429:
+                break
+            wait_s = 5 * attempt
+            print(f"  /api/accounts/summary page {page_num}: HTTP 429, "
+                  f"backing off {wait_s}s (attempt {attempt}/5)")
+            page.wait_for_timeout(wait_s * 1000)
         if not resp.ok:
             raise RuntimeError(f"/api/accounts/summary page {page_num} failed: HTTP {resp.status}")
         body = resp.json()
@@ -222,6 +233,7 @@ def fetch_palmetto_accounts(page, milestone_types=FUNDED_MILESTONE_TYPES, page_s
         if len(all_accounts) >= total:
             break
         page_num += 1
+        page.wait_for_timeout(400)  # small gap between pages -- avoid tripping the rate limit at all
     funded = [a for a in all_accounts if (a.get("currentMilestone") or {}).get("type") in milestone_types]
     return all_accounts, funded
 
