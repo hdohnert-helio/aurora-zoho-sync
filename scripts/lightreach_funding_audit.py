@@ -445,6 +445,78 @@ def discover_accounts_nav(page, user, password):
     except Exception as e:
         print(f"  /api/accounts/filters failed: {e}")
 
+    # Full milestoneSummary.milestones list (not just the first item) --
+    # need every currentMilestone value that exists, not a sample of one.
+    try:
+        resp = page.request.get(
+            "https://palmetto.finance/api/accounts/summary?currentMilestone=undefined&pageNum=1"
+            "&advancedFilters=%5B%5D&searchTerm=undefined&includeCompletedAccounts=true"
+            "&onlyCancelledAccounts=false&onlyPostActivationAccounts=false&sort=NEWEST",
+            timeout=15000,
+        )
+        if resp.ok:
+            ms = resp.json().get("data", {}).get("milestoneSummary", {}).get("milestones", [])
+            print(f"\n  full milestoneSummary.milestones ({len(ms)} entries): {_json.dumps(ms, default=str)}")
+    except Exception as e:
+        print(f"  milestoneSummary fetch failed: {e}")
+
+    # Sample a deep page (older accounts under sort=NEWEST) to see what a
+    # long-completed account's currentMilestone/status looks like.
+    try:
+        resp = page.request.get(
+            "https://palmetto.finance/api/accounts/summary?currentMilestone=undefined&pageNum=65"
+            "&advancedFilters=%5B%5D&searchTerm=undefined&includeCompletedAccounts=true"
+            "&onlyCancelledAccounts=false&onlyPostActivationAccounts=false&sort=NEWEST",
+            timeout=15000,
+        )
+        if resp.ok:
+            accts = resp.json().get("data", {}).get("accounts", [])
+            print(f"\n  deep page (pageNum=65) sample -- {len(accts)} accounts:")
+            for a in accts[:20]:
+                print(f"    id={a.get('id')} currentMilestone={a.get('currentMilestone')} "
+                      f"status={a.get('status')} name={a.get('primaryApplicantName')} "
+                      f"ref={a.get('externalReference')}")
+    except Exception as e:
+        print(f"  deep page fetch failed: {e}")
+
+    # Verify the externalReference hypothesis: is it the Aurora Project ID?
+    # Pull one real Zoho Install with both LightReach_Account_ID and
+    # Aurora_Project_ID set, fetch that exact Palmetto account, and compare.
+    try:
+        from urllib.parse import quote
+        zoho_token = get_zoho_token()
+        r = requests.get(
+            f"{API_DOMAIN}/crm/v7/Installs/search",
+            headers=zoho_headers(zoho_token),
+            params={
+                "criteria": "(LightReach_Account_ID:not_equal:null)",
+                "fields": "id,Name,LightReach_Account_ID,Aurora_Project_ID",
+                "per_page": 5,
+            },
+            timeout=30,
+        )
+        cand = None
+        if r.status_code == 200:
+            for rec in r.json().get("data", []):
+                if (rec.get("LightReach_Account_ID") or "").strip() and (rec.get("Aurora_Project_ID") or "").strip():
+                    cand = rec
+                    break
+        if cand:
+            acc_id = cand["LightReach_Account_ID"]
+            print(f"\n  cross-check candidate: {cand.get('Name')} "
+                  f"LightReach_Account_ID={acc_id} Aurora_Project_ID={cand.get('Aurora_Project_ID')}")
+            resp = page.request.get(f"https://palmetto.finance/api/accounts/{quote(acc_id)}", timeout=15000)
+            print(f"  GET /api/accounts/{acc_id}: HTTP {resp.status}")
+            if resp.ok:
+                body = resp.json()
+                print(f"    externalReference={body.get('externalReference')!r} "
+                      f"(compare to Aurora_Project_ID={cand.get('Aurora_Project_ID')!r})")
+                print(f"    full body keys: {list(body.keys())}")
+        else:
+            print("\n  no Zoho Install found with both LightReach_Account_ID and Aurora_Project_ID set")
+    except Exception as e:
+        print(f"  externalReference cross-check failed: {e}")
+
 
 def scrape_account(page, account_id, debug=False, retries=2):
     """Retries a timed-out render before giving up. The first full run
