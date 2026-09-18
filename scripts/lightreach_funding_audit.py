@@ -706,7 +706,7 @@ def main():
     if not LR_USER or not LR_PASS:
         print("FAIL: LR_USER / LR_PASS not set"); return 1
 
-    if os.environ.get("LR_DISCOVER_ACCOUNTS", "").strip():
+    if os.environ.get("LR_DISCOVER_ACCOUNTS", "").strip().lower() in ("1", "true", "yes"):
         with sync_playwright() as p:
             browser = p.chromium.launch()
             page = browser.new_context(viewport={"width": 1600, "height": 1200}).new_page()
