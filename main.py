@@ -3818,6 +3818,59 @@ def _fetch_all_commission_projects(cutoff_date: str = "2026-01-01") -> list[dict
     return results
 
 
+# ── Adder cost classification (2026-09-18) ──────────────────────────────────
+# Explicit name -> classification map. SUBCONTRACTOR is real cash out the
+# door to an outside vendor; INTERNAL is in-house crew labor with no separate
+# cash outflow. Anything not listed here is UNKNOWN and must be surfaced for
+# review -- never silently assumed either way. Confirmed with Harry 2026-09-18;
+# see CLAUDE.md "Subcontractor cost classification".
+_SUBCONTRACTOR_ADDER_NAMES = {
+    "d. misc: roof replacement (outside contractor)",
+    "d. misc: roof replacement (gaf roofing)",
+    "d. misc: roof replacement (owens corning preferred 50-yr warranty)",
+    "d. misc: tree removal / trimming",
+}
+_INTERNAL_ADDER_NAMES = {
+    "d. misc: custom electrical work needed",
+    "d. misc: roof replacement (internal hgc roofing)",
+    "d. misc: removal of existing pv system",
+    "b. labor: ground mount (>6kw)",
+    "b. labor: ev charger level 2",
+    "b. labor: high pitch",
+    "b. labor: high roof",
+    "b. labor: ballasted flat roof",
+    "b. labor: over 3 arrays",
+    "b. labor: small system upcharge",
+    "b. labor: relocate roof vent pipe",
+    "c. electrical: 200a main service",
+    "c. electrical: 125a main panel replacement",
+    "c. electrical: 200a main panel replacement",
+    "c. electrical: 200a span smart panel",
+    "c. electrical: lumin smart load management",
+}
+
+
+def classify_adder(name: str) -> str:
+    """Returns 'subcontractor', 'internal', or 'unknown'. Matching is exact
+    (case-insensitive) except for trenching, which is a substring match on
+    purpose -- CLAUDE.md lists 5 trenching variants with different pricing
+    suffixes ("$84 per Linear Foot", "Custom Priced by Helio", etc.) and
+    Harry confirmed EVERY B. LABOR: *Trenching* variant is a subcontractor
+    cost. Exact matching everywhere else is deliberate: a near-miss (a typo,
+    a new adder name) must fall through to 'unknown' and get reviewed, not
+    get silently misclassified."""
+    n = (name or "").strip().lower()
+    if not n:
+        return "unknown"
+    if n in _SUBCONTRACTOR_ADDER_NAMES:
+        return "subcontractor"
+    if n.startswith("b. labor:") and "trenching" in n:
+        return "subcontractor"
+    if n in _INTERNAL_ADDER_NAMES:
+        return "internal"
+    return "unknown"
+
+
 def _get_commission_data_for_project(aurora_project_id: str) -> dict:
     """
     Pull fresh pricing from Aurora for the sold design on a project.
@@ -3929,7 +3982,89 @@ def _get_commission_data_for_project(aurora_project_id: str) -> dict:
         "adder_name_list": adder_name_list,
         "subcontractor_total": subcontractor_total,
         "subcontractor_notes": " | ".join(subcontractor_notes) if subcontractor_notes else "",
+        "adder_details": adder_details,  # additive -- lets a caller reclassify without re-fetching Aurora
     }
+
+
+# TEMPORARY (2026-09-18): dry-run comparison of the current buggy classifier
+# (D. MISC:-only, deny-list) against the new explicit classify_adder() table,
+# per active Install. Read-only -- no Zoho or Aurora writes. Remove once the
+# real fix (replacing the classification in _get_commission_data_for_project)
+# is reviewed and deployed; this endpoint's whole purpose is to become
+# unnecessary the moment "old" and "new" are the same thing.
+@app.post("/internal/debug-subcontractor-audit")
+async def debug_subcontractor_audit():
+    try:
+        token = get_zoho_access_token()
+        if not token:
+            return {"status": "failed - no zoho token"}
+        api_domain = os.getenv("ZOHO_API_DOMAIN")
+        headers = {"Authorization": f"Zoho-oauthtoken {token}"}
+
+        criteria = "(Project_Stage:not_equal:Canceled)and(Project_Stage:not_equal:Project Closeout)"
+        fields = "id,Name,Aurora_Project_ID,Active_Snapshot,Project_Stage"
+        installs, page = [], 1
+        while True:
+            r = requests.get(
+                f"{api_domain}/crm/v7/Installs/search",
+                headers=headers,
+                params={"criteria": criteria, "fields": fields, "page": page, "per_page": 200},
+            )
+            if r.status_code == 204:
+                break
+            if r.status_code >= 400:
+                return {"status": f"failed - zoho search {r.status_code}", "body": r.text[:300]}
+            body = r.json()
+            installs.extend(body.get("data", []))
+            if not body.get("info", {}).get("more_records"):
+                break
+            page += 1
+
+        results = []
+        for inst in installs:
+            row = {
+                "name": inst.get("Name"),
+                "zoho_id": inst.get("id"),
+                "project_stage": inst.get("Project_Stage"),
+                "aurora_project_id": (inst.get("Aurora_Project_ID") or "").strip(),
+                "has_active_snapshot": bool(inst.get("Active_Snapshot")),
+            }
+            if not row["aurora_project_id"]:
+                row["note"] = "no Aurora_Project_ID"
+                results.append(row)
+                continue
+
+            data = _get_commission_data_for_project(row["aurora_project_id"])
+            if "error" in data:
+                row["error"] = data["error"]
+                results.append(row)
+                continue
+
+            old_total = float(data.get("subcontractor_total") or 0)
+            adder_details = data.get("adder_details") or []
+            new_total = 0.0
+            unknown_adders = []
+            for adder in adder_details:
+                aname = (adder.get("name") or "").strip()
+                atotal = float(adder.get("total") or 0)
+                if not aname or atotal <= 0 or aname == "A - Referral Payout":
+                    continue
+                cls = classify_adder(aname)
+                if cls == "subcontractor":
+                    new_total += atotal
+                elif cls == "unknown":
+                    unknown_adders.append(f"{aname} (${atotal:,.2f})")
+
+            row["old_subcontractor_total"] = round(old_total, 2)
+            row["new_subcontractor_total"] = round(new_total, 2)
+            row["delta"] = round(new_total - old_total, 2)
+            row["unknown_adders"] = unknown_adders
+            results.append(row)
+
+        return {"status": "ok", "count": len(results), "results": results}
+    except Exception:
+        logger.exception("Unhandled exception in debug_subcontractor_audit")
+        return {"status": "failed - exception"}
 
 
 def _write_commission_tab(svc, tab_name: str, rows: list[dict]) -> None:
