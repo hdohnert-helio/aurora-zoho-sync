@@ -278,6 +278,19 @@ def scrape_account(page, account_id, debug=False, retries=2):
                 "() => document.body.innerText.includes('PAYMENT PLAN')",
                 timeout=PAYMENT_PLAN_TIMEOUT_MS,
             )
+            # The PAYMENT PLAN panel and the transaction ledger table render on
+            # separate async timers -- confirmed on Hopley, where the panel
+            # appeared well before the ledger table did (0 rows extracted
+            # until this wait was added). A genuinely ledger-less account
+            # (no transactions yet) would never satisfy this, so give it its
+            # own bounded wait and proceed with an empty ledger rather than
+            # treating that as a full-account failure.
+            try:
+                page.wait_for_selector("table tbody tr", timeout=15000)
+            except PlaywrightTimeout:
+                if debug:
+                    print(f"  DEBUG {account_id}: no ledger table rows within 15s "
+                          f"(may be a genuinely empty ledger)")
             text = page.inner_text("body")
             if debug:
                 print(f"  DEBUG raw page text length for {account_id}: {len(text)} chars")
