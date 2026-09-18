@@ -3818,22 +3818,53 @@ def _fetch_all_commission_projects(cutoff_date: str = "2026-01-01") -> list[dict
     return results
 
 
-# ── Adder cost classification (2026-09-18) ──────────────────────────────────
+# ── Adder cost classification (2026-09-18, revised after the live dry-run) ──
 # Explicit name -> classification map. SUBCONTRACTOR is real cash out the
-# door to an outside vendor; INTERNAL is in-house crew labor with no separate
-# cash outflow. Anything not listed here is UNKNOWN and must be surfaced for
-# review -- never silently assumed either way. Confirmed with Harry 2026-09-18;
-# see CLAUDE.md "Subcontractor cost classification".
+# door to an outside vendor; INTERNAL is in-house crew labor / markup / a
+# cost tracked elsewhere, with no separate subcontractor cash outflow here.
+# Anything not listed here is UNKNOWN and must be surfaced for review --
+# never silently assumed either way. Confirmed with Harry 2026-09-18; see
+# CLAUDE.md "Subcontractor cost classification".
+#
+# The first version of this table used exact matches for everything except
+# trenching. A live dry-run against all 49 active Installs (2026-09-18)
+# showed that was too narrow: most B. LABOR: / C. ELECTRICAL: internal items
+# carry a per-project pricing/detail suffix in the real Aurora catalog that
+# CLAUDE.md's shorthand names didn't include (e.g. "B. LABOR: High Pitch"
+# is actually stored as "B. LABOR: High Pitch (Over 33-Deg)"), and there are
+# three entire "A." adder categories -- A. EQUIP:, A - Consultant Comp,
+# A - INSURANCE: -- that hadn't been discussed at all. Prefix matching
+# (below) covers the confirmed-varying names; exact matching stays for
+# names confirmed to never vary.
 _SUBCONTRACTOR_ADDER_NAMES = {
     "d. misc: roof replacement (outside contractor)",
     "d. misc: roof replacement (gaf roofing)",
     "d. misc: roof replacement (owens corning preferred 50-yr warranty)",
     "d. misc: tree removal / trimming",
 }
+# Prefixes for subcontractor items whose full name varies per project.
+# Trenching: Harry confirmed EVERY B. LABOR: *Trenching* variant, 2026-09-18.
+# Critter Guard: Harry 2026-09-18 -- an exception carved out of the otherwise-
+# internal "A. EQUIP:" bucket below because it's "an expense I need to
+# track" (this classifier's subcontractor_total is the only mechanism that
+# surfaces a dollar figure in the sheet; internal items are simply excluded).
+_SUBCONTRACTOR_ADDER_PREFIXES = (
+    "a. equip: critter guard",
+)
+
+
+def _is_trenching(n: str) -> bool:
+    return n.startswith("b. labor:") and "trenching" in n
+
+
 _INTERNAL_ADDER_NAMES = {
     "d. misc: custom electrical work needed",
     "d. misc: roof replacement (internal hgc roofing)",
     "d. misc: removal of existing pv system",
+}
+# Prefixes for internal items whose full name varies per project (confirmed
+# empirically 2026-09-18 against live data -- see the long comment above).
+_INTERNAL_ADDER_PREFIXES = (
     "b. labor: ground mount (>6kw)",
     "b. labor: ev charger level 2",
     "b. labor: high pitch",
@@ -3847,26 +3878,42 @@ _INTERNAL_ADDER_NAMES = {
     "c. electrical: 200a main panel replacement",
     "c. electrical: 200a span smart panel",
     "c. electrical: lumin smart load management",
-}
+    "c. electrical: lumin smart load mangement",  # real typo in Aurora's own catalog, confirmed 2026-09-18
+    # Equipment upcharges (Harry 2026-09-18): additional amount charged above
+    # the sales rep's standard adder when the equipment costs more than the
+    # standard -- not a subcontractor cost, and not meaningful for
+    # forecasting ("will not give you the correct numbers"). Critter Guard
+    # is carved out above as the one tracked exception.
+    "a. equip:",
+    # Sales/consultant compensation (Harry didn't call this one out by name;
+    # classified internal by the same logic already applied to "A - Referral
+    # Payout", which this codebase already excludes from subcontractor_total
+    # entirely -- neither is a cost to an outside sub performing physical
+    # work. Flagged in CLAUDE.md as an inference to confirm, not a
+    # Harry-confirmed exact match.)
+    "a - consultant comp",
+    # Insurance/warranty products, e.g. SolarInsure (Harry 2026-09-18): cash-
+    # job only, already captured in the cashflow file as payable after the
+    # final milestone payment. Ignore entirely here.
+    "a - insurance:",
+)
 
 
 def classify_adder(name: str) -> str:
-    """Returns 'subcontractor', 'internal', or 'unknown'. Matching is exact
-    (case-insensitive) except for trenching, which is a substring match on
-    purpose -- CLAUDE.md lists 5 trenching variants with different pricing
-    suffixes ("$84 per Linear Foot", "Custom Priced by Helio", etc.) and
-    Harry confirmed EVERY B. LABOR: *Trenching* variant is a subcontractor
-    cost. Exact matching everywhere else is deliberate: a near-miss (a typo,
-    a new adder name) must fall through to 'unknown' and get reviewed, not
-    get silently misclassified."""
+    """Returns 'subcontractor', 'internal', or 'unknown'. A name only ever
+    matches by exact string or by one of the confirmed-varying prefixes
+    above -- a genuine near-miss (a typo, a brand-new adder name) must fall
+    through to 'unknown' and get reviewed, not get silently misclassified."""
     n = (name or "").strip().lower()
     if not n:
         return "unknown"
-    if n in _SUBCONTRACTOR_ADDER_NAMES:
+    if n in _SUBCONTRACTOR_ADDER_NAMES or _is_trenching(n):
         return "subcontractor"
-    if n.startswith("b. labor:") and "trenching" in n:
+    if any(n.startswith(p) for p in _SUBCONTRACTOR_ADDER_PREFIXES):
         return "subcontractor"
     if n in _INTERNAL_ADDER_NAMES:
+        return "internal"
+    if any(n.startswith(p) for p in _INTERNAL_ADDER_PREFIXES):
         return "internal"
     return "unknown"
 
