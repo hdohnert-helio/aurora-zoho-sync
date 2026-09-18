@@ -582,3 +582,265 @@ Sync behaviour:
   though `IC_Action_Required` never flipped false. Feola bounced 9/3 -> 9/4 ->
   9/8 and a naive false->true check would have missed the second round.
 - Include the first ~2 asks in the SMS, truncated. Full text lives in Zoho.
+
+## LightReach cash model -- findings 2026-09-18
+
+Verified end to end: a payment was predicted from `LightReach_MilestoneLog`
+alone and matched the actual deposit (Ryan Hopley, activation approved Mon
+2026-09-14 17:36 ET, paid Thu 2026-09-17, $7,447.60 = 20% of 37,238).
+
+### The real payment-date rule (Harry, confirmed)
+
+Milestone `approved` in `LightReach_MilestoneLog` is the trigger:
+- approved by EOD Tuesday -> paid Thursday that same week
+- approved Wednesday through Friday -> paid the following Tuesday
+
+This is NOT what the cashflow code does today. `main.py` derives dates from
+Substantial Completion: `payment1 = next Monday on/after SC+14`,
+`payment2 = next Monday on/after SC+33`, and when SC is missing it is
+*projected from the current stage*. Three stacked estimates where the lender
+gives an exact timestamp. Replacing that is the core of the rebuild.
+
+### Warranty reserve ($250) is inverter-dependent
+
+`CASHFLOW_LR_WARRANTY = 250.00` is currently deducted from the 20% final on
+EVERY LR project. It should depend on the inverter:
+
+| Inverter | LR holds reserve? |
+|---|---|
+| Q.Tron / microinverters | NO |
+| SolarEdge | YES |
+| Tesla | YES |
+
+Derivable from the `Inverter_Model` field on Installs. Harry has accepted the
+blanket deduction for now -- it understates the forecast by $250 on
+micro-inverter projects, which errs in the safe direction, and more projects
+using reserve-bearing inverters are expected going forward.
+
+### Materials is the largest error source
+
+`materials_est = system_watts * CASHFLOW_MATERIALS_PPW ($1.26/W)`, a flat
+estimate, deducted from the 80% draw. Three different figures exist per project:
+
+| | Bishuja Deb | Daniel Ghazal |
+|---|---|---|
+| model estimate @ $1.26/W | 18,963.00 | 33,736.50 |
+| Zoho `Equipment_Invoice_Total` (Rob's entry) | 17,268.74 | 27,341.29 |
+| Harry's figure | 17,684.71 | 23,059.57 |
+
+Ghazal spans $10,677. Because the estimate is deducted, an overstated estimate
+forecasts the draw LOW by that amount. This is the main reason the overrides
+tab exists. UNRESOLVED: which figure LightReach actually deducts, and where
+Harry's numbers come from.
+
+### DC holdback (already correct in code)
+
+`$0.20/W` for projects created on/after 2026-03-06, `$0.05/W` before
+(`_lr_holdback_ppw`). Paid ~25 days after the activation payment. It is an
+additional revenue event, never netted against anything -- a LightReach
+incentive for using domestic-content equipment. Verified: Deb 15.05 kW ->
+$3,010.00 exactly.
+
+Note: DC holdback appears in NO webhook event and has no Zoho field. It exists
+only in this calculation and in the Google Sheet it writes
+(`CASHFLOW_SHEET_ID = 1ktCKriA4W97Cxy-bubTD2zSP8W1X8fP52BLXvElkp5g`).
+
+### Webhook events that never fire
+
+`directPayEvent` and `allConsumerTaskEvents` are both subscribed with zero
+failures and have NEVER delivered an event. Handlers for both are written and
+idle. Consequence: no payout confirmations, and rejections are visible as a
+status change with no reason attached. Open question to the LightReach rep.
+
+## LightReach Funding page -- the real source of truth (verified 2026-09-18)
+
+`https://palmetto.finance/accounts/{LightReach_Account_ID}/funding`
+
+Zoho already stores `LightReach_Account_ID` on Installs, so the URL is
+deterministic. No MFA on LightReach (as of 2026-09-18), Auth0 login, so this is
+automatable the same way PowerClerk is: 1Password -> Actions -> Playwright.
+
+**Scraping notes:** server-rendered, no XHR to intercept -- `get_page_text`
+returns everything. BUT the funding panel loads asynchronously and took >10s on
+one account. Wait for the literal text `PAYMENT PLAN` to appear; do not use a
+fixed sleep.
+
+### What the page gives you (none of it available from webhooks)
+
+- Payment plan: Install Approved $ / %, Activation Approved $ / %, **Vendor
+  Direct Pay** (the real materials figure)
+- Total Project Value, Payout to-date, Amount Remaining
+- Total Holdback / DC Holdback / Standard Holdback
+- Full transaction ledger: event date+time, payout event, description, **BATCH**,
+  **STATUS**, amount
+- Pricing settings: Standard Holdback $/W, Domestic Content Modifier $/W,
+  DC Holdback $/W, pricing lock date
+- Invoices (supplier invoice numbers + PDF filenames), quotes, EPC rates
+
+### BATCH = the actual payment date
+
+Confirmed four times against the Tue/Thu rule:
+- Ghazal install approved Mon 03-09 -> batch 03-12 (Thu)
+- Ghazal activation approved Thu 09-10 -> batch 09-15 (following Tue)
+- Hopley install approved Mon 08-24 -> batch 08-27 (Thu)
+- Hopley activation approved Mon 09-14 -> batch 09-17 (Thu), deposit confirmed
+
+### Materials: Vendor Direct Pay, and why every other number is wrong
+
+LightReach pays the supplier DIRECTLY (Greentech-CED, US Electric Services --
+shown as "Direct Pay: Active - <vendor>" on the account). So the deduction is
+LightReach's figure, not Rob's invoice and not a $/W estimate.
+
+**Critical constraint (Harry):** Vendor Direct Pay does not exist in LightReach
+until equipment is ordered, which is right before install. For the whole ~45-day
+pre-install pipeline -- the part that matters for forecasting -- there is no
+actual figure. So the estimate cannot be removed, only tiered:
+
+1. no quote yet -> $/W estimate (covers most of the pipeline)
+2. supplier quote entered -> `Equipment_Invoice_Total`
+3. LR materials invoice fires -> Vendor Direct Pay (actual)
+
+Surface which tier a forecast is using, so guesses are visibly guesses.
+
+### The $1.26/W constant is not calibrated
+
+| | Vendor Direct Pay | System | actual $/W |
+|---|---|---|---|
+| Ghazal | 23,059.57 | 26.775 kW (22 kW contracted) | 0.86 - 1.05 |
+| Hopley | 12,237.45 | 8.6 kW | 1.42 |
+
+Neither has a battery, so that is not the driver. Likely equipment architecture:
+Ghazal is Hyundai modules + 2 SolarEdge string inverters; Hopley is Q.TRON BLK
+**AC** modules (integrated microinverters -- Deb shows 35 modules / 35
+"inverters", same module). AC modules cost more per watt.
+
+**A flat $/W also cannot represent storage at all.** Recommended shape:
+
+```
+materials_est = (pv_watts * rate_by_equipment_type) + (battery_kwh * rate_per_kwh)
+```
+
+`Battery_kWh` is populated and reliable on Installs (Powerwall 3 13.5, Fortress
+Avalon 19.6, Franklin 13.6, up to 40.96). `Battery` (name) is sometimes null
+where `Battery_kWh` is set -- use the kWh field as the indicator.
+
+Rates must come from calibration, not guesswork. See the proposed first build.
+
+### DC holdback timing -- the code is wrong
+
+Harry: **LightReach approves the holdback 21 days after ACTIVATION IS APPROVED.**
+Until then the ledger row shows STATUS = `PAUSED` with no batch date. That is
+normal, not a problem.
+
+Worked example (Hopley): activation approved Mon 2026-09-14 -> +21d -> approved
+Mon 2026-10-05 -> Tue/Thu rule -> paid **Thu 2026-10-08**.
+
+`main.py` currently computes `holdback_date = payment2 + 25 days` = 2026-10-12,
+a Monday, which is not a batch day. Three errors: wrong anchor (payment date
+instead of approval date), wrong offset (25 vs 21), no batch-day rounding.
+
+Also: DC Holdback $/W is a per-project pricing setting visible on the page
+($0.20 on Hopley). Prefer reading it over inferring from the 2026-03-06 cutoff.
+
+### Clawbacks and true-ups exist
+
+Ghazal: install paid 2026-03-12, **clawed back in full 2026-07-04**
+("installApproved clawback triggered by install rule"), trued up and re-paid
+2026-09-15. Five months of revenue booked that was not held. The cashflow model
+has no concept of a clawback and would never have shown it leaving.
+
+### Warranty reserve is not purely inverter-model-driven
+
+Ghazal: -$450.00, "Inverter warranty reserve for SolarEdge USE11400H-USSKBEZ8
+(2)" -- $225/inverter, matching `Inverter_Model` + `Inverters` in Zoho.
+Hopley: same USE11400H family, 1 unit, and **no warranty line at all**.
+So something beyond the model string decides. Open question for LightReach.
+
+### Proposed first build (not the forecast engine)
+
+Scrape the funding page for every already-installed LR project. That yields,
+in one pass:
+1. calibration data for the materials estimate (real $/W, segmented by
+   equipment type and storage)
+2. how close `Equipment_Invoice_Total` runs to Vendor Direct Pay, which decides
+   whether tier 2 above is trustworthy
+3. a reconciliation of actual payments vs what the sheet forecast
+4. any paused or unpaid holdbacks -- Hopley has $1,720 pending right now
+
+### One batch calendar, not three payment rules
+
+Harry confirmed: EVERY payout type follows the same schedule. A payout becomes
+payable on its approval date, then lands on the next batch:
+
+    approved by EOD Tuesday      -> paid Thursday that same week
+    approved Wednesday-Friday    -> paid the following Tuesday
+
+The only thing that differs per payout type is what triggers the approval:
+
+| Payout | Approval trigger |
+|---|---|
+| Install (80% less Vendor Direct Pay, less warranty reserve) | milestone `install` -> `approved` |
+| Activation (20%) | milestone `activation` -> `approved` |
+| DC holdback (watts x DC $/W) | activation approval + 21 days |
+| Clawback / true-up | ad hoc, LightReach-initiated |
+
+So implement ONE function -- `batch_date(approval_date)` -- and apply it to all
+of them. Do not write separate date logic per payout type; that is what produced
+the current three-different-lags model.
+
+## LightReach funding audit built (2026-09-18)
+
+`scripts/lightreach_funding_audit.py` + `.github/workflows/lightreach-audit.yml`
+(workflow_dispatch only, no cron -- this is a one-shot data pull, not a
+recurring sync). Read-only: writes nothing to Zoho or LightReach. Queries
+Zoho for the 136 Installs with `LightReach_Account_ID`, logs into
+palmetto.finance once via Auth0 (identifier-first flow: email field, submit,
+password field, submit -- worked first try, no MFA), and scrapes each
+account's `/funding` page. Outputs `artifacts/lr_funding_projects.csv` (one
+row per project) and `artifacts/lr_funding_transactions.csv` (one row per
+ledger line). Final run: **136 ok, 0 skipped, 0 failed, 171 ledger rows.**
+
+### Two async-render timers, not one
+
+The `PAYMENT PLAN` panel and the transaction ledger `<table>` render on
+*separate* timers. Waiting only for `PAYMENT PLAN` text (as CLAUDE.md's
+original note specified) let the scrape proceed while the ledger table was
+still empty -- confirmed on Ryan Hopley, whose payout-to-date proved the
+ledger had real rows, but the first pass extracted 0. Fixed by adding a
+second, independently-bounded wait for `table tbody tr` (15s) after the
+`PAYMENT PLAN` wait succeeds -- but not treating its absence as a failure,
+since a genuinely new account can have zero transactions.
+
+### The first-run skip pattern was rate-limiting, not per-account slowness
+
+First 136-account run: 107 ok, 29 skipped ("PAYMENT PLAN never appeared
+within 45000ms"), spaced with suspicious regularity (~every 4-5 accounts
+regardless of which one) -- including Ryan Hopley, the one account already
+verified by hand. Added a retry (2 attempts) before logging a real skip.
+Second full run with the retry: all 4 accounts that hit a timeout succeeded
+on the retry, and the final run had **zero** skips. Confirms it was
+transient (rate-limiting or a flaky response), not a real per-account
+rendering problem -- don't raise the timeout further if this recurs, retry
+instead.
+
+### Ledger column order (confirmed, not assumed)
+
+`EVENT DATE & TIME | PAYOUT EVENT | DESCRIPTION | BATCH | STATUS | AMOUNT` --
+matches what the script's positional mapping already assumed, confirmed via
+a live debug dump of the actual `<table>` header before trusting it.
+
+### Cross-validated against known cases
+
+Hopley's scraped figures exactly match the ones already verified by hand
+elsewhere in this file ($29,790.40 install / $7,447.60 activation /
+$12,237.45 Vendor Direct Pay / $37,238.00 total, fully paid). Ghazal's
+ledger reproduces the clawback/true-up story exactly (install approved
+03-12, clawback event Jul 4, true-up + activation both batched 09-15).
+
+### Debug tooling kept in the script (not thrown away)
+
+`LR_ONLY` env var / `only` workflow input restricts the run to specific
+`LightReach_Account_ID`s, comma-separated -- for re-testing a handful of
+accounts without a full ~28-minute, 136-account run. The first account in
+any run (or any account when `LR_ONLY` narrows to one) prints its raw page
+text and `<table>` structure to the log.
