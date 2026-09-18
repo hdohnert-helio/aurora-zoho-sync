@@ -1377,3 +1377,54 @@ other system's reference, unconfirmed what. Don't use it as a join key.
 messy-free-text-address problem PowerClerk matching already solved) --
 `LightReach_Account_ID` exact match first, address fallback second, marked
 unmatched (not dropped) otherwise.
+
+### Pagination drift under sort=NEWEST (found and fixed 2026-09-18)
+
+The first full walk (paging every one of 1373 accounts to filter down to
+Install/Activation client-side) took several minutes, longer with 429
+backoffs, while `sort=NEWEST` is not a stable key over that span -- the
+underlying list keeps changing in near-real-time. A same-day investigation
+run found 4 accounts genuinely at `currentMilestone.type=install` (three
+Adrian Scarpa variants, Nilo Torres -- all `status: paused`) that the full
+walk's 107-account result had silently missed.
+
+**Fix:** `fetch_palmetto_accounts()` tries the API's own `currentMilestone=`
+query param as a real server-side filter first -- confirmed it works
+(`/api/accounts/summary honors currentMilestone=`) -- so it does one short,
+focused walk per funded milestone type instead of one long walk of
+everything. Only falls back to the full walk (now deduped by id, stopping
+on two consecutive empty pages rather than trusting the reported `total`)
+if the server doesn't actually honor the filter.
+
+Even after this fix, the *same* 107 accounts came back on a re-run
+(paused/cancelled accounts like the Scarpa ones stay excluded by the list
+endpoint even under a direct milestone match, unlike a direct per-id GET)
+-- so those 4 are not a coverage bug in the current code, just accounts
+that no longer show up in ANY list view. Still unconfirmed whether they
+carry historical ledger activity relevant to the 90-day reconciliation
+window; flagged below, not resolved.
+
+### Part 2 result: 12-16 of 18-19 batches matched, not yet 19/19
+
+Two full runs after the Palmetto-driven fix, ~40 minutes apart:
+
+| Run | Ledger rows in window | Batch dates | Matched |
+|---|---|---|---|
+| 1 | 64 | 19 | 16 (84%) |
+| 2 | 57 | 18 | 12 (67%) |
+
+Real improvement over the pre-fix baseline (13/19, 68%), but the **set of
+which batches match changed entirely between the two runs** -- not the same
+3-4 anomalies persisting, but a different set each time. That points at
+**scrape completeness noise in `scrape_account()`'s per-account ledger-table
+read**, not a remaining enumeration gap: the same 107 accounts were found
+both times, but a given account's `/funding` page ledger table apparently
+doesn't always come back complete (the existing 15s `table tbody tr` wait
+already has a documented history of being tight -- see the "two async-render
+timers" note above).
+
+**Not yet fixed.** Before trusting a specific unmatched-batch number, add a
+robustness check on the ledger scrape itself (e.g. a second pass re-scraping
+any account whose funding page's ledger table came back with 0 rows, or
+comparing row counts across two scrapes of the same account) rather than
+re-running the whole audit and eyeballing the diff again.
