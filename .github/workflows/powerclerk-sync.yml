@@ -1,12 +1,14 @@
 name: PowerClerk sync
 
-# Cron enabled 2026-09-17 after the live run's diff was reviewed and matched
-# expectations. 05:00 ET / 09:00 UTC, off-hours -- every login evicts
-# whoever is in the portal (see CLAUDE.md).
+# Cron enabled 2026-09-17, moved to midday 2026-09-18. 13:00 ET nominal
+# (1:00 PM) -- deliberately NOT off-hours anymore, so this WILL evict
+# whoever is logged into PowerClerk during the workday (see CLAUDE.md).
+# Runs exactly 1 hour before powerclerk-notify.yml's cron -- the scrape
+# takes ~10 minutes, and the notifier must not read mid-sync data.
 
 on:
   schedule:
-    - cron: '0 9 * * *'
+    - cron: '0 17 * * *'
   workflow_dispatch:
     inputs:
       dry_run:

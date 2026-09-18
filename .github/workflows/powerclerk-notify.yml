@@ -1,12 +1,14 @@
 name: PowerClerk notify
 
-# Cron enabled 2026-09-17 after the dry-run digest, the IC_Alert_Sent
-# backfill, and a real test SMS were all verified. Nominal 09:00 ET; see the
-# DST caveat in CLAUDE.md for why this fires an hour early in winter (EST).
+# Cron enabled 2026-09-17, moved to midday 2026-09-18. Nominal 14:00 ET
+# (2:00 PM) -- exactly 1 hour after powerclerk-sync.yml's cron, on purpose:
+# the scrape takes ~10 minutes, and this must not read mid-sync data. See
+# the DST caveat in CLAUDE.md -- the wall-clock target shifts with DST, but
+# the 1-hour gap between the two crons holds regardless.
 
 on:
   schedule:
-    - cron: '0 13 * * *'
+    - cron: '0 18 * * *'
   workflow_dispatch:
     inputs:
       dry_run:

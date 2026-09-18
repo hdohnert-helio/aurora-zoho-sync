@@ -216,8 +216,11 @@ this sync"`, `IC_Action_Required = false`, same treatment as out-of-territory.
    the only signal that the sync itself broke.
 4. All Zoho writes send `"trigger": []` and skip `assignment_rules` /
    `connected_workflows`. Note: `skip_feature_execution` accepts max 2 entries.
-5. Schedule off-hours (05:00 ET / 09:00 UTC). Each run evicts whoever is logged
-   into PowerClerk -- one session per account.
+5. **Not off-hours as of 2026-09-18** -- schedule is midday (13:00 ET / 17:00
+   UTC), moved deliberately. Each run still evicts whoever is logged into
+   PowerClerk -- one session per account -- but now that risk lands during
+   the workday instead of before anyone's in the portal. See the Alerting
+   section below for the current times and why.
 
 ### Open items needing a human, do not auto-resolve
 
@@ -262,16 +265,25 @@ grants read and write together, so a successful read already proves write access
 
 ## Alerting (SMS to Harry)
 
-Two separate workflows. The scrape must stay off-hours because every PowerClerk
-login evicts whoever is in the portal; the notifier touches Zoho only.
+Two separate workflows.
 
 | Workflow | Cron (UTC) | ET | Does |
 |---|---|---|---|
-| `powerclerk-sync.yml`   | `0 9 * * *`  | 05:00 | Scrape both portals, write `IC_Portal_*` |
-| `powerclerk-notify.yml` | `0 13 * * *` | 09:00 | Read Zoho, send one SMS digest |
+| `powerclerk-sync.yml`   | `0 17 * * *` | 13:00 | Scrape both portals, write `IC_Portal_*` |
+| `powerclerk-notify.yml` | `0 18 * * *` | 14:00 | Read Zoho, send one SMS digest |
 
-Splitting them means a failed scrape still lets the notifier run and report that
-`IC_Portal_Checked` has gone stale.
+**Schedule moved to midday 2026-09-18** (was 05:00 / 09:00 ET, off-hours). This
+is a deliberate tradeoff, not an oversight: the sync **will now evict whoever
+is logged into PowerClerk during the workday** -- it no longer avoids that by
+running before anyone's around. The 1-hour gap between the two crons is
+deliberate too, independent of the off-hours question: the scrape takes ~10
+minutes, and the notifier must not read Zoho while the sync is still mid-write
+-- it would see a partial mix of updated and stale records and could send a
+digest based on data that's about to change again in the same run.
+
+Splitting sync and notify into separate workflows (rather than one job) still
+matters for its original reason too: a failed scrape still lets the notifier
+run and report that `IC_Portal_Checked` has gone stale.
 
 **Both crons enabled 2026-09-17**, after: the sync's live-run diff was reviewed
 and matched expectations (including the IC_Project_Number-first / no-overwrite
@@ -365,21 +377,30 @@ the field is real.
 
 ### DST caveat
 
-GitHub cron is UTC and does not shift. `0 13 * * *` is 09:00 EDT but 08:00 EST.
-Either accept the winter hour or have the notifier check ET local time and exit
-if it is before 09:00, with the cron set an hour early year-round.
+GitHub cron is UTC and does not shift. `0 18 * * *` is 14:00 EDT but 13:00
+EST -- the wall-clock ET target moves an hour earlier in winter. Either
+accept the winter hour or have the notifier check ET local time and exit if
+it's before the target, with the cron set an hour early year-round.
 
-**Decision:** accept the winter hour. This is a single daily trigger --a hard
-"exit if before 9am ET" gate would mean it never fires at all in winter, since
-there's no later same-day trigger to catch the real 9am mark. Running an hour
-early in EST is a much smaller problem than never running.
+**Decision:** accept the winter hour, same reasoning as before the schedule
+moved -- a hard "exit if before target" gate on a single daily trigger would
+mean it never fires at all in winter, since there's no later same-day
+trigger to catch the real mark.
+
+**What DOES hold regardless of DST:** the 1-hour gap between the sync
+(`0 17 * * *`) and notify (`0 18 * * *`) crons. Both shift by the same hour
+together, so the sync always finishes with room to spare before the
+notifier reads, in both EDT and EST -- the gap that actually matters for
+correctness (not reading mid-sync) is independent of what the wall-clock ET
+time happens to be that day.
 
 ## Sync + notify implementation (2026-09-17)
 
-Built `scripts/powerclerk_sync.py` (+`.github/workflows/powerclerk-sync.yml`,
-cron `0 9 * * *`) and `scripts/powerclerk_notify.py`
-(+`.github/workflows/powerclerk-notify.yml`, cron `0 13 * * *`), per the rules
-above. Both use `/search`, never `/coql`. `powerclerk_sync.py` imports
+Built `scripts/powerclerk_sync.py` (+`.github/workflows/powerclerk-sync.yml`)
+and `scripts/powerclerk_notify.py` (+`.github/workflows/powerclerk-notify.yml`),
+per the rules above. (Crons as first shipped: `0 9 * * *` / `0 13 * * *`,
+off-hours -- moved to the midday schedule in the Alerting section above on
+2026-09-18.) Both use `/search`, never `/coql`. `powerclerk_sync.py` imports
 `scrape_all_projects()` from `powerclerk_audit.py` rather than duplicating the
 login/replay logic. `powerclerk_notify.py` imports `_send_sms` directly from
 `main.py` (repo root added to `sys.path`) -- confirmed safe to import
