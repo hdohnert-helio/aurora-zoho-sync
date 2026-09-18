@@ -844,3 +844,423 @@ ledger reproduces the clawback/true-up story exactly (install approved
 accounts without a full ~28-minute, 136-account run. The first account in
 any run (or any account when `LR_ONLY` narrows to one) prints its raw page
 text and `<table>` structure to the log.
+
+## Funding audit results (136 projects, 171 transactions, 2026-09-18)
+
+Source: `artifacts/lr_funding_projects.csv`, `artifacts/lr_funding_transactions.csv`.
+38 of 136 have a Vendor Direct Pay figure (the rest predate Direct Pay, are
+cancelled, or have not ordered equipment yet). That 38 is the calibration set.
+
+### Batch calendar -- confirmed at scale
+
+Batch dates are **only ever Tuesday or Thursday** (98 Tue / 68 Thu across 166
+transactions). Not an approximation.
+
+`batch_date(approval_date + lag)` where lag is 0 for INSTALL APPROVED,
+ACTIVATION APPROVED, MATERIALS INVOICE and WARRANTY: **140 of 155 exact**.
+Residuals: 5 at +2d and a handful larger (one batch slipped, plus Ghazal's
++63d clawback which is ad hoc).
+
+### DC holdback lag is 23 days, not 21 and not 25
+
+Measured by sweeping the lag against 11 paid holdbacks:
+
+| lag | matches |
+|---|---|
+| 21d | 1/11 |
+| 22d | 5/11 |
+| **23d** | **10/11** |
+| 24d | 9/11 |
+| 25d (current code) | 8/11 |
+
+Use `batch_date(activation_approval + 23 days)`.
+
+### Materials: the $1.26/W constant is ~7% high
+
+| segment | n | median $/W | mean | min | max |
+|---|---|---|---|---|---|
+| AC-module, no battery | 13 | 1.201 | 1.242 | 1.024 | 1.672 |
+| string/other, no battery | 25 | 1.109 | 1.140 | 0.861 | 1.545 |
+| ALL | 38 | 1.173 | 1.175 | 0.861 | 1.672 |
+
+Because materials is DEDUCTED, an overstated rate forecasts the draw LOW.
+Segmenting AC-module vs string is worth ~$0.09/W.
+
+**Caveat that matters: not one project in the calibration set has a battery.**
+So there is no empirical basis for a `$/kWh` storage term yet. Any battery
+project remains a guess until some land in the data. Do not invent a rate.
+
+The spread is wide even within a segment (0.86-1.67). Pre-quote forecasts
+should be presented as a band, not a point.
+
+### Rob's Equipment_Invoice_Total is trustworthy -- use it as tier 2
+
+Compared against Vendor Direct Pay on 35 projects:
+**median error 0.0%, 29 of 35 within +/-3%.**
+Outliers: Margarita Cayo -95.6% (Zoho value effectively missing) and
+Daniel Ghazal +18.6% (known problem project).
+
+So: estimate -> `Equipment_Invoice_Total` as soon as Rob enters it ->
+Vendor Direct Pay once LightReach posts it. Tier 2 is nearly as good as actual.
+
+### Warranty reserve: a per-inverter rate table
+
+Confirmed across 27 warranty lines. Rate depends on inverter model, multiplied
+by the number of inverters:
+
+| Inverter | $/unit |
+|---|---|
+| Tesla (any) | 600 |
+| SolarEdge SE7600H / SE10000H / SE11400H / USE11400H / USE7600H / SE5700H | 225 |
+| SolarEdge SE3800H / SE6000H | 170 |
+| Microinverters / AC modules (Q.TRON etc) | 0 (no warranty line) |
+
+The flat `CASHFLOW_LR_WARRANTY = 250` is wrong in both directions.
+
+**Data-quality warning:** Zoho's `Inverter_Model` is not reliable. Hopley is
+recorded as `USE11400H-USMNBE78` x1 but has NO warranty line and Q.TRON AC
+modules -- the field does not reflect what was installed. Some projects have
+multiple warranty lines for mixed inverter types (Boris Zarate: 450 + 170).
+
+### Transaction status semantics (Harry, confirmed)
+
+| Status | Meaning |
+|---|---|
+| `OPEN` | Approved, not yet assigned to a batch. Follows the normal Tue/Thu rule. |
+| `APPROVED` | Batched / paid. Has a batch date. |
+| `PAUSED` | DC holdback inside its 23-day post-activation wait. Normal. |
+
+None of these indicate a problem. An OPEN row simply has not been batched yet --
+predict its date exactly as for any other approval.
+
+### Pipeline as of 2026-09-18 (all normal, nothing stuck)
+
+| Status | Amount | Project | Expected |
+|---|---|---|---|
+| OPEN | 14,667.30 | Nasima Majid activation (approved Thu 09-17) | Tue 2026-09-22 |
+| PAUSED | 3,870.00 | Nasima Majid DC holdback | Thu 2026-10-15 |
+| PAUSED | 2,666.00 | Justin Kane DC holdback | per +23d rule |
+| PAUSED | 2,236.00 | Mustaque Nabi DC holdback | per +23d rule |
+| PAUSED | 1,720.00 | Ryan Hopley DC holdback | Thu 2026-10-08 |
+
+A non-zero `amount_remaining` on an in-flight project is also normal -- it is
+just the unpaid portion. Mohammed Alamgir | 28 (9,137.50) and Kim & James
+Murphy (12,848.40) are each EXACTLY 20% of contract value, i.e. activations not
+yet paid. Do not treat `amount_remaining > 0` as an exception.
+
+**What IS worth alerting on:** a milestone sitting in `rejected` (see
+`LightReach_MilestoneLog`), or an approval whose predicted batch date has
+passed with nothing batched against it.
+
+### Clawbacks: event date != cash date (corrected 2026-09-18)
+
+A clawback is only applied to cash once it is APPROVED and assigned a batch.
+The `event_datetime` is when LightReach's system triggered it, which can precede
+the batch by a long way and means nothing financially.
+
+Ghazal, read correctly:
+- clawback event Jul 4, **batch 09-10**
+- true-up event Sep 10, **batch 09-15**
+
+So the money was out for about **five days**, not the five months an
+event-date reading suggests.
+
+**Rule: only batch dates move money.** A row with no batch date has not
+affected cash, whatever its status (`OPEN`, `PAUSED`, or a triggered but
+unapproved clawback). Build every cash calculation off `batch`, and treat
+`event_datetime` purely as the approval trigger for predicting a future batch.
+
+This also explains the single +63d outlier in the batch-rule test -- that was
+the Ghazal clawback, where the trigger-to-batch gap is not governed by the
+Tue/Thu rule at all.
+
+### Clawback extension requests -- flag only, do NOT model
+
+Helio can often submit a clawback extension request, in which case the clawback
+shows in the ledger but is never approved and never batches, so no cash moves.
+A triggered clawback is therefore an ACTION ITEM, not a cash event.
+
+Harry (2026-09-18): the rules behind clawback triggers are tricky -- **do not
+build logic around them yet.**
+
+Engine behaviour:
+- clawback row present with no batch date -> surface it with the amount at risk,
+  once, and nothing more
+- do NOT predict clawbacks, infer deadlines, or model the trigger conditions
+- do NOT book the cash unless and until a batch date appears
+
+## Subcontractor cost classification -- three defects (2026-09-18)
+
+`_get_commission_data()` in `main.py` (~line 3890) builds `subcontractor_total`
+by scanning `Adder_Details_JSON` for names starting `D. MISC:`, minus a
+hardcoded keyword deny-list. Three problems.
+
+### Defect 1: only `D. MISC:` is scanned, so trenching is never counted
+
+The adder vocabulary has four prefixes: `A -` / `A.` (comp, referral, equip),
+`B. LABOR:`, `C. ELECTRICAL:`, `D. MISC:`. Only the last is examined.
+
+**Harry confirmed trenching IS a subcontractor cost**, and every trenching adder
+lives under `B. LABOR:`:
+- `B. LABOR: Trenching HARD SURFACE  ($84 per Linear Foot)`
+- `B. LABOR: Trenching GRASS ($42 per Linear Foot))`
+- `B. LABOR: Trenching GROUNDMOUNT (Custom Priced by Helio)`
+- `B. LABOR: Trenching for Ground Mount ($42 /Lineal Foot)`
+- `B. LABOR: Custom Trenching (Concrete / Pavers)`
+
+These currently forecast as $0 cash out on every project that has them.
+
+### Defect 2: classification is a deny-list, not an explicit map
+
+Replace the `INTERNAL_ADDER_KEYWORDS` substring check with an explicit
+name -> {internal | subcontractor} table. Anything NOT in the table must be
+flagged for review, never silently assumed internal or external.
+
+Confirmed classifications (Harry, 2026-09-18):
+
+| Adder | Classification |
+|---|---|
+| `D. MISC: Roof Replacement (Outside Contractor)` | SUBCONTRACTOR |
+| `D. MISC: Roof Replacement (GAF Roofing)` | SUBCONTRACTOR |
+| `D. MISC: Roof Replacement (Owens Corning Preferred 50-Yr Warranty)` | SUBCONTRACTOR |
+| `D. MISC: Tree Removal / Trimming` | SUBCONTRACTOR |
+| `B. LABOR: Trenching *` (all variants) | SUBCONTRACTOR |
+| `D. MISC: Custom Electrical Work Needed` | INTERNAL -- always done in house |
+| `D. MISC: Roof Replacement (INTERNAL HGC ROOFING)` | INTERNAL |
+| `D. MISC: Removal of Existing PV System` | INTERNAL |
+
+Also INTERNAL (Harry, 2026-09-18): `B. LABOR: Ground Mount (>6kW)`,
+`B. LABOR: EV Charger Level 2`, and all `C. ELECTRICAL:` panel upgrades
+(200A Main Service, 125A/200A Main Panel Replacement, 200A SPAN Smart Panel,
+LUMIN Smart Load Management). All other `B. LABOR:` items (High Pitch,
+High Roof, Ballasted Flat Roof, Over 3 Arrays, Small System Upcharge,
+Relocate Roof Vent Pipe) are in-house crew labour -- internal.
+
+So the ONLY subcontractor costs are: roofing by an outside contractor,
+tree removal/trimming, and trenching. Everything else is internal.
+
+Note `D. MISC: Custom Electrical Work Needed` carries real money ($1,500-$5,000
+per project) and is common -- excluding it is correct but consequential, so it
+should be visible in the sheet as an internal cost, not invisible.
+
+### Defect 3: ~1 in 5 active projects has no adder data at all
+
+`subcontractor_total` comes from the install's `Active_Snapshot`. No snapshot
+means no adders, no sub cost, and no Aurora commission data -- the forecast
+shows zero rather than unknown.
+
+Of 49 active (non-cancelled, non-closeout) Installs, **9 have no
+`Active_Snapshot`**: Daniel Ghazal, Alex Starr | Commercial, GVFC ASnell,
+Ramsey Goodrich, Michael Duke, Richard Desrochers, Daniel DeTuccio,
+Frank & Josephine LaFauci, Bob Muller.
+
+Five of those DO have an `Aurora_Project_ID` (Ghazal, Duke, Desrochers,
+DeTuccio, Muller) -- the snapshot simply was never created, and `main.py`
+already has machinery for this case (see `_create_initial_snapshot_for_install`
+and the backfill job around line 1062). The other four have no Aurora project.
+
+Across all non-cancelled Installs: 63 with a snapshot, 375 without (most of the
+tail is historical and outside the cashflow window).
+
+### Required fixes
+
+1. Extend the classifier to all prefixes, driven by the explicit table above.
+2. Backfill the five recoverable snapshots; investigate why creation was missed.
+3. **Never forecast $0 sub cost for a project with no snapshot.** Emit a
+   distinct "no adder data" state so the sheet shows unknown, not zero.
+   Same principle as the materials tiers: a gap must look like a gap.
+
+## Available cash vs forecast -- a second, separate problem (2026-09-18)
+
+Harry's actual goal for the forecast is "how much cash will we have each week."
+But there is a distinct question the 17-week forecast cannot answer:
+
+> Of the money sitting in the account **today**, how much is genuinely ours?
+
+That is not a forecasting problem, it is a commitments ledger:
+
+```
+Chase balance
+  - customer deposits held against work not yet delivered
+  - materials / sub costs incurred but unpaid
+  - commissions earned but not yet paid out
+  - accrued payroll and taxes
+= available
+```
+
+Recalculated daily. Shares inputs with the forecast but answers a different
+question: the forecast says whether payroll clears in November; this says
+whether $40k can be spent this week.
+
+### What we established
+
+- **Cash deals are invoiced through QuickBooks Online.** No QB connector exists
+  in the MCP registry, but QuickBooks Online IS reachable via the Zapier
+  connector (`QuickBooksV3CLIAPI`, 29 read actions).
+- **The 20 / 60 / 20 milestones are SEPARATE invoices in QB.** This is what
+  makes "collected against undelivered work" exactly computable rather than
+  estimated -- a paid deposit and a paid pre-install invoice on a project that
+  has not been installed are money held, not earned.
+- **Chase feeds into QuickBooks**, but reconciliation is behind. Harry: the
+  blocker is **ownership**, not tooling. An available-cash view built on an
+  unreconciled ledger would be confidently wrong, so reconciliation currency is
+  a hard prerequisite.
+- **Payment mix:** mostly check and ACH. Credit cards go through **Heartland**
+  (a separate processor) and are **at most 5%** -- batched, net of fees, hardest
+  to attribute. Do not build for Heartland; handle by hand.
+- LightReach removes most deposit risk: the lender pays after milestones, and
+  materials go direct to the vendor and never touch the account. **Deposit
+  exposure is concentrated in cash deals.**
+
+### Why this is now tractable
+
+Every LightReach deposit can be identified **exactly** -- the funding ledger
+gives the amount and the batch date (e.g. $7,447.60 on 2026-09-17). At ~80% of
+jobs, a large share of unmatched Chase deposits can be auto-attributed to a
+named project with no human lookup. Cash-deal check/ACH deposits can be
+proposed against QB open invoices, whose amounts are distinctive (20% of a
+contract).
+
+This reframes the ownership blocker: reconciliation is avoided because it is a
+tedious multi-hour job. If most deposits arrive pre-matched and what remains is
+a short approve-or-correct list, it becomes a ~10-minute weekly task. Automation
+does not assign ownership but can shrink the job until ownership stops being
+the bottleneck.
+
+### Sequencing (not started)
+
+1. Auto-match LightReach deposits from the funding ledger -- data already exists
+   in `artifacts/lr_funding_*.csv`.
+2. Propose matches for check/ACH against QB open invoices.
+3. Only then build the available-cash view, once the ledger is current.
+
+### Caveat
+
+The treatment of customer deposits as a liability is an accounting question for
+Janelle, not something to decide here. Build the operational view; have her
+confirm it ties to the books.
+
+## Chase via SimpleFIN + Palmetto deposit matching (2026-09-18)
+
+### SimpleFIN access
+
+```
+op://Helio Automation/SimpleFIN/SIMPLEFIN_ACCESS_URL
+op://Helio Automation/SimpleFIN/SIMPLEFIN_ACCOUNT_IDS
+```
+
+The access URL is `scheme://user:pass@host/path` with credentials embedded --
+it IS the credential. Read-only by protocol; SimpleFIN cannot write to a bank.
+`GET {ACCESS_URL}/accounts`, max 90-day window per request. Transaction fields:
+`amount, description, id, mcc, memo, payee, posted, transacted_at`.
+
+**SimpleFIN exposes 20 accounts, including Harry's PERSONAL ones** (SoFi, Apple
+Card, LightStream). `SIMPLEFIN_ACCOUNT_IDS` is an explicit ALLOWLIST and code
+must refuse to run without it, filtering BEFORE reading transactions. A newly
+linked personal account must be excluded by default, never included by default.
+
+Never print balances, amounts, descriptions or payees for non-LightReach
+transactions into CI logs.
+
+### The two Chase accounts
+
+| Account | Role |
+|---|---|
+| PERFBUS CHK (1030) | main operating account |
+| PERFBUS CHK (1055) | money deliberately set aside so it is not spent from 1030 |
+
+1055 is already a manual restricted-cash mechanism. Any "available cash" view
+must account for it or it will double-count.
+
+### LightReach pays in BATCHES, from Palmetto
+
+Confirmed empirically (90-day window, 60 ledger rows, 19 batch dates,
+19 Palmetto deposits):
+
+- per-project deposits: **2 of 60 matched (3%)** -- not how it works
+- batch-total deposits: **13 of 19 matched (68%), and those 13 matched EXACTLY**
+
+Payee string is consistent: **`Certificate of Origin Palmetto Solar L`**.
+Filter on `palmetto` in payee+description to isolate LightReach deposits.
+
+So: one Chase deposit per batch date = sum of every project paid in that batch.
+When the ledger is complete the totals reconcile to the penny.
+
+### The 6 unmatched batches are OUR gap, not LightReach's
+
+Every gap is positive -- the deposit exceeded the sum of the projects we knew
+about:
+
+| Batch | Expected | Actual | Gap |
+|---|---|---|---|
+| 2026-07-14 | 23,466.82 | 28,819.78 | +5,352.96 |
+| 2026-08-13 | 15,304.56 | 22,229.28 | +6,924.72 |
+| 2026-08-18 | 32,080.91 | 39,738.35 | +7,657.44 |
+| 2026-09-10 | -3,388.74 | 567.26 | +3,956.00 |
+
+**Root cause:** `lightreach_funding_audit.py` enumerates accounts from Zoho's
+`LightReach_Account_ID`. Any LightReach project whose Zoho record lacks that
+field was never scraped, so its payout is missing from every batch sum it
+belongs to.
+
+**Fix: drive the scrape from Palmetto's own Accounts list, not from Zoho.**
+That captures every account LightReach has paid on, and as a side effect finds
+projects that exist in Palmetto but are missing or unlinked in the CRM.
+
+### Clawbacks net inside a batch
+
+Batch 2026-09-10 summed to **-3,388.74** in the ledger (Ghazal's $48,048
+clawback) yet the Chase deposit was **+567.26**. So a clawback is absorbed
+within the batch rather than debited separately, and a batch can still land
+positive. Model it as a negative line inside the batch total.
+
+### Why this matters
+
+19 Palmetto deposits in 90 days, one payee string, exact batch reconciliation.
+Once the ledger is complete, every LightReach deposit can be decomposed into
+named projects automatically -- no QuickBooks involvement required. That is the
+bulk of the reconciliation backlog.
+
+## Adder classification -- corrections (2026-09-18, supersedes the table above)
+
+**The prefix does NOT predict whether an adder is subcontracted.** Critter Guard
+is `A. EQUIP:` and IS a subcontractor cost. Classification must be per-adder,
+from Harry, never inferred from the category prefix.
+
+SUBCONTRACTOR (cash out to an outside party):
+- `D. MISC: Roof Replacement (*)` -- EXCEPT the INTERNAL HGC variant
+- `D. MISC: Tree Removal / Trimming`
+- `B. LABOR: *Trenching*` -- all variants
+- `A. EQUIP: Critter Guard`
+
+INTERNAL (no outside cash out):
+- everything else, including `D. MISC: Custom Electrical Work Needed`,
+  `D. MISC: Removal of Existing PV System`,
+  `D. MISC: Roof Replacement (INTERNAL HGC ROOFING)`,
+  `B. LABOR: Ground Mount (>6kW)`, `B. LABOR: EV Charger Level 2`,
+  all `C. ELECTRICAL:` panel upgrades, and all other `B. LABOR:` crew items.
+
+**Open, not critical:** `B. LABOR: Over 3 Arrays ($300 per Array)` is INTERNAL
+for now. Harry wants to revisit it later.
+
+**Still worth doing:** there are only ~25 distinct adder names in the whole
+book. Walk the full distinct list with Harry once and mark each explicitly,
+rather than discovering misclassifications project by project.
+
+Implement as an ALLOWLIST of subcontractor patterns -- internal by default,
+unknown names flagged for review and counted in neither bucket.
+
+### Correction: ALL roof replacement is subcontracted (2026-09-18)
+
+Harry: "roof is not internal." `D. MISC: Roof Replacement (INTERNAL HGC ROOFING)`
+is a SUBCONTRACTOR cost like every other roof replacement variant. The original
+`INTERNAL_ADDER_KEYWORDS` deny-list in `main.py` was wrong on this item, not
+merely incomplete.
+
+Final subcontractor allowlist (four patterns, no exceptions):
+- `D. MISC: Roof Replacement (*)`  -- ALL variants incl. INTERNAL HGC
+- `D. MISC: Tree Removal / Trimming`
+- `B. LABOR: *Trenching*`          -- all variants
+- `A. EQUIP: Critter Guard`
+
+Everything else internal by default; unknown names flagged, never absorbed.

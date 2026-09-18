@@ -2187,13 +2187,13 @@ def extract_pricing_fields(design_json, pricing_json, summary_json):
         if item.get("item_type") == "incentives":
             storage_incentives_total = float(item.get("item_price") or 0)
 
-    fields["Solar_Incentives_Total"] = solar_incentives_total
-    fields["Storage_Incentives_Total"] = storage_incentives_total
-    fields["Incentives_Total"] = solar_incentives_total + storage_incentives_total
+    fields["Solar_Incentives_Total"] = round(solar_incentives_total, 2)
+    fields["Storage_Incentives_Total"] = round(storage_incentives_total, 2)
+    fields["Incentives_Total"] = round(solar_incentives_total + storage_incentives_total, 2)
     fields["Incentive_Name_List"] = ", ".join(incentive_names)
-    fields["Solar_System_Price_Before_Incentives"] = solar_price_before_incentives
-    fields["Storage_System_Price_Before_Incentives"] = storage_price_before_incentives
-    fields["Total_Price_Before_Incentives"] = solar_price_before_incentives + storage_price_before_incentives
+    fields["Solar_System_Price_Before_Incentives"] = round(solar_price_before_incentives, 2)
+    fields["Storage_System_Price_Before_Incentives"] = round(storage_price_before_incentives, 2)
+    fields["Total_Price_Before_Incentives"] = round(solar_price_before_incentives + storage_price_before_incentives, 2)
 
     fields["Raw_Design_JSON"] = json.dumps(design_json)
     fields["Raw_Pricing_JSON"] = json.dumps(pricing_json)
@@ -3837,18 +3837,24 @@ def _fetch_all_commission_projects(cutoff_date: str = "2026-01-01") -> list[dict
 # (below) covers the confirmed-varying names; exact matching stays for
 # names confirmed to never vary.
 _SUBCONTRACTOR_ADDER_NAMES = {
-    "d. misc: roof replacement (outside contractor)",
-    "d. misc: roof replacement (gaf roofing)",
-    "d. misc: roof replacement (owens corning preferred 50-yr warranty)",
     "d. misc: tree removal / trimming",
 }
 # Prefixes for subcontractor items whose full name varies per project.
+# Roof Replacement: Harry 2026-09-18 -- ALL variants, including "INTERNAL HGC
+# ROOFING" (that name is misleading -- HGC is still an outside roofing sub,
+# not an in-house crew; the deny-list this classifier replaced had this one
+# wrong, not just incomplete).
 # Trenching: Harry confirmed EVERY B. LABOR: *Trenching* variant, 2026-09-18.
 # Critter Guard: Harry 2026-09-18 -- an exception carved out of the otherwise-
 # internal "A. EQUIP:" bucket below because it's "an expense I need to
 # track" (this classifier's subcontractor_total is the only mechanism that
 # surfaces a dollar figure in the sheet; internal items are simply excluded).
+# NOTE: prefix membership here is never used to infer a classification for a
+# name that doesn't literally match one of these -- most other "D. MISC:" and
+# "A. EQUIP:" items are internal (see below); the prefix is only a way to
+# cover known name variants of an already-confirmed subcontractor item.
 _SUBCONTRACTOR_ADDER_PREFIXES = (
+    "d. misc: roof replacement (",
     "a. equip: critter guard",
 )
 
@@ -3859,7 +3865,6 @@ def _is_trenching(n: str) -> bool:
 
 _INTERNAL_ADDER_NAMES = {
     "d. misc: custom electrical work needed",
-    "d. misc: roof replacement (internal hgc roofing)",
     "d. misc: removal of existing pv system",
 }
 # Prefixes for internal items whose full name varies per project (confirmed
@@ -3988,28 +3993,37 @@ def _get_commission_data_for_project(aurora_project_id: str) -> dict:
     except (ValueError, TypeError):
         adder_details = []
 
-    # D. MISC adder items performed internally — no cash outflow to outside sub
-    INTERNAL_ADDER_KEYWORDS = [
-        "removal of existing pv",
-        "roof replacement (internal",
-        "internal hgc roofing",
-        "custom electrical work needed",
-    ]
-
+    # Classification via classify_adder() (see that function's docstring and
+    # CLAUDE.md "Subcontractor cost classification") -- covers all adder
+    # prefixes (A./B. LABOR:/C. ELECTRICAL:/D. MISC:), not just D. MISC:.
+    # unknown_adders is never silently dropped -- surfaced in the return dict
+    # and logged, so a genuinely new adder name gets reviewed instead of
+    # defaulting either way.
     referral_flat = 0.0
     subcontractor_total = 0.0
     subcontractor_notes = []
+    unknown_adders = []
     for adder in adder_details:
         name = (adder.get("name") or "").strip()
         total = float(adder.get("total") or 0)
         if name == "A - Referral Payout":
             referral_flat += total
-        elif name.startswith("D. MISC:") and total > 0:
-            name_lower = name.lower()
-            if any(kw in name_lower for kw in INTERNAL_ADDER_KEYWORDS):
-                continue  # internal work — not a subcontractor cash outflow
+            continue
+        if not name or total <= 0:
+            continue
+        cls = classify_adder(name)
+        if cls == "subcontractor":
             subcontractor_total += total
-            subcontractor_notes.append(f"{name.replace('D. MISC: ', '')} ${total:,.2f}")
+            subcontractor_notes.append(f"{name} ${total:,.2f}")
+        elif cls == "unknown":
+            unknown_adders.append(f"{name} (${total:,.2f})")
+
+    if unknown_adders:
+        logger.warning(
+            f"_get_commission_data_for_project: unrecognized adder name(s) on "
+            f"project {aurora_project_id} -- not classified either way, needs "
+            f"review: {unknown_adders}"
+        )
 
     final_system_price = float(fields.get("Final_System_Price") or 0)
 
@@ -4029,89 +4043,9 @@ def _get_commission_data_for_project(aurora_project_id: str) -> dict:
         "adder_name_list": adder_name_list,
         "subcontractor_total": subcontractor_total,
         "subcontractor_notes": " | ".join(subcontractor_notes) if subcontractor_notes else "",
+        "unknown_adders": unknown_adders,
         "adder_details": adder_details,  # additive -- lets a caller reclassify without re-fetching Aurora
     }
-
-
-# TEMPORARY (2026-09-18): dry-run comparison of the current buggy classifier
-# (D. MISC:-only, deny-list) against the new explicit classify_adder() table,
-# per active Install. Read-only -- no Zoho or Aurora writes. Remove once the
-# real fix (replacing the classification in _get_commission_data_for_project)
-# is reviewed and deployed; this endpoint's whole purpose is to become
-# unnecessary the moment "old" and "new" are the same thing.
-@app.post("/internal/debug-subcontractor-audit")
-async def debug_subcontractor_audit():
-    try:
-        token = get_zoho_access_token()
-        if not token:
-            return {"status": "failed - no zoho token"}
-        api_domain = os.getenv("ZOHO_API_DOMAIN")
-        headers = {"Authorization": f"Zoho-oauthtoken {token}"}
-
-        criteria = "(Project_Stage:not_equal:Canceled)and(Project_Stage:not_equal:Project Closeout)"
-        fields = "id,Name,Aurora_Project_ID,Active_Snapshot,Project_Stage"
-        installs, page = [], 1
-        while True:
-            r = requests.get(
-                f"{api_domain}/crm/v7/Installs/search",
-                headers=headers,
-                params={"criteria": criteria, "fields": fields, "page": page, "per_page": 200},
-            )
-            if r.status_code == 204:
-                break
-            if r.status_code >= 400:
-                return {"status": f"failed - zoho search {r.status_code}", "body": r.text[:300]}
-            body = r.json()
-            installs.extend(body.get("data", []))
-            if not body.get("info", {}).get("more_records"):
-                break
-            page += 1
-
-        results = []
-        for inst in installs:
-            row = {
-                "name": inst.get("Name"),
-                "zoho_id": inst.get("id"),
-                "project_stage": inst.get("Project_Stage"),
-                "aurora_project_id": (inst.get("Aurora_Project_ID") or "").strip(),
-                "has_active_snapshot": bool(inst.get("Active_Snapshot")),
-            }
-            if not row["aurora_project_id"]:
-                row["note"] = "no Aurora_Project_ID"
-                results.append(row)
-                continue
-
-            data = _get_commission_data_for_project(row["aurora_project_id"])
-            if "error" in data:
-                row["error"] = data["error"]
-                results.append(row)
-                continue
-
-            old_total = float(data.get("subcontractor_total") or 0)
-            adder_details = data.get("adder_details") or []
-            new_total = 0.0
-            unknown_adders = []
-            for adder in adder_details:
-                aname = (adder.get("name") or "").strip()
-                atotal = float(adder.get("total") or 0)
-                if not aname or atotal <= 0 or aname == "A - Referral Payout":
-                    continue
-                cls = classify_adder(aname)
-                if cls == "subcontractor":
-                    new_total += atotal
-                elif cls == "unknown":
-                    unknown_adders.append(f"{aname} (${atotal:,.2f})")
-
-            row["old_subcontractor_total"] = round(old_total, 2)
-            row["new_subcontractor_total"] = round(new_total, 2)
-            row["delta"] = round(new_total - old_total, 2)
-            row["unknown_adders"] = unknown_adders
-            results.append(row)
-
-        return {"status": "ok", "count": len(results), "results": results}
-    except Exception:
-        logger.exception("Unhandled exception in debug_subcontractor_audit")
-        return {"status": "failed - exception"}
 
 
 def _write_commission_tab(svc, tab_name: str, rows: list[dict]) -> None:
@@ -5473,8 +5407,14 @@ def _write_cashflow_tab(svc, tab_name: str, rows: list[dict]) -> None:
         consultant_comp_ppw = float(d.get("consultant_comp_ppw") or 0)
         total_commission = round(base_commission + consultant_comp_ppw * system_watts, 2)
         referral_flat = float(d.get("referral_flat") or 0)
-        subcontractor_total = d.get("subcontractor_total", 0)
-        subcontractor_notes = d.get("subcontractor_notes", "")
+        # No Aurora commission data at all (Active_Snapshot missing, or every
+        # design has $0 base price) is NOT the same fact as "no adders on a
+        # real project" -- None here, not 0, so the sheet shows unknown
+        # rather than a false zero (CLAUDE.md "Subcontractor cost
+        # classification", defect 3).
+        has_commission_data = "error" not in d
+        subcontractor_total = d.get("subcontractor_total", 0) if has_commission_data else None
+        subcontractor_notes = d.get("subcontractor_notes", "") if has_commission_data else "NO ADDER DATA (no Aurora commission data for this project)"
         materials_est = (
             round(system_watts * CASHFLOW_MATERIALS_PPW, 2)
             if system_watts and finance_type == "LR" else ""
@@ -5621,7 +5561,7 @@ def _write_cashflow_tab(svc, tab_name: str, rows: list[dict]) -> None:
             payment3_date,
             payment3_amt,
             materials_est,
-            subcontractor_total if subcontractor_total else "",
+            "UNKNOWN" if subcontractor_total is None else (subcontractor_total if subcontractor_total else ""),
             notes_col,
             referral_flat if referral_flat else "",
             total_commission,
@@ -6318,8 +6258,11 @@ def _compute_cashflow_row(row: dict, today: datetime.date, zoho_base: str, auror
     consultant_comp_ppw = float(d.get("consultant_comp_ppw") or 0)
     total_commission = round(base_commission + consultant_comp_ppw * system_watts, 2)
     referral_flat = float(d.get("referral_flat") or 0)
-    subcontractor_total = d.get("subcontractor_total", 0)
-    subcontractor_notes = d.get("subcontractor_notes", "")
+    # See the identical comment in _write_cashflow_tab's row loop -- no Aurora
+    # commission data is a distinct fact from "no adders", so None not 0.
+    has_commission_data = "error" not in d
+    subcontractor_total = d.get("subcontractor_total", 0) if has_commission_data else None
+    subcontractor_notes = d.get("subcontractor_notes", "") if has_commission_data else "NO ADDER DATA (no Aurora commission data for this project)"
     materials_est = round(system_watts * CASHFLOW_MATERIALS_PPW, 2) if system_watts else ""
     if pov.get("materials") is not None:
         materials_est = pov["materials"]
@@ -6546,7 +6489,9 @@ def _compute_cashflow_row(row: dict, today: datetime.date, zoho_base: str, auror
         payment1_date, payment1_amt,
         payment2_date, payment2_amt,
         payment3_date, payment3_amt,
-        materials_est, subcontractor_total if subcontractor_total else "", subcontractor_notes,
+        materials_est,
+        "UNKNOWN" if subcontractor_total is None else (subcontractor_total if subcontractor_total else ""),
+        subcontractor_notes,
         referral_flat if referral_flat else "", total_commission,
         comm_payout1_date, comm_payout1_amt,
         comm_payout2_date, comm_payout2_amt,
@@ -7612,8 +7557,12 @@ def _run_cashflow_batch(projects: list[dict], tab_name: str) -> dict:
         logger.info(f"cashflow_batch: fetching {p['aurora_project_id']} ({p['customer']})")
         aurora_data = _get_commission_data_for_project(p["aurora_project_id"])
         if "error" in aurora_data:
+            # Keep the "error" key rather than resetting to {} -- _compute_cashflow_row's
+            # has_commission_data check relies on it to distinguish "no adder data" (unknown)
+            # from a real project with $0 adders (CLAUDE.md "Subcontractor cost
+            # classification", defect 3). Resetting to {} here silently produced a false
+            # zero for every project with no Active_Snapshot / no sold design.
             logger.info(f"cashflow_batch: no Aurora sold design for {p['customer']} ({aurora_data['error']}) — using Zoho data")
-            aurora_data = {}
 
         proj_id = p.get("project_id", "")
         pov = overrides.get(proj_id, {})
