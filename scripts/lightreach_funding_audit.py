@@ -409,16 +409,24 @@ def discover_accounts_nav(page, user, password):
             print(f"\n  API call [{label}]: HTTP {resp.status}")
             if resp.ok:
                 body = resp.json()
+
+                def describe(v, k, indent="    "):
+                    if isinstance(v, list):
+                        print(f"{indent}'{k}' is a list of {len(v)} items")
+                        if v:
+                            print(f"{indent}sample item keys: {list(v[0].keys()) if isinstance(v[0], dict) else type(v[0])}")
+                            print(f"{indent}sample item: {_json.dumps(v[0], default=str)[:800]}")
+                    elif isinstance(v, dict):
+                        print(f"{indent}'{k}' is a dict with keys: {list(v.keys())}")
+                        for k2, v2 in v.items():
+                            describe(v2, k2, indent + "  ")
+                    elif isinstance(v, (int, float, str, bool, type(None))):
+                        print(f"{indent}'{k}' = {v!r}")
+
                 if isinstance(body, dict):
                     print(f"    top-level keys: {list(body.keys())}")
                     for k, v in body.items():
-                        if isinstance(v, list):
-                            print(f"    '{k}' is a list of {len(v)} items")
-                            if v:
-                                print(f"    sample item keys: {list(v[0].keys()) if isinstance(v[0], dict) else type(v[0])}")
-                                print(f"    sample item: {_json.dumps(v[0], default=str)[:800]}")
-                        elif isinstance(v, (int, float, str, bool, type(None))):
-                            print(f"    '{k}' = {v!r}")
+                        describe(v, k)
                 elif isinstance(body, list):
                     print(f"    top-level list of {len(body)} items")
                     if body:
