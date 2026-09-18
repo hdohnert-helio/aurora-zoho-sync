@@ -1,0 +1,26 @@
+name: SimpleFIN smoke test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: pip install requests
+      - name: Load SimpleFIN credentials from 1Password
+        uses: 1password/load-secrets-action@v2
+        with:
+          export-env: true
+        env:
+          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          SIMPLEFIN_ACCESS_URL: op://Helio Automation/SimpleFIN/SIMPLEFIN_ACCESS_URL
+          SIMPLEFIN_ACCOUNT_IDS: op://Helio Automation/SimpleFIN/SIMPLEFIN_ACCOUNT_IDS
+      - name: Run smoke test
+        timeout-minutes: 4
+        run: python -u scripts/simplefin_smoke.py
