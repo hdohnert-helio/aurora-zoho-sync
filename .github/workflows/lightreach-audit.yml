@@ -1,0 +1,41 @@
+name: LightReach funding audit
+
+on:
+  workflow_dispatch:
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: |
+          pip install playwright requests
+          playwright install --with-deps chromium
+
+      - name: Load LightReach + Zoho credentials from 1Password
+        uses: 1password/load-secrets-action@v2
+        with:
+          export-env: true
+        env:
+          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          LR_USER: op://Helio Automation/LightReach/LR_USER
+          LR_PASS: op://Helio Automation/LightReach/LR_PASS
+          ZOHO_CLIENT_ID: op://Helio Automation/Zoho API/ZOHO_CLIENT_ID
+          ZOHO_CLIENT_SECRET: op://Helio Automation/Zoho API/ZOHO_CLIENT_SECRET
+          ZOHO_REFRESH_TOKEN: op://Helio Automation/Zoho API/ZOHO_REFRESH_TOKEN
+
+      - name: Run funding audit
+        timeout-minutes: 45
+        run: python -u scripts/lightreach_funding_audit.py
+
+      - name: Upload CSVs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lightreach-funding-csvs
+          path: artifacts/
+          if-no-files-found: warn
