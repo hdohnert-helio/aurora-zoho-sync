@@ -280,13 +280,22 @@ def scrape_account(page, account_id, debug=False, retries=2):
             )
             text = page.inner_text("body")
             if debug:
-                print(f"  DEBUG raw page text for {account_id} (first 4000 chars):")
-                print(text[:4000])
+                print(f"  DEBUG raw page text length for {account_id}: {len(text)} chars")
+                print("  DEBUG chars 3800-9000:")
+                print(text[3800:9000])
             lines = [l.strip() for l in text.split("\n") if l.strip()]
             fields = parse_funding_fields(lines)
             fields["funding_url"] = url
             ledger_rows = extract_ledger(page)
             if debug:
+                n_tables = page.locator("table").count()
+                print(f"  DEBUG {n_tables} <table> elements on page")
+                for ti in range(n_tables):
+                    t = page.locator("table").nth(ti)
+                    try:
+                        print(f"    table[{ti}] first 200 chars: {t.inner_text()[:200]!r}")
+                    except Exception as e:
+                        print(f"    table[{ti}]: (failed: {e})")
                 print(f"  DEBUG ledger rows for {account_id}: {len(ledger_rows)}")
                 for row in ledger_rows[:3]:
                     print("   ", row)
