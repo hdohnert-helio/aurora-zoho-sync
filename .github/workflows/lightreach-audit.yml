@@ -11,6 +11,10 @@ on:
         description: 'Debug: log in, click the Accounts nav item, dump page structure, exit (no scrape).'
         type: boolean
         default: false
+      run_deposit_match:
+        description: 'After the audit, re-run lr_deposit_match.py against the freshly scraped ledger (Part 2).'
+        type: boolean
+        default: true
 
 jobs:
   audit:
@@ -37,6 +41,16 @@ jobs:
           ZOHO_CLIENT_SECRET: op://Helio Automation/Zoho API/ZOHO_CLIENT_SECRET
           ZOHO_REFRESH_TOKEN: op://Helio Automation/Zoho API/ZOHO_REFRESH_TOKEN
 
+      - name: Load SimpleFIN credentials from 1Password
+        if: inputs.run_deposit_match
+        uses: 1password/load-secrets-action@v2
+        with:
+          export-env: true
+        env:
+          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          SIMPLEFIN_ACCESS_URL: op://Helio Automation/SimpleFIN/SIMPLEFIN_ACCESS_URL
+          SIMPLEFIN_ACCOUNT_IDS: op://Helio Automation/SimpleFIN/SIMPLEFIN_ACCOUNT_IDS
+
       - name: Run funding audit
         timeout-minutes: 45
         env:
@@ -51,3 +65,8 @@ jobs:
           name: lightreach-funding-csvs
           path: artifacts/
           if-no-files-found: warn
+
+      - name: Re-run deposit match against the fresh ledger (Part 2)
+        if: inputs.run_deposit_match && !inputs.discover_accounts
+        timeout-minutes: 5
+        run: python -u scripts/lr_deposit_match.py
