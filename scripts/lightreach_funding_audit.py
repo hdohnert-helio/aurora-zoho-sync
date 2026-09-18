@@ -263,6 +263,76 @@ def ledger_row_to_transaction(account_id, project_name, vals):
 
 # ── Per-account scrape ───────────────────────────────────────────────────────
 
+def discover_accounts_nav(page, user, password):
+    """One-shot exploration: log in, find the Accounts nav item CLAUDE.md
+    mentions, click it, and dump enough structure (URL, table headers, first
+    rows) to design the real list-scraper against. Not used in a normal run --
+    triggered by LR_DISCOVER_ACCOUNTS=1 so this can be run standalone and
+    cheaply against the real portal before committing to a parsing approach."""
+    login(page, user, password)
+    print("logged in, looking for an Accounts nav item")
+
+    clicked = False
+    for text in ("Accounts", "ACCOUNTS", "All Accounts"):
+        try:
+            loc = page.get_by_text(text, exact=False)
+            if loc.count() > 0:
+                loc.first.click(timeout=5000)
+                page.wait_for_timeout(2000)
+                clicked = True
+                print(f"  clicked nav text {text!r}, now at: {page.url}")
+                break
+        except Exception as e:
+            print(f"  (tried {text!r}: {e})")
+    if not clicked:
+        print("  could not find an 'Accounts' nav link by text -- dumping nav links instead")
+        links = page.locator("a")
+        for i in range(min(links.count(), 40)):
+            try:
+                href = links.nth(i).get_attribute("href")
+                txt = links.nth(i).inner_text().strip()
+                if txt or href:
+                    print(f"    link[{i}]: text={txt!r} href={href!r}")
+            except Exception:
+                continue
+        return
+
+    page.wait_for_timeout(1500)
+    text = page.inner_text("body")
+    print(f"\n  page text length: {len(text)} chars")
+    print("  first 2000 chars:")
+    print(text[:2000])
+
+    tables = page.locator("table")
+    n_tables = tables.count()
+    print(f"\n  {n_tables} <table> elements")
+    for i in range(n_tables):
+        t = tables.nth(i)
+        try:
+            print(f"  table[{i}] first 500 chars: {t.inner_text()[:500]!r}")
+        except Exception as e:
+            print(f"  table[{i}]: (failed: {e})")
+
+    # Look for row links that might carry the account id, same shape as the
+    # known /accounts/{id}/funding URL.
+    links = page.locator("a[href*='/accounts/']")
+    n_links = links.count()
+    print(f"\n  {n_links} links containing '/accounts/'")
+    for i in range(min(n_links, 20)):
+        try:
+            href = links.nth(i).get_attribute("href")
+            txt = links.nth(i).inner_text().strip()
+            print(f"    [{i}] text={txt!r} href={href!r}")
+        except Exception:
+            continue
+
+    # Pagination hints
+    for label in ("Next", "Load more", "Show more", "Rows per page"):
+        loc = page.get_by_text(label, exact=False)
+        if loc.count() > 0:
+            print(f"  pagination hint found: {label!r} ({loc.count()}x)")
+
+
 def scrape_account(page, account_id, debug=False, retries=2):
     """Retries a timed-out render before giving up. The first full run
     (2026-09-18, 136 accounts) skipped 29 with a suspiciously regular
@@ -326,6 +396,16 @@ def scrape_account(page, account_id, debug=False, retries=2):
 def main():
     if not LR_USER or not LR_PASS:
         print("FAIL: LR_USER / LR_PASS not set"); return 1
+
+    if os.environ.get("LR_DISCOVER_ACCOUNTS", "").strip():
+        with sync_playwright() as p:
+            browser = p.chromium.launch()
+            page = browser.new_context(viewport={"width": 1600, "height": 1200}).new_page()
+            try:
+                discover_accounts_nav(page, LR_USER, LR_PASS)
+            finally:
+                browser.close()
+        return 0
 
     only = os.environ.get("LR_ONLY", "").strip()  # debug: comma-separated account IDs
 

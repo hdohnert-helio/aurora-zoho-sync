@@ -7,6 +7,10 @@ on:
         description: 'Debug: comma-separated LightReach_Account_ID(s) to restrict to. Leave blank for all.'
         type: string
         default: ''
+      discover_accounts:
+        description: 'Debug: log in, click the Accounts nav item, dump page structure, exit (no scrape).'
+        type: boolean
+        default: false
 
 jobs:
   audit:
@@ -37,6 +41,7 @@ jobs:
         timeout-minutes: 45
         env:
           LR_ONLY: ${{ inputs.only }}
+          LR_DISCOVER_ACCOUNTS: ${{ inputs.discover_accounts }}
         run: python -u scripts/lightreach_funding_audit.py
 
       - name: Upload CSVs
