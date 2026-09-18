@@ -1062,6 +1062,31 @@ and the backfill job around line 1062). The other four have no Aurora project.
 Across all non-cancelled Installs: 63 with a snapshot, 375 without (most of the
 tail is historical and outside the cashflow window).
 
+### Snapshot backfill results (2026-09-18)
+
+Ran `/internal/create-initial-snapshot` for all five recoverable installs:
+
+- **Ghazal, Duke, Desrochers, DeTuccio -- still blocked, and it's an Aurora
+  data gap, not a code bug.** All four have zero Aurora designs tagged
+  `milestone: sold` (`_create_initial_snapshot_for_install` requires exactly
+  one). Nothing to fix here; they correctly stay in the Defect 3 "no adder
+  data" bucket until a design gets marked sold in Aurora.
+- **Bob Muller -- fixed.** Failed with `INVALID_DATA`, `api_name:
+  "Incentives_Total"`, `maximum_length: 16`. Root cause: `extract_pricing_fields`
+  set `Incentives_Total`/`Solar_Incentives_Total`/`Storage_Incentives_Total`/
+  the `*_Before_Incentives` fields from raw unrounded float arithmetic --
+  `solar_incentives_total + storage_incentives_total` can produce a value
+  like `34999.999999999996` (18 chars), over Zoho's 16-char field limit,
+  where every other pricing field in the same function was already
+  `round(..., 2)` (see `Final_System_Price` a few lines up). Fixed by
+  rounding all six fields to 2 decimals. Retried after deploy: snapshot
+  `5264387000097199003` created successfully.
+
+So of the original 9 no-snapshot installs: Muller now has one, 4 (Ghazal/
+Duke/Desrochers/DeTuccio) correctly remain snapshot-less pending an Aurora-side
+fix, and the other 4 (Alex Starr, GVFC ASnell, Ramsey Goodrich, LaFauci) have
+no Aurora project at all and are expected to stay that way.
+
 ### Required fixes
 
 1. Extend the classifier to all prefixes, driven by the explicit table above.
