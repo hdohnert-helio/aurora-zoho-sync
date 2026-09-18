@@ -199,41 +199,81 @@ def fetch_palmetto_accounts(page, milestone_types=FUNDED_MILESTONE_TYPES, page_s
     Returns the full raw account list (all milestones) plus the filtered
     (funded-only) subset, so the caller can report Palmetto's total account
     count as context even though only the funded subset gets scraped.
+
+    Walking all ~1373 accounts (mostly Notice to Proceed leads, per Harry)
+    just to find the ~107 funded ones is slow and, worse, unsafe: the walk
+    takes minutes (longer with 429 backoffs) under sort=NEWEST, which is not
+    a stable key while the underlying list keeps changing in near-real-time
+    -- confirmed 2026-09-18, when a second investigation run found 4 accounts
+    genuinely at currentMilestone=install that a same-day full walk had
+    missed. So: try the API's own currentMilestone filter first (one
+    short, fast walk per funded milestone type); only fall back to the full
+    walk (deduped by id, immune to a little count drift) if the server
+    doesn't actually honor that filter.
     """
-    all_accounts = []
-    page_num = 1
-    total = None
-    while True:
-        url = (
-            f"{FUNDING_HOST}/api/accounts/summary?currentMilestone=undefined&pageNum={page_num}"
-            "&advancedFilters=%5B%5D&searchTerm=undefined&includeCompletedAccounts=true"
-            "&onlyCancelledAccounts=false&onlyPostActivationAccounts=false&sort=NEWEST"
-        )
-        # ~69 pages at 20/page hit HTTP 429 around page 30 on the first real
-        # run (2026-09-18) -- back off and retry a few times before giving up,
-        # same shape as scrape_account's retry for a timed-out render.
-        resp = None
-        for attempt in range(1, 6):
-            resp = page.request.get(url, timeout=30000)
-            if resp.status != 429:
-                break
-            wait_s = 5 * attempt
-            print(f"  /api/accounts/summary page {page_num}: HTTP 429, "
-                  f"backing off {wait_s}s (attempt {attempt}/5)")
-            page.wait_for_timeout(wait_s * 1000)
-        if not resp.ok:
-            raise RuntimeError(f"/api/accounts/summary page {page_num} failed: HTTP {resp.status}")
-        body = resp.json()
-        if total is None:
-            total = body.get("total", 0)
-        batch = (body.get("data") or {}).get("accounts") or []
-        if not batch:
+    def _walk(milestone_param, filter_client_side):
+        seen = {}
+        page_num = 1
+        total = None
+        empty_streak = 0
+        while True:
+            url = (
+                f"{FUNDING_HOST}/api/accounts/summary?currentMilestone={milestone_param}&pageNum={page_num}"
+                "&advancedFilters=%5B%5D&searchTerm=undefined&includeCompletedAccounts=true"
+                "&onlyCancelledAccounts=false&onlyPostActivationAccounts=false&sort=NEWEST"
+            )
+            # ~69 pages at 20/page hit HTTP 429 around page 30 on the first real
+            # run (2026-09-18) -- back off and retry a few times before giving up,
+            # same shape as scrape_account's retry for a timed-out render.
+            resp = None
+            for attempt in range(1, 6):
+                resp = page.request.get(url, timeout=30000)
+                if resp.status != 429:
+                    break
+                wait_s = 5 * attempt
+                print(f"  /api/accounts/summary page {page_num}: HTTP 429, "
+                      f"backing off {wait_s}s (attempt {attempt}/5)")
+                page.wait_for_timeout(wait_s * 1000)
+            if not resp.ok:
+                raise RuntimeError(f"/api/accounts/summary page {page_num} failed: HTTP {resp.status}")
+            body = resp.json()
+            if total is None:
+                total = body.get("total", 0)
+            batch = (body.get("data") or {}).get("accounts") or []
+            if not batch:
+                empty_streak += 1
+                if empty_streak >= 2:  # two empties in a row -- genuinely done, not a transient blip
+                    break
+            else:
+                empty_streak = 0
+                for a in batch:
+                    seen[a.get("id")] = a
+            page_num += 1
+            page.wait_for_timeout(400)  # small gap between pages -- avoid tripping the rate limit at all
+        accounts = list(seen.values())
+        if filter_client_side:
+            accounts = [a for a in accounts if (a.get("currentMilestone") or {}).get("type") == milestone_param]
+        return accounts, total
+
+    # Try server-side filtering first, one type at a time -- much shorter
+    # walks than the full ~1373-account list.
+    funded_by_type = {}
+    server_filter_worked = True
+    for mtype in milestone_types:
+        accounts, _ = _walk(mtype, filter_client_side=False)
+        if accounts and any((a.get("currentMilestone") or {}).get("type") != mtype for a in accounts):
+            server_filter_worked = False
             break
-        all_accounts.extend(batch)
-        if len(all_accounts) >= total:
-            break
-        page_num += 1
-        page.wait_for_timeout(400)  # small gap between pages -- avoid tripping the rate limit at all
+        for a in accounts:
+            funded_by_type[a.get("id")] = a
+
+    if server_filter_worked and funded_by_type:
+        print(f"  /api/accounts/summary honors currentMilestone= -- used a focused walk per milestone type")
+        return None, list(funded_by_type.values())
+
+    print(f"  /api/accounts/summary did NOT filter by currentMilestone= as expected -- "
+          f"falling back to a full walk of every account")
+    all_accounts, _ = _walk("undefined", filter_client_side=False)
     funded = [a for a in all_accounts if (a.get("currentMilestone") or {}).get("type") in milestone_types]
     return all_accounts, funded
 
@@ -816,8 +856,12 @@ def main():
         print("logged in")
 
         all_accounts, funded_accounts = fetch_palmetto_accounts(page)
-        print(f"Palmetto: {len(all_accounts)} total accounts, "
-              f"{len(funded_accounts)} at Install/Activation milestone (the funded subset)")
+        if all_accounts is None:
+            print(f"Palmetto: {len(funded_accounts)} at Install/Activation milestone "
+                  f"(found via a focused per-milestone walk, not a full account listing)")
+        else:
+            print(f"Palmetto: {len(all_accounts)} total accounts, "
+                  f"{len(funded_accounts)} at Install/Activation milestone (the funded subset)")
 
         # known_cities for split_site_location's no-comma fallback comes from
         # Palmetto's own (clean, separate) city field -- not from Zoho's messy
