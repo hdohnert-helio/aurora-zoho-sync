@@ -389,6 +389,54 @@ def discover_accounts_nav(page, user, password):
     except Exception as e:
         print(f"  (Export click/download failed or no download: {e})")
 
+    # The real backing API: /api/accounts/summary. Default view passes
+    # includeCompletedAccounts=false -- replay it from inside the page
+    # (shares the browser's session cookies) with that flipped to true to
+    # see whether completed/funded accounts (the ones Zoho already knows via
+    # LightReach_Account_ID) show up once that flag is set.
+    import json as _json
+    for label, params in [
+        ("default (includeCompletedAccounts=false)",
+         "currentMilestone=undefined&pageNum=1&advancedFilters=%5B%5D&searchTerm=undefined"
+         "&includeCompletedAccounts=false&onlyCancelledAccounts=false&onlyPostActivationAccounts=false&sort=NEWEST"),
+        ("includeCompletedAccounts=true",
+         "currentMilestone=undefined&pageNum=1&advancedFilters=%5B%5D&searchTerm=undefined"
+         "&includeCompletedAccounts=true&onlyCancelledAccounts=false&onlyPostActivationAccounts=false&sort=NEWEST"),
+    ]:
+        url = f"https://palmetto.finance/api/accounts/summary?{params}"
+        try:
+            resp = page.request.get(url, timeout=15000)
+            print(f"\n  API call [{label}]: HTTP {resp.status}")
+            if resp.ok:
+                body = resp.json()
+                if isinstance(body, dict):
+                    print(f"    top-level keys: {list(body.keys())}")
+                    for k, v in body.items():
+                        if isinstance(v, list):
+                            print(f"    '{k}' is a list of {len(v)} items")
+                            if v:
+                                print(f"    sample item keys: {list(v[0].keys()) if isinstance(v[0], dict) else type(v[0])}")
+                                print(f"    sample item: {_json.dumps(v[0], default=str)[:800]}")
+                        elif isinstance(v, (int, float, str, bool, type(None))):
+                            print(f"    '{k}' = {v!r}")
+                elif isinstance(body, list):
+                    print(f"    top-level list of {len(body)} items")
+                    if body:
+                        print(f"    sample item: {_json.dumps(body[0], default=str)[:800]}")
+            else:
+                print(f"    body: {resp.text()[:500]}")
+        except Exception as e:
+            print(f"  API call [{label}] failed: {e}")
+
+    # Also check the /filters endpoint for the full milestone vocabulary.
+    try:
+        resp = page.request.get("https://palmetto.finance/api/accounts/filters?cancelled=false&includeOptions=true", timeout=15000)
+        print(f"\n  /api/accounts/filters: HTTP {resp.status}")
+        if resp.ok:
+            print(f"    body: {_json.dumps(resp.json(), default=str)[:1500]}")
+    except Exception as e:
+        print(f"  /api/accounts/filters failed: {e}")
+
 
 def scrape_account(page, account_id, debug=False, retries=2):
     """Retries a timed-out render before giving up. The first full run
