@@ -274,7 +274,7 @@ def discover_accounts_nav(page, user, password):
     def on_response(resp):
         try:
             ct = resp.headers.get("content-type", "")
-            if "json" in ct and "/accounts" in resp.url.lower():
+            if "json" in ct:
                 xhr_hits.append((resp.request.method, resp.url, resp.status))
         except Exception:
             pass
@@ -344,24 +344,22 @@ def discover_accounts_nav(page, user, password):
         if loc.count() > 0:
             print(f"  pagination hint found: {label!r} ({loc.count()}x)")
 
-    # Status filter breakdown (Qualification / Notice to Proceed / Install /
-    # Activation counts seen in the nav) -- click "Filter" to see the FULL
-    # set of statuses, since a Kanban-style board like this commonly excludes
-    # a terminal "Complete"/"Funded"/"Cancelled" bucket from the default view,
-    # which would matter enormously for whether "All" really means all.
-    try:
-        filter_btn = page.get_by_text("Filter", exact=False)
-        if filter_btn.count() > 0:
-            filter_btn.first.click(timeout=5000)
-            page.wait_for_timeout(1000)
-            print("\n  clicked Filter -- panel text:")
-            print(page.inner_text("body")[:3000])
-    except Exception as e:
-        print(f"  (Filter click failed: {e})")
-
-    print(f"\n  XHR/fetch JSON responses touching '/accounts' seen so far: {len(xhr_hits)}")
-    for method, url, status in xhr_hits[:20]:
+    print(f"\n  ALL JSON XHR/fetch responses seen during login + accounts load: {len(xhr_hits)}")
+    for method, url, status in xhr_hits:
         print(f"    {method} {status} {url}")
+
+    # List every clickable button/link near the top toolbar (Account/Export/
+    # All/Filter/Sort) -- "Filter" as matched by get_by_text may not be the
+    # real control; dump actual button elements instead of guessing.
+    print("\n  <button> elements on page:")
+    buttons = page.locator("button")
+    for i in range(min(buttons.count(), 40)):
+        try:
+            txt = buttons.nth(i).inner_text().strip()
+            if txt:
+                print(f"    button[{i}]: {txt!r}")
+        except Exception:
+            continue
 
     # Try clicking Next and see what changes -- URL query params, or a
     # client-side re-render with no navigation.
@@ -369,15 +367,27 @@ def discover_accounts_nav(page, user, password):
         next_link = page.get_by_text("Next", exact=False)
         if next_link.count() > 0:
             before_url = page.url
+            before_n = len(xhr_hits)
             next_link.first.click(timeout=5000)
-            page.wait_for_timeout(1500)
+            page.wait_for_timeout(2000)
             print(f"\n  clicked Next: {before_url} -> {page.url}")
+            print(f"  new JSON responses after Next click: {len(xhr_hits) - before_n}")
+            for method, url, status in xhr_hits[before_n:]:
+                print(f"    {method} {status} {url}")
     except Exception as e:
         print(f"  (Next click failed: {e})")
 
-    print(f"\n  XHR/fetch JSON responses touching '/accounts' after Next click: {len(xhr_hits)}")
-    for method, url, status in xhr_hits[:30]:
-        print(f"    {method} {status} {url}")
+    # Try Export -- capture any triggered download.
+    try:
+        export_btn = page.get_by_text("Export", exact=False)
+        if export_btn.count() > 0:
+            print("\n  trying Export button...")
+            with page.expect_download(timeout=8000) as dl_info:
+                export_btn.first.click(timeout=5000)
+            dl = dl_info.value
+            print(f"  Export triggered a download: {dl.suggested_filename}")
+    except Exception as e:
+        print(f"  (Export click/download failed or no download: {e})")
 
 
 def scrape_account(page, account_id, debug=False, retries=2):
