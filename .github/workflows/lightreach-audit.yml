@@ -15,6 +15,10 @@ on:
         description: 'After the audit, re-run lr_deposit_match.py against the freshly scraped ledger (Part 2).'
         type: boolean
         default: true
+      investigate_missing:
+        description: 'Debug: fetch each Zoho-linked account not currently at Install/Activation directly, dump milestone + inboundPayments, exit (no scrape).'
+        type: boolean
+        default: false
 
 jobs:
   audit:
@@ -56,6 +60,7 @@ jobs:
         env:
           LR_ONLY: ${{ inputs.only }}
           LR_DISCOVER_ACCOUNTS: ${{ inputs.discover_accounts }}
+          LR_INVESTIGATE_MISSING: ${{ inputs.investigate_missing }}
         run: python -u scripts/lightreach_funding_audit.py
 
       - name: Upload CSVs
@@ -67,6 +72,6 @@ jobs:
           if-no-files-found: warn
 
       - name: Re-run deposit match against the fresh ledger (Part 2)
-        if: inputs.run_deposit_match && !inputs.discover_accounts
+        if: inputs.run_deposit_match && !inputs.discover_accounts && !inputs.investigate_missing
         timeout-minutes: 5
         run: python -u scripts/lr_deposit_match.py

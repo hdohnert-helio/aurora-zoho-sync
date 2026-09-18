@@ -399,6 +399,58 @@ def ledger_row_to_transaction(account_id, project_name, vals):
 
 # ── Per-account scrape ───────────────────────────────────────────────────────
 
+def investigate_missing_accounts(page):
+    """One-shot investigation, triggered by LR_INVESTIGATE_MISSING=1.
+
+    The 2026-09-18 real run scraped 107 Palmetto accounts at Install/
+    Activation milestone (vs 136 Zoho knew via LightReach_Account_ID) and got
+    the deposit-match rate to 16/19 batches -- up from 13/19 before the
+    Palmetto-driven enumeration, but not the 19/19 target. The 3 remaining
+    misses all show a real Palmetto deposit with a positive, unexplained gap
+    over the ledger total -- the same "our gap, not LightReach's" signature
+    documented in CLAUDE.md for the original 6 misses.
+
+    Working theory: some of the 29 Zoho-linked accounts NOT currently at
+    Install/Activation milestone (e.g. since cancelled, or otherwise moved
+    off it) still had real ledger activity that landed in this 90-day window
+    before/around that move. This fetches each of those 29 directly by id
+    (GET /api/accounts/{id}, no /funding page scrape needed) and dumps
+    currentMilestone + inboundPayments so the specific account(s) behind each
+    unmatched batch can be identified.
+    """
+    token = get_zoho_token()
+    zoho_installs = fetch_all_zoho_installs(token)
+    zoho_lr_ids = {(i.get("LightReach_Account_ID") or "").strip(): i
+                   for i in zoho_installs if (i.get("LightReach_Account_ID") or "").strip()}
+    print(f"{len(zoho_lr_ids)} Zoho Installs with a LightReach_Account_ID")
+
+    _, funded_accounts = fetch_palmetto_accounts(page)
+    funded_ids = {a.get("id") for a in funded_accounts}
+    print(f"{len(funded_ids)} currently at Install/Activation milestone in Palmetto")
+
+    missing_ids = set(zoho_lr_ids) - funded_ids
+    print(f"{len(missing_ids)} Zoho-linked ids NOT in the current funded list -- fetching each directly\n")
+
+    for acc_id in sorted(missing_ids):
+        inst = zoho_lr_ids[acc_id]
+        try:
+            resp = page.request.get(f"{FUNDING_HOST}/api/accounts/{acc_id}", timeout=15000)
+            if not resp.ok:
+                print(f"  {acc_id} ({inst.get('Name')}): HTTP {resp.status}")
+                continue
+            body = resp.json()
+            ms = body.get("currentMilestone") or {}
+            payments = body.get("inboundPayments")
+            print(f"  {acc_id} ({inst.get('Name')}): currentMilestone={ms.get('type')} "
+                  f"status={ms.get('status')}")
+            if payments:
+                import json as _json
+                print(f"    inboundPayments: {_json.dumps(payments, default=str)[:2000]}")
+        except Exception as e:
+            print(f"  {acc_id} ({inst.get('Name')}): fetch failed: {e}")
+        page.wait_for_timeout(300)
+
+
 def discover_accounts_nav(page, user, password):
     """One-shot exploration: log in, find the Accounts nav item CLAUDE.md
     mentions, click it, and dump enough structure (URL, table headers, first
@@ -724,6 +776,17 @@ def main():
             page = browser.new_context(viewport={"width": 1600, "height": 1200}).new_page()
             try:
                 discover_accounts_nav(page, LR_USER, LR_PASS)
+            finally:
+                browser.close()
+        return 0
+
+    if os.environ.get("LR_INVESTIGATE_MISSING", "").strip().lower() in ("1", "true", "yes"):
+        with sync_playwright() as p:
+            browser = p.chromium.launch()
+            page = browser.new_context(viewport={"width": 1600, "height": 1200}).new_page()
+            try:
+                login(page, LR_USER, LR_PASS)
+                investigate_missing_accounts(page)
             finally:
                 browser.close()
         return 0
