@@ -1404,27 +1404,34 @@ that no longer show up in ANY list view. Still unconfirmed whether they
 carry historical ledger activity relevant to the 90-day reconciliation
 window; flagged below, not resolved.
 
-### Part 2 result: 12-16 of 18-19 batches matched, not yet 19/19
+### Part 2 result: 19/19 (2026-09-21) -- fixed
 
-Two full runs after the Palmetto-driven fix, ~40 minutes apart:
+Two full runs after the Palmetto-driven fix (2026-09-18), ~40 minutes apart,
+gave inconsistent results:
 
 | Run | Ledger rows in window | Batch dates | Matched |
 |---|---|---|---|
 | 1 | 64 | 19 | 16 (84%) |
 | 2 | 57 | 18 | 12 (67%) |
 
-Real improvement over the pre-fix baseline (13/19, 68%), but the **set of
-which batches match changed entirely between the two runs** -- not the same
-3-4 anomalies persisting, but a different set each time. That points at
-**scrape completeness noise in `scrape_account()`'s per-account ledger-table
-read**, not a remaining enumeration gap: the same 107 accounts were found
-both times, but a given account's `/funding` page ledger table apparently
-doesn't always come back complete (the existing 15s `table tbody tr` wait
-already has a documented history of being tight -- see the "two async-render
-timers" note above).
+The **set of which batches match changed entirely between the two runs**,
+pointing at scrape completeness noise in `scrape_account()`'s per-account
+ledger-table read rather than a remaining enumeration gap.
 
-**Not yet fixed.** Before trusting a specific unmatched-batch number, add a
-robustness check on the ledger scrape itself (e.g. a second pass re-scraping
-any account whose funding page's ledger table came back with 0 rows, or
-comparing row counts across two scrapes of the same account) rather than
-re-running the whole audit and eyeballing the diff again.
+**Root cause, confirmed 2026-09-21:** the 15s wait for `table tbody tr`
+swallowed its own timeout and just proceeded with whatever `extract_ledger`
+found (often 0 rows) -- a slow-but-real render was indistinguishable from a
+genuinely empty ledger. Turned out to be systemic, not occasional: on the
+run after the fix, the majority of accounts hit the 15s timeout on their
+*first* attempt and needed a retry.
+
+**Fix:** `scrape_account()` now treats a ledger-table timeout as a retriable
+failure (re-navigates and tries the whole page again, default retries
+raised 2 -> 3), and also retries once when the wait succeeded but the
+ledger still came back with 0 rows on an account whose payment plan shows
+real approved amounts. Only accepted as genuinely empty after exhausting
+retries.
+
+**Result:** 344 ledger rows (up from 291), 68 in the 90-day window (up from
+57-64) across all 19 batch dates, **19/19 batch-total deposits matched
+(100%)**. 107 ok / 0 skipped / 0 failed.
