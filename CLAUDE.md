@@ -1526,14 +1526,19 @@ must edit-in-place there, never overwrite.
 
 ### Trigger from the Cashflow sheet
 
-Adds "Helio -> Apply Approved Reconciliation Matches" (folded into the
-existing menu, not a separate top-level one) calling
-`/cashflow/reconcile-apply` directly via `UrlFetchApp.fetch` -- no bank
-creds involved, so it's safe to expose as a one-click action. Propose stays
-cron/Actions-triggered only for now (an in-sheet "Run Propose Now" button
-would need a GitHub PAT stored in the Apps Script's Script Properties --
-deliberately not built yet; see the "optional stretch" note in the original
-plan if the cron cadence proves too slow).
+Two menu items folded into the existing "Helio" menu (not a separate
+top-level one):
+
+- **"Apply Approved Reconciliation Matches"** -- calls
+  `/cashflow/reconcile-apply` directly via `UrlFetchApp.fetch`. No bank
+  creds involved, safe as a one-click action.
+- **"Pull New Chase Transactions"** -- triggers the `bank-reconciliation.yml`
+  workflow_dispatch via GitHub's REST API, so Harry doesn't have to wait for
+  the Mon/Wed/Fri cron. Needs a GitHub fine-grained PAT (scoped to just this
+  repo, Actions: Read and write) stored in the Apps Script project's Script
+  Properties under `GITHUB_PAT` -- a one-time setup Harry did himself (Claude
+  cannot create a PAT; GitHub has no API for that). The token never appears
+  in the script body or in this repo.
 
 ### Status: built and confirmed working end-to-end (2026-09-21)
 
