@@ -8706,6 +8706,43 @@ def _parse_reconciliation_match_key(key: str):
     return kind, week_serial, category, name
 
 
+# TEMPORARY (2026-09-21): diagnosing "Reconciliation tab has headers but no
+# data" despite the propose endpoint reporting 304 rows written. Remove once
+# the cause is found.
+@app.get("/internal/reconciliation-tab-debug")
+async def reconciliation_tab_debug():
+    try:
+        svc = _build_sheets_service()
+        if not svc:
+            return {"status": "failed", "reason": "could not build Sheets service"}
+        sheets = svc.spreadsheets()
+        meta = sheets.get(spreadsheetId=CASHFLOW_SHEET_ID).execute()
+        tab_meta = None
+        for s in meta.get("sheets", []):
+            if s["properties"]["title"] == CASHFLOW_RECONCILIATION_TAB:
+                tab_meta = s["properties"]
+                break
+        raw = sheets.values().get(
+            spreadsheetId=CASHFLOW_SHEET_ID,
+            range=f"'{CASHFLOW_RECONCILIATION_TAB}'!A1:M10",
+            valueRenderOption="UNFORMATTED_VALUE",
+        ).execute().get("values", [])
+        full = sheets.values().get(
+            spreadsheetId=CASHFLOW_SHEET_ID,
+            range=f"'{CASHFLOW_RECONCILIATION_TAB}'!A2:A5000",
+            valueRenderOption="UNFORMATTED_VALUE",
+        ).execute().get("values", [])
+        return {
+            "status": "ok",
+            "sheet_properties": tab_meta,
+            "first_10_rows_A1_M10": raw,
+            "col_a_nonempty_row_count": sum(1 for r in full if r and r[0] != ""),
+        }
+    except Exception as e:
+        logger.exception("reconciliation_tab_debug failed")
+        return {"status": "error", "detail": str(e)}
+
+
 @app.get("/internal/cashflow-snapshot")
 async def cashflow_snapshot():
     """
