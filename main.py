@@ -8783,26 +8783,6 @@ async def cashflow_snapshot():
         return {"status": "error", "detail": str(e)}
 
 
-# TEMPORARY (2026-09-21): the Reconciliation tab's column order changed
-# (round 2 of bank reconciliation -- see CLAUDE.md) and the 304 rows written
-# under the old order would misalign under the new headers. Nothing has been
-# Approved yet, so a one-time clear is safe. Remove this endpoint once run.
-@app.post("/internal/reconciliation-tab-reset")
-async def reconciliation_tab_reset():
-    try:
-        svc = _build_sheets_service()
-        if not svc:
-            return {"status": "failed", "reason": "could not build Sheets service"}
-        svc.spreadsheets().values().clear(
-            spreadsheetId=CASHFLOW_SHEET_ID,
-            range=f"'{CASHFLOW_RECONCILIATION_TAB}'!A2:M5000",
-        ).execute()
-        return {"status": "ok"}
-    except Exception as e:
-        logger.exception("reconciliation_tab_reset failed")
-        return {"status": "error", "detail": str(e)}
-
-
 @app.post("/internal/cashflow-reconcile-write-proposals")
 async def cashflow_reconcile_write_proposals(request: Request):
     """
