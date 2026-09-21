@@ -1435,3 +1435,94 @@ retries.
 **Result:** 344 ledger rows (up from 291), 68 in the 90-day window (up from
 57-64) across all 19 batch dates, **19/19 batch-total deposits matched
 (100%)**. 107 ok / 0 skipped / 0 failed.
+
+## Chase bank reconciliation -> Cashflow Revenue/Expenses (2026-09-21)
+
+Goal: reconcile real Chase transactions against the Cashflow sheet's Revenue
+(customer payments) and Expenses (commissions, subcontractor, materials, CT
+Green Estates, recurring bills) tabs, both directions, so the forecast can be
+marked confirmed instead of only ever showing a guess. Explicitly does NOT
+try to re-solve LightReach batch matching -- that's `lr_deposit_match.py`,
+already at 19/19 (previous section). A Chase transaction whose payee
+contains "palmetto" is labeled as a LightReach batch and left unmatched by
+this system rather than treated as a mystery.
+
+### Why two systems, not one
+
+SimpleFIN credentials stay CI-only (never added to Render) and Render's
+Google Sheets credentials stay Render-only (never added to CI) -- same
+security posture as the rest of this repo's SimpleFIN work. The propose step
+needs both bank data AND current sheet state, so it's split:
+
+- **`scripts/bank_reconciliation_propose.py`** (GitHub Actions,
+  `.github/workflows/bank-reconciliation.yml`, cron Mon/Wed/Fri 12:00 UTC +
+  `workflow_dispatch`): pulls Chase transactions for BOTH Helio accounts
+  (1030 and 1055 -- 1055 is a full peer here, not an afterthought, since
+  materials payments sometimes come out of it), reads current match
+  candidates from Render (`GET /internal/cashflow-snapshot`), computes
+  matches (exact amount, within a `[week_monday - 3d, week_monday + 10d]`
+  window), and POSTs the results to Render
+  (`POST /internal/cashflow-reconcile-write-proposals`).
+- **Render (main.py)**: never touches SimpleFIN. Owns the actual Sheets
+  read/write for the Reconciliation tab (new) and for stamping Paid/Received
+  on Expenses/Revenue rows.
+
+### New Reconciliation tab
+
+Created by `_ensure_reconciliation_tab` (mirrors `_ensure_overrides_tab`
+exactly). Columns: Date, Amount, Account, Direction, Payee, Proposed Match,
+Match Basis, Match Key (internal -- `EXP|week_serial|category|name` or
+`REV|week_serial|category|name`, used by Apply), Manual Category (blank;
+fill in "Expense" or "Revenue" to turn an UNMATCHED row into a new manual
+entry on Apply), Notes, Approved (checkbox, Harry sets this), Applied
+(script-managed), Applied Date.
+
+Re-run-safe by design: a Chase transaction is keyed by (date, amount,
+account). Seeing it again only refreshes Proposed Match/Basis/Key; Approved/
+Applied/Manual Category/Notes are never touched by a re-run, and a row
+already `Applied=TRUE` is completely frozen (immutable historical record,
+same principle as a Paid project-expense row).
+
+### Revenue tab gained a status column
+
+`_write_dashboard_revenue_tab` used to write only `A:Week B:Category
+C:Amount D:Project E:Notes`. Added `F:Received G:Received Date`, preserved
+across every rewrite by `_read_revenue_received_keys` /
+`_restore_revenue_received_statuses` -- new functions, directly modeled on
+the Expenses tab's existing `_read_expense_paid_keys` /
+`_restore_expense_paid_statuses`, same `(week_serial, category, name)` key
+shape.
+
+### Apply: `POST /cashflow/reconcile-apply`
+
+No bank credentials needed. Reads the Reconciliation tab; for every row with
+`Approved=TRUE` and `Applied` not TRUE: stamps the matched Expenses row's
+Status=Paid or the matched Revenue row's Received=TRUE (by Match Key), OR --
+if there's no Match Key but Manual Category is filled in -- appends a new
+manual row to Expenses/Revenue and marks it Paid/Received immediately (the
+"catch a surprise expense/deposit" path). Always stamps `Applied=TRUE` +
+today's date on the Reconciliation row when it does either.
+
+Safe to trigger anytime, including from inside the spreadsheet itself.
+
+### Trigger from the Cashflow sheet: `apps_script/cashflow_reconciliation_menu.gs`
+
+A **manual, one-time setup step in the Sheets UI** (Claude can't do this
+part): Extensions -> Apps Script in the Cashflow spreadsheet, paste this
+file's contents, save, reload. Adds a "Reconciliation -> Apply Approved
+Matches Now" menu item that calls `/cashflow/reconcile-apply` directly via
+`UrlFetchApp.fetch` -- no bank creds involved, so it's safe to expose as a
+one-click action. Propose stays cron/Actions-triggered only for now (an
+in-sheet "Run Propose Now" button would need a GitHub PAT stored in the
+Apps Script's Script Properties -- deliberately not built yet; see the
+"optional stretch" note in the original plan if the cron cadence proves too
+slow).
+
+### Status: built, not yet run against real data
+
+Code is written and compiles; not yet deployed/verified end-to-end (no
+Reconciliation tab has been created on the real sheet yet, no real Chase
+transaction has been matched). Before trusting this: run the workflow once,
+spot-check a handful of proposed matches by hand against the Revenue/
+Expenses tabs, approve a couple, apply, and confirm idempotency (see the
+Verification section of the original plan) before turning on wider trust.

@@ -1,0 +1,39 @@
+name: Bank reconciliation (propose)
+
+on:
+  workflow_dispatch:
+    inputs:
+      days:
+        description: 'Lookback window in days (max 90)'
+        type: string
+        default: '45'
+  schedule:
+    # Mon/Wed/Fri 12:00 UTC (8:00 ET / 7:00 EST) -- propose only, never
+    # applies anything. Safe to run unattended: it only ever adds new
+    # Reconciliation rows or refreshes the Proposed Match text on
+    # not-yet-Applied rows, and never touches Approved/Applied state.
+    - cron: '0 12 * * 1,3,5'
+
+jobs:
+  propose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Load SimpleFIN credentials from 1Password
+        uses: 1password/load-secrets-action@v2
+        with:
+          export-env: true
+        env:
+          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          SIMPLEFIN_ACCESS_URL: op://Helio Automation/SimpleFIN/SIMPLEFIN_ACCESS_URL
+          SIMPLEFIN_ACCOUNT_IDS: op://Helio Automation/SimpleFIN/SIMPLEFIN_ACCOUNT_IDS
+
+      - name: Propose reconciliation
+        timeout-minutes: 5
+        run: python -u scripts/bank_reconciliation_propose.py --days "${{ inputs.days || '45' }}"

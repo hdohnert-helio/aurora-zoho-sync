@@ -5705,6 +5705,79 @@ def _ensure_overrides_tab(svc) -> None:
     logger.info("_ensure_overrides_tab: created Overrides tab")
 
 
+CASHFLOW_RECONCILIATION_TAB = "Reconciliation"
+
+RECONCILIATION_HEADERS = [
+    "Date", "Amount", "Account", "Direction", "Payee",
+    "Proposed Match", "Match Basis", "Match Key",
+    "Manual Category", "Notes",
+    "Approved", "Applied", "Applied Date",
+]
+
+
+def _ensure_reconciliation_tab(svc) -> None:
+    """Create the Reconciliation tab with headers if it doesn't already exist.
+    If it already exists, patch any missing header columns without touching
+    data. Mirrors _ensure_overrides_tab exactly -- same pattern, same reason:
+    a human-editable tab a script reads back (see /cashflow/reconcile-apply)."""
+    sheets = svc.spreadsheets()
+    existing = sheets.get(spreadsheetId=CASHFLOW_SHEET_ID).execute()
+    for s in existing.get("sheets", []):
+        if s["properties"]["title"] == CASHFLOW_RECONCILIATION_TAB:
+            try:
+                result = sheets.values().get(
+                    spreadsheetId=CASHFLOW_SHEET_ID,
+                    range=f"'{CASHFLOW_RECONCILIATION_TAB}'!1:1",
+                ).execute()
+                existing_headers = (result.get("values") or [[]])[0]
+                if existing_headers != RECONCILIATION_HEADERS:
+                    sheets.values().update(
+                        spreadsheetId=CASHFLOW_SHEET_ID,
+                        range=f"'{CASHFLOW_RECONCILIATION_TAB}'!A1",
+                        valueInputOption="USER_ENTERED",
+                        body={"values": [RECONCILIATION_HEADERS]},
+                    ).execute()
+            except Exception:
+                pass
+            return
+
+    resp = sheets.batchUpdate(
+        spreadsheetId=CASHFLOW_SHEET_ID,
+        body={"requests": [{"addSheet": {"properties": {"title": CASHFLOW_RECONCILIATION_TAB}}}]}
+    ).execute()
+    sheet_id = resp["replies"][0]["addSheet"]["properties"]["sheetId"]
+
+    sheets.values().update(
+        spreadsheetId=CASHFLOW_SHEET_ID,
+        range=f"'{CASHFLOW_RECONCILIATION_TAB}'!A1",
+        valueInputOption="USER_ENTERED",
+        body={"values": [RECONCILIATION_HEADERS]},
+    ).execute()
+
+    sheets.batchUpdate(
+        spreadsheetId=CASHFLOW_SHEET_ID,
+        body={"requests": [
+            {
+                "repeatCell": {
+                    "range": {"sheetId": sheet_id, "startRowIndex": 0, "endRowIndex": 1},
+                    "cell": {"userEnteredFormat": {"textFormat": {"bold": True}}},
+                    "fields": "userEnteredFormat.textFormat.bold",
+                }
+            },
+            {
+                "updateSheetProperties": {
+                    "properties": {
+                        "sheetId": sheet_id,
+                        "gridProperties": {"frozenRowCount": 1},
+                    },
+                    "fields": "gridProperties.frozenRowCount",
+                }
+            },
+        ]},
+    ).execute()
+    logger.info("_ensure_reconciliation_tab: created Reconciliation tab")
+
+
 def _read_payment_overrides(svc) -> dict:
     """
     Read the Overrides tab and return a dict keyed by project_id.
@@ -7422,30 +7495,98 @@ _REVENUE_KNOWN_CATEGORIES = {
 _REVENUE_SKIP = {"CT Green Estates", "Cash Materials", "Subcontractor", "SolarInsure"}
 
 
+def _read_revenue_received_keys(svc) -> dict:
+    """Return {(week_serial_int, category, customer): received_date} for every
+    Revenue row with a non-empty Received (col F). Mirrors
+    _read_expense_paid_keys' key shape exactly, for the same reason: so a
+    full tab rewrite (_write_dashboard_revenue_tab) can restore confirmed
+    status by content, not by row position."""
+    try:
+        raw = svc.spreadsheets().values().get(
+            spreadsheetId=DASHBOARD_SHEET_ID,
+            range="Revenue!A2:G",
+            valueRenderOption="UNFORMATTED_VALUE",
+        ).execute().get("values", [])
+    except Exception:
+        return {}
+    received = {}
+    for row in raw:
+        if len(row) < 6 or not row[5]:
+            continue
+        try:
+            w_int = int(row[0]) if isinstance(row[0], (int, float)) else None
+        except (TypeError, ValueError):
+            w_int = None
+        if w_int is None:
+            continue
+        key = (w_int, str(row[1]).strip(), str(row[3]).strip())
+        received[key] = row[6] if len(row) > 6 else ""
+    return received
+
+
+def _restore_revenue_received_statuses(svc, received_keys: dict) -> None:
+    """Re-stamp Received/Received Date on Revenue rows matching saved
+    (week_serial_int, category, customer) keys. Mirrors
+    _restore_expense_paid_statuses."""
+    if not received_keys:
+        return
+    try:
+        raw = svc.spreadsheets().values().get(
+            spreadsheetId=DASHBOARD_SHEET_ID,
+            range="Revenue!A2:D",
+            valueRenderOption="UNFORMATTED_VALUE",
+        ).execute().get("values", [])
+    except Exception:
+        return
+    updates = []
+    for i, row in enumerate(raw):
+        if len(row) < 4:
+            continue
+        try:
+            w_int = int(row[0]) if isinstance(row[0], (int, float)) else None
+        except (TypeError, ValueError):
+            w_int = None
+        if w_int is None:
+            continue
+        key = (w_int, str(row[1]).strip(), str(row[3]).strip())
+        if key in received_keys:
+            updates.append({"range": f"Revenue!F{i + 2}", "values": [["TRUE"]]})
+            updates.append({"range": f"Revenue!G{i + 2}", "values": [[received_keys[key]]]})
+    if updates:
+        svc.spreadsheets().values().batchUpdate(
+            spreadsheetId=DASHBOARD_SHEET_ID,
+            body={"valueInputOption": "USER_ENTERED", "data": updates},
+        ).execute()
+
+
 def _write_dashboard_revenue_tab(svc, weekly_events: list) -> None:
     """
     Write payment revenue rows to the Revenue tab of the dashboard sheet.
     weekly_events entries: [week_of, pay_date, customer, finance_type, pay_type,
                             pay_amt, comm_date, comm_amt, stage, sc_display,
                             project_id, zoho_link]  (12 fields)
-    Revenue tab columns: A=Week, B=Category, C=Amount, D=Project, E=Notes
+    Revenue tab columns: A=Week, B=Category, C=Amount, D=Project, E=Notes,
+    F=Received, G=Received Date (F/G stamped by /cashflow/reconcile-apply
+    once a Chase deposit is matched and approved — see bank reconciliation).
     """
     if not DASHBOARD_SHEET_ID:
         return
     sheets = svc.spreadsheets()
 
-    # Preserve manually-entered rows (Category="Manual") before clearing
+    # Preserve manually-entered rows (Category="Manual") and Received status
+    # (keyed by content, not row position) before clearing.
     existing_rev = sheets.values().get(
         spreadsheetId=DASHBOARD_SHEET_ID,
-        range="Revenue!A2:E",
+        range="Revenue!A2:G",
         valueRenderOption="FORMATTED_VALUE",
     ).execute().get("values", [])
     manual_rev_rows = [r for r in existing_rev if len(r) > 1 and str(r[1]).strip() == "Manual"]
+    received_keys = _read_revenue_received_keys(svc)
 
     # Clear existing data rows (keep header row 1)
     sheets.values().clear(
         spreadsheetId=DASHBOARD_SHEET_ID,
-        range="Revenue!A2:E",
+        range="Revenue!A2:G",
     ).execute()
 
     rows = []
@@ -7479,6 +7620,7 @@ def _write_dashboard_revenue_tab(svc, weekly_events: list) -> None:
             valueInputOption="USER_ENTERED",
             body={"values": all_rev_rows},
         ).execute()
+    _restore_revenue_received_statuses(svc, received_keys)
     logger.info(f"_write_dashboard_revenue_tab: wrote {len(rows)} revenue rows + {len(manual_rev_rows)} manual")
 
 
@@ -8295,6 +8437,314 @@ async def cashflow_apply_overrides():
     except Exception as e:
         import traceback
         return {"error": str(e), "traceback": traceback.format_exc()}
+
+
+# ── Bank reconciliation (Chase via SimpleFIN, computed in CI) ──────────────
+# See CLAUDE.md "Chase bank reconciliation" for the full design. SimpleFIN
+# credentials never touch this service -- a GitHub Actions script
+# (scripts/bank_reconciliation_propose.py) pulls Chase transactions and
+# POSTs computed match proposals here; this service only ever reads/writes
+# Google Sheets, which it already has credentials for.
+
+def _make_reconciliation_match_key(kind: str, week_serial, category: str, name: str) -> str:
+    return f"{kind}|{week_serial}|{category}|{name}"
+
+
+def _parse_reconciliation_match_key(key: str):
+    """Returns (kind, week_serial_int, category, name) or None if unparseable."""
+    if not key:
+        return None
+    parts = key.split("|", 3)
+    if len(parts) != 4:
+        return None
+    kind, week_serial, category, name = parts
+    try:
+        week_serial = int(week_serial)
+    except ValueError:
+        return None
+    if kind not in ("EXP", "REV"):
+        return None
+    return kind, week_serial, category, name
+
+
+@app.get("/internal/cashflow-snapshot")
+async def cashflow_snapshot():
+    """
+    Read-only. Returns current Revenue rows not yet Received and Expenses
+    rows with Status=Active, as match candidates for the bank-reconciliation
+    CI script. No bank credentials involved on this side.
+    """
+    try:
+        svc = _build_sheets_service()
+        if not svc:
+            return {"status": "failed", "reason": "could not build Sheets service"}
+        sheets = svc.spreadsheets()
+
+        revenue_candidates = []
+        rev_raw = sheets.values().get(
+            spreadsheetId=DASHBOARD_SHEET_ID,
+            range="Revenue!A2:G",
+            valueRenderOption="UNFORMATTED_VALUE",
+        ).execute().get("values", [])
+        for row in rev_raw:
+            if len(row) < 4:
+                continue
+            if len(row) > 5 and row[5]:  # already Received
+                continue
+            week_serial = row[0] if isinstance(row[0], (int, float)) else None
+            if week_serial is None:
+                continue
+            category, amount, customer = row[1], row[2], row[3]
+            if not isinstance(amount, (int, float)) or amount == 0:
+                continue
+            week_monday = (datetime.date(1899, 12, 30) + datetime.timedelta(days=int(week_serial))).isoformat()
+            revenue_candidates.append({
+                "week_serial": int(week_serial), "week_monday": week_monday,
+                "category": str(category).strip(), "name": str(customer).strip(),
+                "amount": round(float(amount), 2),
+                "match_key": _make_reconciliation_match_key("REV", int(week_serial), str(category).strip(), str(customer).strip()),
+            })
+
+        expense_candidates = []
+        exp_raw = sheets.values().get(
+            spreadsheetId=DASHBOARD_SHEET_ID,
+            range="Expenses!A2:H",
+            valueRenderOption="UNFORMATTED_VALUE",
+        ).execute().get("values", [])
+        for row in exp_raw:
+            if len(row) < 6:
+                continue
+            if str(row[5]).strip().lower() != "active":
+                continue
+            week_serial = row[0] if isinstance(row[0], (int, float)) else None
+            if week_serial is None:
+                continue
+            category, description, amount = row[1], row[2], row[3]
+            if not isinstance(amount, (int, float)) or amount == 0:
+                continue
+            week_monday = (datetime.date(1899, 12, 30) + datetime.timedelta(days=int(week_serial))).isoformat()
+            expense_candidates.append({
+                "week_serial": int(week_serial), "week_monday": week_monday,
+                "category": str(category).strip(), "name": str(description).strip(),
+                "amount": round(float(amount), 2),
+                "match_key": _make_reconciliation_match_key("EXP", int(week_serial), str(category).strip(), str(description).strip()),
+            })
+
+        return {
+            "status": "ok",
+            "revenue_candidates": revenue_candidates,
+            "expense_candidates": expense_candidates,
+        }
+    except Exception as e:
+        logger.exception("cashflow_snapshot failed")
+        return {"status": "error", "detail": str(e)}
+
+
+@app.post("/internal/cashflow-reconcile-write-proposals")
+async def cashflow_reconcile_write_proposals(request: Request):
+    """
+    Accepts computed match proposals for a batch of Chase transactions and
+    writes/updates the Reconciliation tab. Re-run-safe: a transaction seen
+    before (same date+amount+account) gets its Proposed Match/Basis/Key
+    columns refreshed but Approved/Applied/Manual Category/Notes are left
+    untouched; a row already Applied=TRUE is never touched at all.
+    """
+    try:
+        body = await request.json()
+        transactions = body.get("transactions") or []
+        if not transactions:
+            return {"status": "ok", "written": 0, "updated": 0, "message": "no transactions in request"}
+
+        svc = _build_sheets_service()
+        if not svc:
+            return {"status": "failed", "reason": "could not build Sheets service"}
+        _ensure_reconciliation_tab(svc)
+        sheets = svc.spreadsheets()
+
+        existing = sheets.values().get(
+            spreadsheetId=CASHFLOW_SHEET_ID,
+            range=f"'{CASHFLOW_RECONCILIATION_TAB}'!A2:M",
+            valueRenderOption="UNFORMATTED_VALUE",
+        ).execute().get("values", [])
+
+        def txn_key(date_str, amount, account):
+            return (str(date_str).strip(), round(float(amount), 2), str(account).strip())
+
+        existing_by_key = {}
+        for i, row in enumerate(existing):
+            if len(row) < 3:
+                continue
+            try:
+                k = txn_key(row[0], row[1], row[2])
+            except (ValueError, TypeError):
+                continue
+            existing_by_key[k] = (i + 2, row)  # sheet row number, row data
+
+        cell_updates = []
+        new_rows = []
+        updated = 0
+        skipped_applied = 0
+        for txn in transactions:
+            k = txn_key(txn["date"], txn["amount"], txn["account"])
+            proposed = txn.get("proposed_match", "UNMATCHED")
+            basis = txn.get("match_basis", "")
+            match_key = txn.get("match_key", "")
+            if k in existing_by_key:
+                row_num, row_data = existing_by_key[k]
+                applied = len(row_data) > 11 and str(row_data[11]).strip().upper() == "TRUE"
+                if applied:
+                    skipped_applied += 1
+                    continue
+                cell_updates.append({"range": f"'{CASHFLOW_RECONCILIATION_TAB}'!F{row_num}:H{row_num}",
+                                      "values": [[proposed, basis, match_key]]})
+                updated += 1
+            else:
+                new_rows.append([
+                    txn["date"], txn["amount"], txn["account"], txn.get("direction", ""),
+                    txn.get("payee", ""), proposed, basis, match_key,
+                    "", "", "FALSE", "FALSE", "",
+                ])
+
+        if cell_updates:
+            sheets.values().batchUpdate(
+                spreadsheetId=CASHFLOW_SHEET_ID,
+                body={"valueInputOption": "USER_ENTERED", "data": cell_updates},
+            ).execute()
+        if new_rows:
+            sheets.values().append(
+                spreadsheetId=CASHFLOW_SHEET_ID,
+                range=f"'{CASHFLOW_RECONCILIATION_TAB}'!A:M",
+                valueInputOption="USER_ENTERED",
+                insertDataOption="INSERT_ROWS",
+                body={"values": new_rows},
+            ).execute()
+
+        logger.info(f"cashflow_reconcile_write_proposals: {len(new_rows)} new, {updated} updated, "
+                    f"{skipped_applied} skipped (already applied)")
+        return {"status": "ok", "new": len(new_rows), "updated": updated, "skipped_applied": skipped_applied}
+    except Exception as e:
+        logger.exception("cashflow_reconcile_write_proposals failed")
+        return {"status": "error", "detail": str(e)}
+
+
+@app.post("/cashflow/reconcile-apply")
+async def cashflow_reconcile_apply():
+    """
+    Reads the Reconciliation tab; for every row where Approved=TRUE and
+    Applied is not TRUE, applies the match: stamps Paid/Received on the
+    matched Expenses/Revenue row (by Match Key), or -- if there's no Match
+    Key but Manual Category is filled in -- appends a brand-new manual row
+    to Expenses or Revenue. No bank credentials needed; safe to trigger
+    anytime (e.g. from the Cashflow sheet's own "Apply Approved Matches Now"
+    menu item).
+    """
+    try:
+        svc = _build_sheets_service()
+        if not svc:
+            return {"status": "failed", "reason": "could not build Sheets service"}
+        sheets = svc.spreadsheets()
+
+        recon_rows = sheets.values().get(
+            spreadsheetId=CASHFLOW_SHEET_ID,
+            range=f"'{CASHFLOW_RECONCILIATION_TAB}'!A2:M",
+            valueRenderOption="UNFORMATTED_VALUE",
+        ).execute().get("values", [])
+
+        # Index current Expenses/Revenue rows by their (week_serial, category, name) key
+        exp_raw = sheets.values().get(
+            spreadsheetId=DASHBOARD_SHEET_ID, range="Expenses!A2:H",
+            valueRenderOption="UNFORMATTED_VALUE",
+        ).execute().get("values", [])
+        exp_by_key = {}
+        for i, row in enumerate(exp_raw):
+            if len(row) < 3 or not isinstance(row[0], (int, float)):
+                continue
+            exp_by_key[(int(row[0]), str(row[1]).strip(), str(row[2]).strip())] = i + 2
+
+        rev_raw = sheets.values().get(
+            spreadsheetId=DASHBOARD_SHEET_ID, range="Revenue!A2:G",
+            valueRenderOption="UNFORMATTED_VALUE",
+        ).execute().get("values", [])
+        rev_by_key = {}
+        for i, row in enumerate(rev_raw):
+            if len(row) < 4 or not isinstance(row[0], (int, float)):
+                continue
+            rev_by_key[(int(row[0]), str(row[1]).strip(), str(row[3]).strip())] = i + 2
+
+        today = datetime.date.today().isoformat()
+        exp_updates, rev_updates, recon_updates = [], [], []
+        new_exp_rows, new_rev_rows = [], []
+        applied = skipped = new_manual = 0
+
+        for i, row in enumerate(recon_rows):
+            if len(row) < 12:
+                continue
+            approved = str(row[10]).strip().upper() == "TRUE"
+            already_applied = str(row[11]).strip().upper() == "TRUE"
+            if not approved or already_applied:
+                continue
+
+            recon_row_num = i + 2
+            match_key = row[7] if len(row) > 7 else ""
+            manual_category = row[8] if len(row) > 8 else ""
+            parsed = _parse_reconciliation_match_key(match_key)
+
+            if parsed:
+                kind, week_serial, category, name = parsed
+                if kind == "EXP" and (week_serial, category, name) in exp_by_key:
+                    exp_updates.append({"range": f"Expenses!F{exp_by_key[(week_serial, category, name)]}",
+                                         "values": [["Paid"]]})
+                    applied += 1
+                elif kind == "REV" and (week_serial, category, name) in rev_by_key:
+                    r = rev_by_key[(week_serial, category, name)]
+                    rev_updates.append({"range": f"Revenue!F{r}:G{r}", "values": [["TRUE", today]]})
+                    applied += 1
+                else:
+                    skipped += 1
+                    continue  # matched row no longer exists -- don't mark Applied, needs review
+            elif manual_category:
+                date_str, amount, payee = row[0], row[1], row[4] if len(row) > 4 else ""
+                try:
+                    d = datetime.date.fromisoformat(str(date_str)) if isinstance(date_str, str) \
+                        else (datetime.date(1899, 12, 30) + datetime.timedelta(days=int(date_str)))
+                except (ValueError, TypeError):
+                    d = datetime.date.today()
+                serial = _sheets_serial(d - datetime.timedelta(days=d.weekday()))
+                if str(manual_category).strip().lower() == "expense":
+                    new_exp_rows.append([serial, "Manual", payee, abs(amount), "No", "Paid", "", ""])
+                else:
+                    new_rev_rows.append([serial, "Manual", amount, payee, "Bank reconciliation", "TRUE", today])
+                new_manual += 1
+            else:
+                skipped += 1
+                continue
+
+            recon_updates.append({"range": f"'{CASHFLOW_RECONCILIATION_TAB}'!L{recon_row_num}:M{recon_row_num}",
+                                   "values": [["TRUE", today]]})
+
+        if exp_updates:
+            sheets.values().batchUpdate(spreadsheetId=DASHBOARD_SHEET_ID,
+                                         body={"valueInputOption": "USER_ENTERED", "data": exp_updates}).execute()
+        if rev_updates:
+            sheets.values().batchUpdate(spreadsheetId=DASHBOARD_SHEET_ID,
+                                         body={"valueInputOption": "USER_ENTERED", "data": rev_updates}).execute()
+        if new_exp_rows:
+            sheets.values().append(spreadsheetId=DASHBOARD_SHEET_ID, range="Expenses!A:H",
+                                    valueInputOption="USER_ENTERED", insertDataOption="INSERT_ROWS",
+                                    body={"values": new_exp_rows}).execute()
+        if new_rev_rows:
+            sheets.values().append(spreadsheetId=DASHBOARD_SHEET_ID, range="Revenue!A:G",
+                                    valueInputOption="USER_ENTERED", insertDataOption="INSERT_ROWS",
+                                    body={"values": new_rev_rows}).execute()
+        if recon_updates:
+            sheets.values().batchUpdate(spreadsheetId=CASHFLOW_SHEET_ID,
+                                         body={"valueInputOption": "USER_ENTERED", "data": recon_updates}).execute()
+
+        logger.info(f"cashflow_reconcile_apply: {applied} applied, {new_manual} new manual rows, {skipped} skipped")
+        return {"status": "ok", "applied": applied, "new_manual_rows": new_manual, "skipped": skipped}
+    except Exception as e:
+        logger.exception("cashflow_reconcile_apply failed")
+        return {"status": "error", "detail": str(e)}
 
 
 @app.post("/dashboard/apply-overrides")
