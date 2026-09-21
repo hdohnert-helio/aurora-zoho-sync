@@ -746,12 +746,24 @@ def discover_accounts_nav(page, user, password):
         print(f"  externalReference cross-check failed: {e}")
 
 
-def scrape_account(page, account_id, debug=False, retries=2):
+def scrape_account(page, account_id, debug=False, retries=3):
     """Retries a timed-out render before giving up. The first full run
     (2026-09-18, 136 accounts) skipped 29 with a suspiciously regular
     ~4-5-account spacing -- more consistent with transient rate-limiting or
     a flaky response than genuine per-account slowness, so a retry is worth
-    it before logging a real skip."""
+    it before logging a real skip.
+
+    Ledger-table completeness (found 2026-09-18): the 15s wait for
+    `table tbody tr` used to swallow its own timeout and just proceed with
+    whatever `extract_ledger` found (often 0 rows) -- so a slow-but-real
+    render looked identical to a genuinely empty ledger, and a re-run of the
+    exact same account could come back with a different row count purely by
+    luck. Confirmed by two full runs ~40 minutes apart: same 107 accounts
+    both times, but 64 vs 57 total ledger rows and a different set of
+    deposit-match batches failing each time. Now an empty ledger table is
+    treated as a retriable failure like a missing PAYMENT PLAN panel is,
+    and only accepted as genuinely empty on the last attempt.
+    """
     url = f"{FUNDING_HOST}/accounts/{account_id}/funding"
     last_err = None
     for attempt in range(1, retries + 1):
@@ -764,16 +776,20 @@ def scrape_account(page, account_id, debug=False, retries=2):
             # The PAYMENT PLAN panel and the transaction ledger table render on
             # separate async timers -- confirmed on Hopley, where the panel
             # appeared well before the ledger table did (0 rows extracted
-            # until this wait was added). A genuinely ledger-less account
-            # (no transactions yet) would never satisfy this, so give it its
-            # own bounded wait and proceed with an empty ledger rather than
-            # treating that as a full-account failure.
+            # until this wait was added).
+            ledger_wait_timed_out = False
             try:
                 page.wait_for_selector("table tbody tr", timeout=15000)
             except PlaywrightTimeout:
+                ledger_wait_timed_out = True
+                if attempt < retries:
+                    print(f"  ({account_id}: attempt {attempt}/{retries} -- ledger table "
+                          f"didn't render within 15s, retrying)")
+                    page.wait_for_timeout(3000)
+                    continue  # re-navigate and try the whole page again, not just re-poll
                 if debug:
-                    print(f"  DEBUG {account_id}: no ledger table rows within 15s "
-                          f"(may be a genuinely empty ledger)")
+                    print(f"  DEBUG {account_id}: no ledger table rows within 15s on the "
+                          f"final attempt -- accepting as a genuinely empty ledger")
             text = page.inner_text("body")
             if debug:
                 print(f"  DEBUG raw page text length for {account_id}: {len(text)} chars")
@@ -783,6 +799,18 @@ def scrape_account(page, account_id, debug=False, retries=2):
             fields = parse_funding_fields(lines)
             fields["funding_url"] = url
             ledger_rows = extract_ledger(page)
+            # Even when the wait succeeded, a render that's still mid-flight can
+            # yield a table with 0 rows.  A payment-plan amount without any
+            # ledger row at all is a strong signal something is still loading,
+            # not that the ledger is really empty -- retry once more before
+            # accepting it.
+            if (not ledger_rows and not ledger_wait_timed_out
+                    and (fields.get("install_approved_amount") or fields.get("activation_approved_amount"))
+                    and attempt < retries):
+                print(f"  ({account_id}: attempt {attempt}/{retries} -- payment plan has amounts "
+                      f"but 0 ledger rows, retrying)")
+                page.wait_for_timeout(3000)
+                continue
             if debug:
                 n_tables = page.locator("table").count()
                 print(f"  DEBUG {n_tables} <table> elements on page")
