@@ -5763,14 +5763,22 @@ def _reconciliation_manual_category_options(svc) -> list:
     return sorted(cats)
 
 
-def _reconciliation_ui_requests(sheet_id: int, category_options: list) -> list:
+def _reconciliation_ui_requests(sheet_id: int, category_options: list,
+                                 include_conditional_formatting: bool = True) -> list:
     """Checkboxes on Approved/Applied, a dropdown (not free text) on Manual
     Category, Match Key hidden (internal, Apply-only), and confidence
     color-coding on Match Basis: green for an exact amount match, yellow for
     anything softer (payee-name fallback, tolerant-amount, Heartland) so a
     glance at the row color tells Harry how much scrutiny it deserves before
     checking Approved. Re-applied on every _ensure call (not just at tab
-    creation) so a tab created before this existed still gets it."""
+    creation) so a tab created before this existed still gets it.
+
+    include_conditional_formatting=False skips the two addConditionalFormatRule
+    requests -- unlike the filter views (deduped by title) or setDataValidation
+    (idempotent, replaces whatever rule was there), addConditionalFormatRule
+    has no identity to dedupe against and just keeps inserting a new rule
+    every call. _ensure_reconciliation_tab passes False once 2+ rules already
+    exist so this doesn't grow without bound across every propose run."""
     checkbox_reqs = [
         {
             "setDataValidation": {
@@ -5845,7 +5853,8 @@ def _reconciliation_ui_requests(sheet_id: int, category_options: list) -> list:
             "index": 1,
         }
     }
-    return [*checkbox_reqs, manual_category_dropdown, hide_match_key, color_rules, softer_match_rule]
+    format_reqs = [color_rules, softer_match_rule] if include_conditional_formatting else []
+    return [*checkbox_reqs, manual_category_dropdown, hide_match_key, *format_reqs]
 
 
 def _reconciliation_filter_view_requests(sheet_id: int, existing_titles: set) -> list:
@@ -5903,11 +5912,13 @@ def _ensure_reconciliation_tab(svc) -> None:
                         body={"values": [RECONCILIATION_HEADERS]},
                     ).execute()
                 existing_titles = {fv.get("filter", {}).get("title") for fv in s.get("filterViews", [])}
+                have_format_rules = len(s.get("conditionalFormats", [])) >= 2
                 category_options = _reconciliation_manual_category_options(svc)
                 sheets.batchUpdate(
                     spreadsheetId=CASHFLOW_SHEET_ID,
                     body={"requests": [
-                        *_reconciliation_ui_requests(sheet_id, category_options),
+                        *_reconciliation_ui_requests(sheet_id, category_options,
+                                                      include_conditional_formatting=not have_format_rules),
                         *_reconciliation_filter_view_requests(sheet_id, existing_titles),
                     ]},
                 ).execute()
@@ -8754,62 +8765,6 @@ def _parse_reconciliation_match_key(key: str):
     if kind not in ("EXP", "REV"):
         return None
     return kind, week_serial, category, name
-
-
-# TEMPORARY (2026-09-21): Harry reports checkboxes are gone from the
-# Reconciliation tab. Dumps the raw sheet metadata (conditional formats,
-# filter views, and per-cell data validation on the Approved/Applied
-# columns) WITHOUT the try/except _ensure_reconciliation_tab normally
-# wraps its UI patch in, so a real API error surfaces instead of being
-# silently logged and swallowed. Remove once the cause is found.
-@app.get("/internal/reconciliation-tab-ui-debug")
-async def reconciliation_tab_ui_debug():
-    svc = _build_sheets_service()
-    if not svc:
-        return {"status": "failed", "reason": "could not build Sheets service"}
-    sheets = svc.spreadsheets()
-    meta = sheets.get(spreadsheetId=CASHFLOW_SHEET_ID).execute()
-    sheet_id = None
-    for s in meta.get("sheets", []):
-        if s["properties"]["title"] == CASHFLOW_RECONCILIATION_TAB:
-            sheet_id = s["properties"]["sheetId"]
-            break
-    if sheet_id is None:
-        return {"status": "error", "detail": "Reconciliation tab not found"}
-
-    # Re-run the exact same UI patch _ensure_reconciliation_tab does, but
-    # let any error propagate instead of catching it.
-    patch_result = "not attempted"
-    try:
-        existing_titles = {fv.get("filter", {}).get("title") for s in meta.get("sheets", [])
-                            if s["properties"]["sheetId"] == sheet_id
-                            for fv in s.get("filterViews", [])}
-        resp = sheets.batchUpdate(
-            spreadsheetId=CASHFLOW_SHEET_ID,
-            body={"requests": [
-                *_reconciliation_ui_requests(sheet_id, _reconciliation_manual_category_options(svc)),
-                *_reconciliation_filter_view_requests(sheet_id, existing_titles),
-            ]},
-        ).execute()
-        patch_result = {"status": "ok", "replies_count": len(resp.get("replies", []))}
-    except Exception as e:
-        import traceback
-        patch_result = {"status": "error", "detail": str(e), "traceback": traceback.format_exc()}
-
-    # Now read back the detailed cell-level view for a couple of cells in
-    # the Approved column to see if data validation is actually present.
-    detail = sheets.get(
-        spreadsheetId=CASHFLOW_SHEET_ID,
-        ranges=[f"'{CASHFLOW_RECONCILIATION_TAB}'!E2:E4"],
-        fields="sheets(properties(sheetId,title),conditionalFormats,filterViews(filter(title)),"
-               "data.rowData.values(userEnteredValue,dataValidation))",
-    ).execute()
-
-    return {
-        "status": "ok",
-        "patch_result": patch_result,
-        "sheet_detail": detail,
-    }
 
 
 @app.get("/internal/cashflow-snapshot")
