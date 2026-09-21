@@ -5735,13 +5735,42 @@ RECON_COL = {
 _RECON_MAX_ROW = 5000  # generous bound for data validation / conditional formatting ranges
 
 
-def _reconciliation_ui_requests(sheet_id: int) -> list:
-    """Checkboxes on Approved/Applied, Match Key hidden (internal, Apply-only),
-    and confidence color-coding on Match Basis: green for an exact amount
-    match, yellow for anything softer (payee-name fallback, tolerant-amount,
-    Heartland) so a glance at the row color tells Harry how much scrutiny it
-    deserves before checking Approved. Re-applied on every _ensure call (not
-    just at tab creation) so a tab created before this existed still gets it."""
+_RECON_FIXED_PROJECT_EXPENSE_CATS = {
+    "Commissions", "Materials", "SolarInsure/Warranty", "Subcontractor",
+    "Subcontractor Payments", "CT Green Estates", "Manual",
+}
+
+
+def _reconciliation_manual_category_options(svc) -> list:
+    """Master dropdown list for the Manual Category column: recurring Config
+    categories, the fixed set of project-linked Expense categories, every
+    Revenue category, and whatever's currently in the Vendor Map tab (so a
+    newly-added Vendor Map row, e.g. "Engineering Costs (Plansets)", shows
+    up here automatically next time this runs -- no code change needed).
+    A dropdown-only value here is what actually prevents the typo Harry
+    flagged: a category string that doesn't match Expenses/Revenue exactly
+    means /cashflow/reconcile-apply's Match Key lookup can never miss it
+    again from a fat-fingered entry."""
+    cats = set(_RECON_FIXED_PROJECT_EXPENSE_CATS) | set(_REVENUE_KNOWN_CATEGORIES)
+    try:
+        cats |= {item["category"] for item in _read_config(svc) if item.get("category")}
+    except Exception:
+        pass
+    try:
+        cats |= {v["category"] for v in _read_vendor_map(svc) if v.get("category")}
+    except Exception:
+        pass
+    return sorted(cats)
+
+
+def _reconciliation_ui_requests(sheet_id: int, category_options: list) -> list:
+    """Checkboxes on Approved/Applied, a dropdown (not free text) on Manual
+    Category, Match Key hidden (internal, Apply-only), and confidence
+    color-coding on Match Basis: green for an exact amount match, yellow for
+    anything softer (payee-name fallback, tolerant-amount, Heartland) so a
+    glance at the row color tells Harry how much scrutiny it deserves before
+    checking Approved. Re-applied on every _ensure call (not just at tab
+    creation) so a tab created before this existed still gets it."""
     checkbox_reqs = [
         {
             "setDataValidation": {
@@ -5758,6 +5787,19 @@ def _reconciliation_ui_requests(sheet_id: int) -> list:
         }
         for col in (RECON_COL["approved"], RECON_COL["applied"])
     ]
+    manual_category_dropdown = {
+        "setDataValidation": {
+            "range": {
+                "sheetId": sheet_id, "startRowIndex": 1, "endRowIndex": _RECON_MAX_ROW,
+                "startColumnIndex": RECON_COL["manual_category"], "endColumnIndex": RECON_COL["manual_category"] + 1,
+            },
+            "rule": {
+                "condition": {"type": "ONE_OF_LIST", "values": [{"userEnteredValue": c} for c in category_options]},
+                "showCustomUi": True,
+                "strict": True,
+            },
+        }
+    }
     hide_match_key = {
         "updateDimensionProperties": {
             "range": {
@@ -5803,7 +5845,7 @@ def _reconciliation_ui_requests(sheet_id: int) -> list:
             "index": 1,
         }
     }
-    return [*checkbox_reqs, hide_match_key, color_rules, softer_match_rule]
+    return [*checkbox_reqs, manual_category_dropdown, hide_match_key, color_rules, softer_match_rule]
 
 
 def _reconciliation_filter_view_requests(sheet_id: int, existing_titles: set) -> list:
@@ -5861,15 +5903,23 @@ def _ensure_reconciliation_tab(svc) -> None:
                         body={"values": [RECONCILIATION_HEADERS]},
                     ).execute()
                 existing_titles = {fv.get("filter", {}).get("title") for fv in s.get("filterViews", [])}
+                category_options = _reconciliation_manual_category_options(svc)
                 sheets.batchUpdate(
                     spreadsheetId=CASHFLOW_SHEET_ID,
                     body={"requests": [
-                        *_reconciliation_ui_requests(sheet_id),
+                        *_reconciliation_ui_requests(sheet_id, category_options),
                         *_reconciliation_filter_view_requests(sheet_id, existing_titles),
                     ]},
                 ).execute()
             except Exception:
-                logger.exception("_ensure_reconciliation_tab: UI patch failed (non-fatal)")
+                # Not swallowed silently: this used to catch-and-log here,
+                # which was hiding the real cause when the UI patch failed
+                # entirely (checkboxes never actually applied). Data has
+                # already been written successfully by this point in the
+                # caller (write-proposals writes rows AFTER calling this),
+                # so a UI-patch failure shouldn't block that -- but it must
+                # not disappear either.
+                logger.exception("_ensure_reconciliation_tab: UI patch failed")
             return
 
     resp = sheets.batchUpdate(
@@ -5904,7 +5954,7 @@ def _ensure_reconciliation_tab(svc) -> None:
                     "fields": "gridProperties.frozenRowCount",
                 }
             },
-            *_reconciliation_ui_requests(sheet_id),
+            *_reconciliation_ui_requests(sheet_id, _reconciliation_manual_category_options(svc)),
             *_reconciliation_filter_view_requests(sheet_id, set()),
         ]},
     ).execute()
@@ -8706,6 +8756,62 @@ def _parse_reconciliation_match_key(key: str):
     return kind, week_serial, category, name
 
 
+# TEMPORARY (2026-09-21): Harry reports checkboxes are gone from the
+# Reconciliation tab. Dumps the raw sheet metadata (conditional formats,
+# filter views, and per-cell data validation on the Approved/Applied
+# columns) WITHOUT the try/except _ensure_reconciliation_tab normally
+# wraps its UI patch in, so a real API error surfaces instead of being
+# silently logged and swallowed. Remove once the cause is found.
+@app.get("/internal/reconciliation-tab-ui-debug")
+async def reconciliation_tab_ui_debug():
+    svc = _build_sheets_service()
+    if not svc:
+        return {"status": "failed", "reason": "could not build Sheets service"}
+    sheets = svc.spreadsheets()
+    meta = sheets.get(spreadsheetId=CASHFLOW_SHEET_ID).execute()
+    sheet_id = None
+    for s in meta.get("sheets", []):
+        if s["properties"]["title"] == CASHFLOW_RECONCILIATION_TAB:
+            sheet_id = s["properties"]["sheetId"]
+            break
+    if sheet_id is None:
+        return {"status": "error", "detail": "Reconciliation tab not found"}
+
+    # Re-run the exact same UI patch _ensure_reconciliation_tab does, but
+    # let any error propagate instead of catching it.
+    patch_result = "not attempted"
+    try:
+        existing_titles = {fv.get("filter", {}).get("title") for s in meta.get("sheets", [])
+                            if s["properties"]["sheetId"] == sheet_id
+                            for fv in s.get("filterViews", [])}
+        resp = sheets.batchUpdate(
+            spreadsheetId=CASHFLOW_SHEET_ID,
+            body={"requests": [
+                *_reconciliation_ui_requests(sheet_id, _reconciliation_manual_category_options(svc)),
+                *_reconciliation_filter_view_requests(sheet_id, existing_titles),
+            ]},
+        ).execute()
+        patch_result = {"status": "ok", "replies_count": len(resp.get("replies", []))}
+    except Exception as e:
+        import traceback
+        patch_result = {"status": "error", "detail": str(e), "traceback": traceback.format_exc()}
+
+    # Now read back the detailed cell-level view for a couple of cells in
+    # the Approved column to see if data validation is actually present.
+    detail = sheets.get(
+        spreadsheetId=CASHFLOW_SHEET_ID,
+        ranges=[f"'{CASHFLOW_RECONCILIATION_TAB}'!E2:E4"],
+        fields="sheets(properties(sheetId,title),conditionalFormats,filterViews(filter(title)),"
+               "data.rowData.values(userEnteredValue,dataValidation))",
+    ).execute()
+
+    return {
+        "status": "ok",
+        "patch_result": patch_result,
+        "sheet_detail": detail,
+    }
+
+
 @app.get("/internal/cashflow-snapshot")
 async def cashflow_snapshot():
     """
@@ -8981,17 +9087,27 @@ async def cashflow_reconcile_apply():
                     skipped += 1
                     continue  # matched row no longer exists -- don't mark Applied, needs review
             elif manual_category:
+                # Direction (In/Out, already captured separately) decides
+                # Expense vs Revenue; Manual Category is the actual category
+                # label the new row files under -- e.g. a Vendor Map hit like
+                # "Engineering Costs (Plansets)" is preserved as the real
+                # category instead of collapsing to a generic "Manual" (the
+                # earlier version threw this away, using manual_category only
+                # as an Expense/Revenue flag and hardcoding "Manual" as the
+                # category on every new row).
                 date_str, amount, payee = row[c["date"]], row[c["amount"]], row[c["payee"]]
+                direction = row[c["direction"]] if len(row) > c["direction"] else ""
                 try:
                     d = datetime.date.fromisoformat(str(date_str)) if isinstance(date_str, str) \
                         else (datetime.date(1899, 12, 30) + datetime.timedelta(days=int(date_str)))
                 except (ValueError, TypeError):
                     d = datetime.date.today()
                 serial = _sheets_serial(d - datetime.timedelta(days=d.weekday()))
-                if str(manual_category).strip().lower() == "expense":
-                    new_exp_rows.append([serial, "Manual", payee, abs(amount), "No", "Paid", "", ""])
+                category = str(manual_category).strip()
+                if str(direction).strip().lower() == "out" or (not direction and amount < 0):
+                    new_exp_rows.append([serial, category, payee, abs(amount), "No", "Paid", "", ""])
                 else:
-                    new_rev_rows.append([serial, "Manual", amount, payee, "Bank reconciliation", "TRUE", today])
+                    new_rev_rows.append([serial, category, amount, payee, "Bank reconciliation", "TRUE", today])
                 new_manual += 1
             else:
                 skipped += 1

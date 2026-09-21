@@ -268,7 +268,7 @@ for d, amt, acct_name, payee, desc in txns:
             manual_prefilled += 1
             proposed = f"UNMATCHED -- recognized vendor: {category_hint}"
             basis = "Vendor Map hit, no forecast candidate for this category"
-            manual_category = "Expense" if amt < 0 else "Revenue"
+            manual_category = category_hint  # the real category, not a generic Expense/Revenue label
         elif category_hint:
             unmatched += 1
             proposed = f"UNMATCHED -- recognized vendor: {category_hint}"
