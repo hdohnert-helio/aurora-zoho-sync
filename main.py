@@ -8706,9 +8706,27 @@ def _parse_reconciliation_match_key(key: str):
     return kind, week_serial, category, name
 
 
-# TEMPORARY (2026-09-21): diagnosing "Reconciliation tab has headers but no
-# data" despite the propose endpoint reporting 304 rows written. Remove once
-# the cause is found.
+# TEMPORARY (2026-09-21): cause found (see the values().update() comment in
+# cashflow_reconcile_write_proposals) -- checkbox validation on a huge blank
+# range made values().append() land real data ~1600 rows down instead of at
+# row 2. Re-added to clean up the scattered rows this produced. Remove after
+# verifying the fix.
+@app.post("/internal/reconciliation-tab-reset")
+async def reconciliation_tab_reset():
+    try:
+        svc = _build_sheets_service()
+        if not svc:
+            return {"status": "failed", "reason": "could not build Sheets service"}
+        svc.spreadsheets().values().clear(
+            spreadsheetId=CASHFLOW_SHEET_ID,
+            range=f"'{CASHFLOW_RECONCILIATION_TAB}'!A2:M5000",
+        ).execute()
+        return {"status": "ok"}
+    except Exception as e:
+        logger.exception("reconciliation_tab_reset failed")
+        return {"status": "error", "detail": str(e)}
+
+
 @app.get("/internal/reconciliation-tab-debug")
 async def reconciliation_tab_debug():
     try:
@@ -8908,11 +8926,28 @@ async def cashflow_reconcile_write_proposals(request: Request):
                 body={"valueInputOption": "USER_ENTERED", "data": cell_updates},
             ).execute()
         if new_rows:
-            sheets.values().append(
+            # values().append() decides where "the table" ends by scanning for
+            # the last non-empty row -- but a checkbox column with data
+            # validation applied (Approved/Applied, see
+            # _reconciliation_ui_requests) renders as FALSE even on a truly
+            # blank/cleared row, so append() sees thousands of "non-empty"
+            # rows below any real data and appends far past the visible
+            # table. Confirmed 2026-09-21: real rows landed around row 1600+
+            # in a sheet with only ~305 actual data rows. Sidestep the
+            # ambiguity entirely -- compute the exact next row from the
+            # Date column (never touched by checkbox validation, so a
+            # genuinely blank cell reads as "" reliably) and write there
+            # with an explicit range instead of letting Sheets guess.
+            last_real_idx = -1
+            for i, r in enumerate(existing):
+                if r and len(r) > c["date"] and str(r[c["date"]]).strip() != "":
+                    last_real_idx = i
+            next_row = (last_real_idx + 2 + 1) if last_real_idx >= 0 else 2
+            end_row = next_row + len(new_rows) - 1
+            sheets.values().update(
                 spreadsheetId=CASHFLOW_SHEET_ID,
-                range=f"'{CASHFLOW_RECONCILIATION_TAB}'!A:M",
+                range=f"'{CASHFLOW_RECONCILIATION_TAB}'!A{next_row}:M{end_row}",
                 valueInputOption="USER_ENTERED",
-                insertDataOption="INSERT_ROWS",
                 body={"values": new_rows},
             ).execute()
 
