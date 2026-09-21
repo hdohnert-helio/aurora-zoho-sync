@@ -1505,24 +1505,42 @@ today's date on the Reconciliation row when it does either.
 
 Safe to trigger anytime, including from inside the spreadsheet itself.
 
-### Trigger from the Cashflow sheet: `apps_script/cashflow_reconciliation_menu.gs`
+### The Cashflow sheet already has its own Apps Script -- not in this repo
 
-A **manual, one-time setup step in the Sheets UI** (Claude can't do this
-part): Extensions -> Apps Script in the Cashflow spreadsheet, paste this
-file's contents, save, reload. Adds a "Reconciliation -> Apply Approved
-Matches Now" menu item that calls `/cashflow/reconcile-apply` directly via
-`UrlFetchApp.fetch` -- no bank creds involved, so it's safe to expose as a
-one-click action. Propose stays cron/Actions-triggered only for now (an
-in-sheet "Run Propose Now" button would need a GitHub PAT stored in the
-Apps Script's Script Properties -- deliberately not built yet; see the
-"optional stretch" note in the original plan if the cron cadence proves too
-slow).
+Discovered 2026-09-21, the hard way (my first instruction was to paste over
+it): the Cashflow spreadsheet has a pre-existing bound Apps Script project
+with a "Helio" menu -- Run Cash Flow, Apply Overrides, Sync Expenses, Sync
+Submissions, Rebuild Dashboard Structure -- calling `/cashflow/run`,
+`/dashboard/apply-overrides`, `/dashboard/sync-expenses`,
+`/dashboard/sync-submissions`, `/dashboard/create` in `main.py`. It is NOT
+tracked in this git repo; it only exists in the spreadsheet itself
+(Extensions -> Apps Script from the sheet). A `const BASE_URL` and
+`callEndpoint(path, method)` helper already exist there -- reuse them, don't
+redefine.
 
-### Status: built, not yet run against real data
+`apps_script/cashflow_reconciliation_menu.gs` in this repo documents the two
+small ADDITIONS needed in that existing script (one line in `onOpen()`, one
+new function appended) -- it is reference material, not a file meant to be
+pasted in wholesale. Any future Apps Script change to the Cashflow sheet
+must edit-in-place there, never overwrite.
 
-Code is written and compiles; not yet deployed/verified end-to-end (no
-Reconciliation tab has been created on the real sheet yet, no real Chase
-transaction has been matched). Before trusting this: run the workflow once,
-spot-check a handful of proposed matches by hand against the Revenue/
-Expenses tabs, approve a couple, apply, and confirm idempotency (see the
-Verification section of the original plan) before turning on wider trust.
+### Trigger from the Cashflow sheet
+
+Adds "Helio -> Apply Approved Reconciliation Matches" (folded into the
+existing menu, not a separate top-level one) calling
+`/cashflow/reconcile-apply` directly via `UrlFetchApp.fetch` -- no bank
+creds involved, so it's safe to expose as a one-click action. Propose stays
+cron/Actions-triggered only for now (an in-sheet "Run Propose Now" button
+would need a GitHub PAT stored in the Apps Script's Script Properties --
+deliberately not built yet; see the "optional stretch" note in the original
+plan if the cron cadence proves too slow).
+
+### Status: built and confirmed working end-to-end (2026-09-21)
+
+First real run: 304 Chase transactions pulled (both 1030 and 1055, last 45
+days), 4 matched to Revenue, 26 to Expenses, 11 labeled as LightReach
+batches (left for `lr_deposit_match.py`, not matched here), 263 unmatched --
+all written as new Reconciliation rows. `/cashflow/reconcile-apply` verified
+as a safe no-op with nothing yet approved. Not yet approved/applied against
+real data -- next step is spot-checking a handful of the 30 matched rows by
+hand before checking any Approved boxes for real.
