@@ -1604,3 +1604,31 @@ longer align with the new headers. Since nothing had been Approved yet, a
 one-time `POST /internal/reconciliation-tab-reset` clears the tab's data
 (temporary endpoint, removed after use) rather than trying to migrate
 mismatched old rows.
+
+### Bug found and fixed same day: writes landing ~1600 rows down, not row 2
+
+After the round-2 deploy, Harry reported the Reconciliation tab looked
+"mostly blank" -- headers present, no visible data, despite the propose
+endpoint reporting success. Root cause: `values().append()`'s "find the end
+of the table" heuristic treats a cell with BOOLEAN data-validation applied
+(the Approved/Applied checkboxes, applied up front across rows 2-5000 by
+`_reconciliation_ui_requests` so future rows are already checkbox-ready) as
+non-empty even when no value was ever written to it -- an applied checkbox
+renders/reads as `FALSE` by default. So `append()` saw thousands of
+"non-empty" rows below any real data and inserted far past the visible
+table (confirmed: real rows landed around row 1600+ in a sheet with ~305
+actual data rows).
+
+**Fix:** `cashflow_reconcile_write_proposals` no longer uses `append()` for
+new rows. It computes the exact next row from the Date column (never
+touched by checkbox validation, so a genuinely blank cell reads as `""`
+reliably) and writes with an explicit `values().update()` range instead of
+letting Sheets guess. This matches the pattern `_populate_overrides_from_pipeline`
+already uses for the Overrides tab's own checkbox column (an explicit
+range, never `append()`) -- the Reconciliation tab's use of `append()` next
+to a checkbox-validated range was the deviation from an already-established
+safe convention, not a novel mistake worth repeating elsewhere.
+
+Verified with a controlled single-transaction write (landed exactly at row
+2) and then a full 304-transaction propose run (landed at rows 2-305,
+`col_a_nonempty_row_count: 304`, no gaps).
