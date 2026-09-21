@@ -1540,12 +1540,67 @@ top-level one):
   cannot create a PAT; GitHub has no API for that). The token never appears
   in the script body or in this repo.
 
-### Status: built and confirmed working end-to-end (2026-09-21)
+### Round 1 status (2026-09-21): built, matched only 30 of 304
 
-First real run: 304 Chase transactions pulled (both 1030 and 1055, last 45
-days), 4 matched to Revenue, 26 to Expenses, 11 labeled as LightReach
-batches (left for `lr_deposit_match.py`, not matched here), 263 unmatched --
-all written as new Reconciliation rows. `/cashflow/reconcile-apply` verified
-as a safe no-op with nothing yet approved. Not yet approved/applied against
-real data -- next step is spot-checking a handful of the 30 matched rows by
-hand before checking any Approved boxes for real.
+First real run: 4 matched to Revenue, 26 to Expenses, 11 labeled as
+LightReach batches, 263 unmatched. Harry reviewed and reported 13 concrete
+misses -- see round 2 below for the fix.
+
+### Round 2 (2026-09-21): payee matching, tolerance, Vendor Map, real UI
+
+The 13 misses were three distinct root causes, not one bug:
+
+1. **Payee text carries the real signal and was never used.** Commissions
+   rows in Expenses are keyed by the *project customer's name*, not the
+   sales rep -- a row exists for "Mustak Ahmed" because that's whose deal
+   the commission is for. Chase's payee "Online to Mustakahmed" is that same
+   name, mangled. Fixed: `scripts/bank_reconciliation_propose.py` now tries
+   a normalized-payee-vs-candidate-name fallback (`find_name_match`) when
+   amount+date alone finds nothing.
+2. **Exact-amount matching was too strict for recurring bills.** Mulligan
+   ($4,524/wk), Zoho One ($1,045/mo), Fleet vehicle payments already exist
+   as exact-dollar Config/Expenses rows but real payments drift slightly
+   (interest, fees, proration). Fixed: `TOLERANT_CATEGORIES = {"Debt
+   Service", "Subscriptions", "Fleet", "Payroll & Benefits"}` get
+   max(5%, $50) tolerance; project-linked amounts (Commissions, Materials,
+   CT Green Estates, SolarInsure, Subcontractor, all Revenue categories)
+   stay exact -- those are computed precisely and a drift there would mean
+   something is actually wrong.
+3. **Some vendors have no candidate row at all** (Engineering Costs/
+   Plansets via NextRenewable, Interconnection Fees via United Illuminating/
+   Eversource). New **Vendor Map** tab (`_ensure_vendor_map_tab`, same
+   human-maintained pattern as Overrides/Config) lets Harry map a payee
+   substring to a category once; a category with zero forecast candidates
+   gets pre-filled into Manual Category so Harry only has to check Approved,
+   not type anything -- reconciliation-only, does not add forward-looking
+   forecasting (that's a separate, bigger project, deliberately out of
+   scope here).
+
+**Heartland** (2026-09-21, overriding the earlier "handle by hand" call):
+card deposits are batched and net of a processing fee. `find_heartland_match`
+tries a single Cash-milestone candidate net of an assumed 1.5-4% fee, then
+the sum of exactly two such candidates. A single-candidate match applies
+normally; a two-candidate match reports with no Match Key (can't cleanly
+stamp one sheet row) so it's informational only -- flagged as the least
+certain matcher in this pass, deliberately.
+
+**UI, reworked after Harry's feedback that a flat 304-row table with a
+checkbox at column K isn't something anyone opens regularly:**
+- Reconciliation tab columns reordered (`RECON_COL` in main.py) so the
+  decision (Proposed Match + Approved checkbox) sits at columns D-E, right
+  where the eye lands, instead of stranded at K. Match Key -- internal,
+  Apply-only -- is hidden.
+- Conditional formatting color-codes by confidence: light green for an
+  exact-amount match, light yellow for anything softer (name-fuzzy,
+  tolerant-amount, Heartland, Vendor Map) -- a glance at row color says how
+  much scrutiny it deserves.
+- Two Sheets-native Filter Views, not separate tabs (no data duplication,
+  checkboxes stay fully live either way): **"Needs Review"** (has a match,
+  not yet Approved -- what Harry actually opens day to day) and
+  **"Unmatched"** (nothing proposed -- the triage list for surprises).
+
+**Migration note:** the column reorder means the 304 rows from round 1 no
+longer align with the new headers. Since nothing had been Approved yet, a
+one-time `POST /internal/reconciliation-tab-reset` clears the tab's data
+(temporary endpoint, removed after use) rather than trying to migrate
+mismatched old rows.

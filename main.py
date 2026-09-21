@@ -5707,12 +5707,134 @@ def _ensure_overrides_tab(svc) -> None:
 
 CASHFLOW_RECONCILIATION_TAB = "Reconciliation"
 
+# Column order is deliberate, not alphabetical or chronological-of-design:
+# raw transaction facts (A-C) -> the decision, match + the checkbox for it,
+# side by side (D-E) -> supporting detail (F-H) -> secondary/audit facts
+# (I-J) -> status tracking (K-L) -> internal/hidden (M). Harry's eye only
+# ever needs to travel A through E for the common case.
 RECONCILIATION_HEADERS = [
-    "Date", "Amount", "Account", "Direction", "Payee",
-    "Proposed Match", "Match Basis", "Match Key",
-    "Manual Category", "Notes",
-    "Approved", "Applied", "Applied Date",
+    "Date", "Amount", "Payee",                          # A-C: raw fact
+    "Proposed Match", "Approved",                        # D-E: the decision
+    "Match Basis", "Manual Category", "Notes",           # F-H: supporting detail
+    "Account", "Direction",                              # I-J: secondary/audit
+    "Applied", "Applied Date",                            # K-L: status tracking
+    "Match Key",                                          # M: internal, hidden
 ]
+# 0-based column indices, matching the order above -- used throughout instead
+# of magic numbers.
+RECON_COL = {
+    "date": 0, "amount": 1, "payee": 2,
+    "proposed_match": 3, "approved": 4,
+    "match_basis": 5, "manual_category": 6, "notes": 7,
+    "account": 8, "direction": 9,
+    "applied": 10, "applied_date": 11,
+    "match_key": 12,
+}
+
+
+_RECON_MAX_ROW = 5000  # generous bound for data validation / conditional formatting ranges
+
+
+def _reconciliation_ui_requests(sheet_id: int) -> list:
+    """Checkboxes on Approved/Applied, Match Key hidden (internal, Apply-only),
+    and confidence color-coding on Match Basis: green for an exact amount
+    match, yellow for anything softer (payee-name fallback, tolerant-amount,
+    Heartland) so a glance at the row color tells Harry how much scrutiny it
+    deserves before checking Approved. Re-applied on every _ensure call (not
+    just at tab creation) so a tab created before this existed still gets it."""
+    checkbox_reqs = [
+        {
+            "setDataValidation": {
+                "range": {
+                    "sheetId": sheet_id, "startRowIndex": 1, "endRowIndex": _RECON_MAX_ROW,
+                    "startColumnIndex": col, "endColumnIndex": col + 1,
+                },
+                "rule": {
+                    "condition": {"type": "BOOLEAN"},
+                    "showCustomUi": True,
+                    "strict": True,
+                },
+            }
+        }
+        for col in (RECON_COL["approved"], RECON_COL["applied"])
+    ]
+    hide_match_key = {
+        "updateDimensionProperties": {
+            "range": {
+                "sheetId": sheet_id, "dimension": "COLUMNS",
+                "startIndex": RECON_COL["match_key"], "endIndex": RECON_COL["match_key"] + 1,
+            },
+            "properties": {"hiddenByUser": True},
+            "fields": "hiddenByUser",
+        }
+    }
+    basis_col_letter = chr(ord("A") + RECON_COL["match_basis"])
+    color_rules = {
+        "addConditionalFormatRule": {
+            "rule": {
+                "ranges": [{
+                    "sheetId": sheet_id, "startRowIndex": 1, "endRowIndex": _RECON_MAX_ROW,
+                    "startColumnIndex": 0, "endColumnIndex": len(RECONCILIATION_HEADERS),
+                }],
+                "booleanRule": {
+                    "condition": {"type": "CUSTOM_FORMULA", "values": [
+                        {"userEnteredValue": f'=REGEXMATCH(${basis_col_letter}2, "exact amount")'}
+                    ]},
+                    "format": {"backgroundColor": {"red": 0.85, "green": 0.95, "blue": 0.85}},
+                },
+            },
+            "index": 0,
+        }
+    }
+    softer_match_rule = {
+        "addConditionalFormatRule": {
+            "rule": {
+                "ranges": [{
+                    "sheetId": sheet_id, "startRowIndex": 1, "endRowIndex": _RECON_MAX_ROW,
+                    "startColumnIndex": 0, "endColumnIndex": len(RECONCILIATION_HEADERS),
+                }],
+                "booleanRule": {
+                    "condition": {"type": "CUSTOM_FORMULA", "values": [
+                        {"userEnteredValue": f'=REGEXMATCH(${basis_col_letter}2, "name match|Heartland|Vendor Map")'}
+                    ]},
+                    "format": {"backgroundColor": {"red": 1.0, "green": 0.97, "blue": 0.78}},
+                },
+            },
+            "index": 1,
+        }
+    }
+    return [*checkbox_reqs, hide_match_key, color_rules, softer_match_rule]
+
+
+def _reconciliation_filter_view_requests(sheet_id: int, existing_titles: set) -> list:
+    """Needs Review (has a match, not yet Approved) and Unmatched (no match)
+    -- saved Filter Views over the SAME data, so Approved stays a live,
+    editable checkbox in either view; nothing is duplicated or synced.
+    Skips a title that's already present so re-running this doesn't create
+    duplicates on every propose call."""
+    approved_col = RECON_COL["approved"]
+    match_key_col = RECON_COL["match_key"]
+    reqs = []
+    if "Needs Review" not in existing_titles:
+        reqs.append({"addFilterView": {"filter": {
+            "title": "Needs Review",
+            "range": {"sheetId": sheet_id, "startRowIndex": 0, "endRowIndex": _RECON_MAX_ROW,
+                      "startColumnIndex": 0, "endColumnIndex": len(RECONCILIATION_HEADERS)},
+            "criteria": {
+                str(approved_col): {"hiddenValues": ["TRUE"]},
+                str(match_key_col): {"condition": {"type": "NOT_BLANK"}},
+            },
+        }}})
+    if "Unmatched" not in existing_titles:
+        reqs.append({"addFilterView": {"filter": {
+            "title": "Unmatched",
+            "range": {"sheetId": sheet_id, "startRowIndex": 0, "endRowIndex": _RECON_MAX_ROW,
+                      "startColumnIndex": 0, "endColumnIndex": len(RECONCILIATION_HEADERS)},
+            "criteria": {
+                str(match_key_col): {"condition": {"type": "BLANK"}},
+            },
+        }}})
+    return reqs
 
 
 def _ensure_reconciliation_tab(svc) -> None:
@@ -5724,6 +5846,7 @@ def _ensure_reconciliation_tab(svc) -> None:
     existing = sheets.get(spreadsheetId=CASHFLOW_SHEET_ID).execute()
     for s in existing.get("sheets", []):
         if s["properties"]["title"] == CASHFLOW_RECONCILIATION_TAB:
+            sheet_id = s["properties"]["sheetId"]
             try:
                 result = sheets.values().get(
                     spreadsheetId=CASHFLOW_SHEET_ID,
@@ -5737,8 +5860,16 @@ def _ensure_reconciliation_tab(svc) -> None:
                         valueInputOption="USER_ENTERED",
                         body={"values": [RECONCILIATION_HEADERS]},
                     ).execute()
+                existing_titles = {fv.get("filter", {}).get("title") for fv in s.get("filterViews", [])}
+                sheets.batchUpdate(
+                    spreadsheetId=CASHFLOW_SHEET_ID,
+                    body={"requests": [
+                        *_reconciliation_ui_requests(sheet_id),
+                        *_reconciliation_filter_view_requests(sheet_id, existing_titles),
+                    ]},
+                ).execute()
             except Exception:
-                pass
+                logger.exception("_ensure_reconciliation_tab: UI patch failed (non-fatal)")
             return
 
     resp = sheets.batchUpdate(
@@ -5773,9 +5904,117 @@ def _ensure_reconciliation_tab(svc) -> None:
                     "fields": "gridProperties.frozenRowCount",
                 }
             },
+            *_reconciliation_ui_requests(sheet_id),
+            *_reconciliation_filter_view_requests(sheet_id, set()),
         ]},
     ).execute()
     logger.info("_ensure_reconciliation_tab: created Reconciliation tab")
+
+
+CASHFLOW_VENDOR_MAP_TAB = "Vendor Map"
+
+VENDOR_MAP_HEADERS = ["Payee Contains", "Category", "Notes"]
+
+
+def _ensure_vendor_map_tab(svc) -> None:
+    """Create the Vendor Map tab with headers if it doesn't already exist.
+    Same pattern as _ensure_overrides_tab / _ensure_reconciliation_tab: a
+    human-maintained tab a script reads back. Harry adds a row any time a
+    Chase payee string should map to a category -- either an existing
+    Expenses/Revenue category (restricts the reconciliation matcher's
+    candidate search to that category) or a brand-new label for a vendor
+    with no forecast candidate at all (becomes the category on the Manual
+    row created at /cashflow/reconcile-apply time)."""
+    sheets = svc.spreadsheets()
+    existing = sheets.get(spreadsheetId=CASHFLOW_SHEET_ID).execute()
+    for s in existing.get("sheets", []):
+        if s["properties"]["title"] == CASHFLOW_VENDOR_MAP_TAB:
+            try:
+                result = sheets.values().get(
+                    spreadsheetId=CASHFLOW_SHEET_ID,
+                    range=f"'{CASHFLOW_VENDOR_MAP_TAB}'!1:1",
+                ).execute()
+                existing_headers = (result.get("values") or [[]])[0]
+                if existing_headers != VENDOR_MAP_HEADERS:
+                    sheets.values().update(
+                        spreadsheetId=CASHFLOW_SHEET_ID,
+                        range=f"'{CASHFLOW_VENDOR_MAP_TAB}'!A1",
+                        valueInputOption="USER_ENTERED",
+                        body={"values": [VENDOR_MAP_HEADERS]},
+                    ).execute()
+            except Exception:
+                pass
+            return
+
+    resp = sheets.batchUpdate(
+        spreadsheetId=CASHFLOW_SHEET_ID,
+        body={"requests": [{"addSheet": {"properties": {"title": CASHFLOW_VENDOR_MAP_TAB}}}]}
+    ).execute()
+    sheet_id = resp["replies"][0]["addSheet"]["properties"]["sheetId"]
+
+    seed_rows = [
+        ["zoho", "Subscriptions", "Zoho One"],
+        ["mulligan", "Debt Service", "Mulligan Funding"],
+        ["groupmanagements", "Payroll & Benefits", "Payroll processor"],
+        ["td auto finance", "Fleet", ""],
+        ["ct green", "CT Green Estates", ""],
+        ["nextrenewab", "Engineering Costs (Plansets)", "No forecast candidate yet -- files as Manual on apply"],
+        ["united illuminating", "Interconnection Fees", "No forecast candidate yet -- files as Manual on apply"],
+        ["eversource", "Interconnection Fees", "No forecast candidate yet -- files as Manual on apply"],
+        ["heartland", "Heartland", "Handled specially -- card-fee-adjusted batch match, revenue side only"],
+    ]
+
+    sheets.values().update(
+        spreadsheetId=CASHFLOW_SHEET_ID,
+        range=f"'{CASHFLOW_VENDOR_MAP_TAB}'!A1",
+        valueInputOption="USER_ENTERED",
+        body={"values": [VENDOR_MAP_HEADERS] + seed_rows},
+    ).execute()
+
+    sheets.batchUpdate(
+        spreadsheetId=CASHFLOW_SHEET_ID,
+        body={"requests": [
+            {
+                "repeatCell": {
+                    "range": {"sheetId": sheet_id, "startRowIndex": 0, "endRowIndex": 1},
+                    "cell": {"userEnteredFormat": {"textFormat": {"bold": True}}},
+                    "fields": "userEnteredFormat.textFormat.bold",
+                }
+            },
+            {
+                "updateSheetProperties": {
+                    "properties": {
+                        "sheetId": sheet_id,
+                        "gridProperties": {"frozenRowCount": 1},
+                    },
+                    "fields": "gridProperties.frozenRowCount",
+                }
+            },
+        ]},
+    ).execute()
+    logger.info("_ensure_vendor_map_tab: created Vendor Map tab")
+
+
+def _read_vendor_map(svc) -> list:
+    """Returns [{"payee_contains": str, "category": str, "notes": str}, ...]."""
+    try:
+        raw = svc.spreadsheets().values().get(
+            spreadsheetId=CASHFLOW_SHEET_ID,
+            range=f"'{CASHFLOW_VENDOR_MAP_TAB}'!A2:C500",
+            valueRenderOption="FORMATTED_VALUE",
+        ).execute().get("values", [])
+    except Exception:
+        return []
+    out = []
+    for row in raw:
+        if not row or not str(row[0]).strip():
+            continue
+        out.append({
+            "payee_contains": str(row[0]).strip().lower(),
+            "category": str(row[1]).strip() if len(row) > 1 else "",
+            "notes": str(row[2]).strip() if len(row) > 2 else "",
+        })
+    return out
 
 
 def _read_payment_overrides(svc) -> dict:
@@ -8480,6 +8719,9 @@ async def cashflow_snapshot():
             return {"status": "failed", "reason": "could not build Sheets service"}
         sheets = svc.spreadsheets()
 
+        _ensure_vendor_map_tab(svc)
+        vendor_map = _read_vendor_map(svc)
+
         revenue_candidates = []
         rev_raw = sheets.values().get(
             spreadsheetId=DASHBOARD_SHEET_ID,
@@ -8534,9 +8776,30 @@ async def cashflow_snapshot():
             "status": "ok",
             "revenue_candidates": revenue_candidates,
             "expense_candidates": expense_candidates,
+            "vendor_map": vendor_map,
         }
     except Exception as e:
         logger.exception("cashflow_snapshot failed")
+        return {"status": "error", "detail": str(e)}
+
+
+# TEMPORARY (2026-09-21): the Reconciliation tab's column order changed
+# (round 2 of bank reconciliation -- see CLAUDE.md) and the 304 rows written
+# under the old order would misalign under the new headers. Nothing has been
+# Approved yet, so a one-time clear is safe. Remove this endpoint once run.
+@app.post("/internal/reconciliation-tab-reset")
+async def reconciliation_tab_reset():
+    try:
+        svc = _build_sheets_service()
+        if not svc:
+            return {"status": "failed", "reason": "could not build Sheets service"}
+        svc.spreadsheets().values().clear(
+            spreadsheetId=CASHFLOW_SHEET_ID,
+            range=f"'{CASHFLOW_RECONCILIATION_TAB}'!A2:M5000",
+        ).execute()
+        return {"status": "ok"}
+    except Exception as e:
+        logger.exception("reconciliation_tab_reset failed")
         return {"status": "error", "detail": str(e)}
 
 
@@ -8570,12 +8833,13 @@ async def cashflow_reconcile_write_proposals(request: Request):
         def txn_key(date_str, amount, account):
             return (str(date_str).strip(), round(float(amount), 2), str(account).strip())
 
+        c = RECON_COL  # short alias, this function reads/writes a lot of columns by name
         existing_by_key = {}
         for i, row in enumerate(existing):
-            if len(row) < 3:
+            if len(row) <= max(c["date"], c["amount"], c["account"]):
                 continue
             try:
-                k = txn_key(row[0], row[1], row[2])
+                k = txn_key(row[c["date"]], row[c["amount"]], row[c["account"]])
             except (ValueError, TypeError):
                 continue
             existing_by_key[k] = (i + 2, row)  # sheet row number, row data
@@ -8591,19 +8855,35 @@ async def cashflow_reconcile_write_proposals(request: Request):
             match_key = txn.get("match_key", "")
             if k in existing_by_key:
                 row_num, row_data = existing_by_key[k]
-                applied = len(row_data) > 11 and str(row_data[11]).strip().upper() == "TRUE"
+                applied = len(row_data) > c["applied"] and str(row_data[c["applied"]]).strip().upper() == "TRUE"
                 if applied:
                     skipped_applied += 1
                     continue
-                cell_updates.append({"range": f"'{CASHFLOW_RECONCILIATION_TAB}'!F{row_num}:H{row_num}",
-                                      "values": [[proposed, basis, match_key]]})
+                # Proposed Match / Match Basis / Match Key aren't contiguous in
+                # this column layout (D, F, M) -- three separate range entries
+                # in the same batchUpdate call, still one API round trip.
+                tab = CASHFLOW_RECONCILIATION_TAB
+                cell_updates.append({"range": f"'{tab}'!{_col_letter(c['proposed_match'])}{row_num}",
+                                      "values": [[proposed]]})
+                cell_updates.append({"range": f"'{tab}'!{_col_letter(c['match_basis'])}{row_num}",
+                                      "values": [[basis]]})
+                cell_updates.append({"range": f"'{tab}'!{_col_letter(c['match_key'])}{row_num}",
+                                      "values": [[match_key]]})
                 updated += 1
             else:
-                new_rows.append([
-                    txn["date"], txn["amount"], txn["account"], txn.get("direction", ""),
-                    txn.get("payee", ""), proposed, basis, match_key,
-                    "", "", "FALSE", "FALSE", "",
-                ])
+                row = [""] * len(RECONCILIATION_HEADERS)
+                row[c["date"]] = txn["date"]
+                row[c["amount"]] = txn["amount"]
+                row[c["payee"]] = txn.get("payee", "")
+                row[c["proposed_match"]] = proposed
+                row[c["approved"]] = "FALSE"
+                row[c["match_basis"]] = basis
+                row[c["manual_category"]] = txn.get("manual_category", "")
+                row[c["account"]] = txn["account"]
+                row[c["direction"]] = txn.get("direction", "")
+                row[c["applied"]] = "FALSE"
+                row[c["match_key"]] = match_key
+                new_rows.append(row)
 
         if cell_updates:
             sheets.values().batchUpdate(
@@ -8676,17 +8956,18 @@ async def cashflow_reconcile_apply():
         new_exp_rows, new_rev_rows = [], []
         applied = skipped = new_manual = 0
 
+        c = RECON_COL
         for i, row in enumerate(recon_rows):
-            if len(row) < 12:
+            if len(row) <= c["match_key"]:
                 continue
-            approved = str(row[10]).strip().upper() == "TRUE"
-            already_applied = str(row[11]).strip().upper() == "TRUE"
+            approved = str(row[c["approved"]]).strip().upper() == "TRUE"
+            already_applied = str(row[c["applied"]]).strip().upper() == "TRUE"
             if not approved or already_applied:
                 continue
 
             recon_row_num = i + 2
-            match_key = row[7] if len(row) > 7 else ""
-            manual_category = row[8] if len(row) > 8 else ""
+            match_key = row[c["match_key"]]
+            manual_category = row[c["manual_category"]]
             parsed = _parse_reconciliation_match_key(match_key)
 
             if parsed:
@@ -8703,7 +8984,7 @@ async def cashflow_reconcile_apply():
                     skipped += 1
                     continue  # matched row no longer exists -- don't mark Applied, needs review
             elif manual_category:
-                date_str, amount, payee = row[0], row[1], row[4] if len(row) > 4 else ""
+                date_str, amount, payee = row[c["date"]], row[c["amount"]], row[c["payee"]]
                 try:
                     d = datetime.date.fromisoformat(str(date_str)) if isinstance(date_str, str) \
                         else (datetime.date(1899, 12, 30) + datetime.timedelta(days=int(date_str)))
@@ -8719,8 +9000,11 @@ async def cashflow_reconcile_apply():
                 skipped += 1
                 continue
 
-            recon_updates.append({"range": f"'{CASHFLOW_RECONCILIATION_TAB}'!L{recon_row_num}:M{recon_row_num}",
-                                   "values": [["TRUE", today]]})
+            applied_col, applied_date_col = _col_letter(c["applied"]), _col_letter(c["applied_date"])
+            recon_updates.append({
+                "range": f"'{CASHFLOW_RECONCILIATION_TAB}'!{applied_col}{recon_row_num}:{applied_date_col}{recon_row_num}",
+                "values": [["TRUE", today]],
+            })
 
         if exp_updates:
             sheets.values().batchUpdate(spreadsheetId=DASHBOARD_SHEET_ID,
