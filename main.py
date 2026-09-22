@@ -8287,6 +8287,13 @@ async def cashflow_run(request: Request):
         result = _run_cashflow_batch(projects, tab_name)
         result["project_count"] = len(projects)
         result["cutoff_date"] = cutoff
+        if svc:
+            try:
+                _ensure_overrides_tab(svc)
+                overrides_result = _populate_overrides_from_pipeline(svc)
+                result["overrides_sync"] = overrides_result
+            except Exception as oe:
+                logger.warning(f"cashflow_run: overrides sync failed (non-fatal): {oe}")
         gc.collect()
         return result
     except Exception as e:
