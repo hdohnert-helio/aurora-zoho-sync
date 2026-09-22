@@ -84,12 +84,19 @@ for a in r.json().get("accounts", []):
     if str(a.get("id")) not in ALLOWED:
         continue
     acct_name = a.get("name", "?")
+    acct_max_date = None
     for t in a.get("transactions", []) or []:
+        d = dt.datetime.fromtimestamp(t.get("posted") or t.get("transacted_at") or 0).date()
+        if acct_max_date is None or d > acct_max_date:
+            acct_max_date = d
         amt = float(t.get("amount", 0))
         if amt == 0:
             continue
-        d = dt.datetime.fromtimestamp(t.get("posted") or t.get("transacted_at") or 0).date()
         txns.append((d, amt, acct_name, (t.get("payee") or "").strip(), (t.get("description") or "").strip()))
+    bal_date = a.get("balance-date")
+    bal_date_str = dt.datetime.fromtimestamp(bal_date).date().isoformat() if bal_date else "n/a"
+    print(f"  {acct_name}: latest transaction {acct_max_date or 'none'}, "
+          f"SimpleFIN balance-date (last bank refresh) {bal_date_str}")
 
 print(f"Chase transactions pulled (allowlisted accounts, last {args.days}d): {len(txns)}")
 
