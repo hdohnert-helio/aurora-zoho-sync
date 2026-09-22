@@ -8446,9 +8446,14 @@ def _apply_overrides_to_pipeline_tab(svc, tab_name: str, overrides: dict) -> dic
         if pov.get("comm_payout3_date"):
             updates.append({"range": f"'{tab_name}'!X{row_num}", "values": [[pov["comm_payout3_date"]]]})
 
-        # CT Green Date override (col AB)
+        # CT Green Date (col AB) + CT Green Amt (col AC)
         if pov.get("ct_green_date"):
             updates.append({"range": f"'{tab_name}'!AB{row_num}", "values": [[pov["ct_green_date"]]]})
+        elif (not pov.get("ct_green_paid") and pov.get("payment2")
+                and finance_type in ("LR", "SG") and system_watts and current_pay["payment2"]):
+            # Auto-derive CT Green from overridden activation date
+            updates.append({"range": f"'{tab_name}'!AB{row_num}", "values": [[pov["payment2"]]]})
+            updates.append({"range": f"'{tab_name}'!AC{row_num}", "values": [[round(system_watts * CASHFLOW_CT_GREEN_PPW, 2)]]})
 
         # Materials Paid Date override (col AD) — overrides auto-computed cash materials date
         if pov.get("materials_date"):
