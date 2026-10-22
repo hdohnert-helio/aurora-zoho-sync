@@ -1706,6 +1706,8 @@ singletons. If that reads as too fragmented, raise `CANVASS_EPS_MI`.
 - Render env vars: `CANVASS_SESSION_SECRET`, `CANVASS_REP_PASSWORD`,
   `CANVASS_ADMIN_PASSWORD`, `CANVASS_SHEET_ID` (share the sheet with the
   service account as Editor), optional `GOOGLE_GEOCODING_API_KEY`.
+  `CANVASS_SHEET_ID = 1QhN0V_IXHjyaoBYCh0ZEgpZOFzyZKCQ0AETB62gQryc`, shared
+  with `zoho-calendar-bridge@install-calendar-access.iam.gserviceaccount.com`.
 - Zoho writes are only the five `Canvass_*` fields, `"trigger": []`.
 - Login form is parsed by hand (`parse_qs`) because `request.form()` needs
   `python-multipart`, which isn't a dependency.
