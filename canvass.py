@@ -272,14 +272,32 @@ def _geocode_census(clean):
         return None
     if not matches:
         return None
-    m = matches[0]
-    comp = m.get("addressComponents") or {}
     in_num = re.match(r"\s*(\d+)", clean)
-    out_num = re.match(r"\s*(\d+)", m.get("matchedAddress") or "")
     in_zip = re.search(r"\b(\d{5})\b(?!.*\b\d{5}\b)", clean)
-    same_num = bool(in_num and out_num and in_num.group(1) == out_num.group(1))
-    same_zip = (not in_zip) or comp.get("zip") == in_zip.group(1)
-    quality = "exact" if (same_num and same_zip and len(matches) == 1) else "partial"
+    in_street = re.sub(r"\s", "", _street_of(clean).upper())
+
+    def agrees(m, check_street):
+        comp = m.get("addressComponents") or {}
+        out_num = re.match(r"\s*(\d+)", m.get("matchedAddress") or "")
+        if not (in_num and out_num and in_num.group(1) == out_num.group(1)):
+            return False
+        if in_zip and comp.get("zip") != in_zip.group(1):
+            return False
+        if check_street:
+            out_street = "".join(comp.get(k) or "" for k in ("preDirection", "streetName", "suffixType"))
+            return out_street.replace(" ", "").upper() == in_street
+        return True
+
+    if len(matches) == 1:
+        m, good = matches[0], agrees(matches[0], check_street=False)
+    else:
+        # Several candidates: trust it only when exactly one is the street as
+        # written. Five Fields Rd vs Five Field Rd (Madison) are both real and
+        # ~0.2 mi apart; 11 Belden Street (Wilton) matching only Belden HILL
+        # Rd/Ln must stay unconfirmed.
+        named = [x for x in matches if agrees(x, check_street=True)]
+        m, good = (named[0], True) if len(named) == 1 else (matches[0], False)
+    quality = "exact" if good else "partial"
     return {"lat": m["coordinates"]["y"], "lng": m["coordinates"]["x"],
             "match": f"census:{quality}", "good": quality == "exact"}
 
@@ -726,7 +744,9 @@ def _sync(run):
         lat, lng = rec.get("Canvass_Lat"), rec.get("Canvass_Lng")
         match, town = rec.get("Canvass_Geocode_Match"), rec.get("Canvass_Town")
         h = _address_hash(clean) if clean else None
-        if clean and h != rec.get("Canvass_Address_Hash"):
+        # Retry unconfirmed geocodes every run (only ~20): the geocoder or our
+        # match rules may have improved even though the address didn't change.
+        if clean and (h != rec.get("Canvass_Address_Hash") or not _is_good_match(match)):
             g = _geocode(clean)
             if g:
                 # Canvass_Lat/Lng allow max 7 decimals; Census returns 12 and Zoho
