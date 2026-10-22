@@ -729,7 +729,9 @@ def _sync(run):
         if clean and h != rec.get("Canvass_Address_Hash"):
             g = _geocode(clean)
             if g:
-                lat, lng, match = g["lat"], g["lng"], g["match"]
+                # Canvass_Lat/Lng allow max 7 decimals; Census returns 12 and Zoho
+                # rejects the whole 100-record batch over one (verified 2026-10-22).
+                lat, lng, match = round(g["lat"], 6), round(g["lng"], 6), g["match"]
                 town = _town_for_point(lat, lng) or OUTSIDE_STATE
             else:
                 lat = lng = None
@@ -767,6 +769,11 @@ def _sync(run):
         })
 
     run["geocoded"] = _write_geocodes(updates)
+    if run["geocoded"] < len(updates):
+        # Map still builds from this run's in-memory geocodes, but the cache didn't
+        # land, so every later run re-geocodes these. Surface it, don't hide it.
+        run["status"] = "partial"
+        run["error"] = f"{len(updates) - run['geocoded']} of {len(updates)} geocode writes to Zoho failed"
 
     # Blank utility: take the majority among other installs in the same town.
     town_util = {}
