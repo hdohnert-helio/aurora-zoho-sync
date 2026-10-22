@@ -1711,3 +1711,26 @@ singletons. If that reads as too fragmented, raise `CANVASS_EPS_MI`.
 - Zoho writes are only the five `Canvass_*` fields, `"trigger": []`.
 - Login form is parsed by hand (`parse_qs`) because `request.form()` needs
   `python-multipart`, which isn't a dependency.
+- Zoho record links: `https://crm.zoho.com/crm/heliosolar/tab/CustomModule6/<id>`
+  (Installs is `CustomModule6`).
+
+### Address fixes (2026-10-22)
+
+Census-verified corrections written to `Site_Location` (`"trigger": []`):
+29 Vineyard Ln Stamford 06901->06902, 9 Valerie Ln Danbury 06810->06811,
+8 Deerfield Rd Brookfield 06864->06804, 28 Braeloch Way "Munroe CT 06464"
+->"Monroe CT 06468", and Thomas Dawson 11 Belden Street -> **11 Belden Hill
+Rd** (Harry checked the utility bill). Not renamed on purpose: 519 CT-87,
+Columbia (= Jonathan Trumbull Hwy) -- PowerClerk matching keys on
+`Site_Location`, so a street rename could break that match.
+
+### Open items -- flagged by Harry to come back to, do not auto-resolve
+
+- **Oscar Orella** (`5264387000032297001`) -- `Site_Location` is
+  `1775 East Hartford CT. 06108`, no street name. Off the map until fixed.
+- **Pascal Fassa Kamano** (`5264387000031713001`) -- no `Site_Location` at
+  all. Off the map until fixed.
+- Six CT addresses Census doesn't know (Peninsular Ave Waterford, 1524
+  Bronson Rd Fairfield, Garnet Ln Ellington, Highland Ct Milford, Sunset
+  Hill Rd Bethel, 316 US-7 N Canaan) plus 519 CT-87 Columbia wait on
+  `GOOGLE_GEOCODING_API_KEY`.
