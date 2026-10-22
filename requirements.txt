@@ -6,3 +6,5 @@ google-auth
 google-api-python-client
 apscheduler
 twilio
+shapely
+

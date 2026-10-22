@@ -1632,3 +1632,80 @@ safe convention, not a novel mistake worth repeating elsewhere.
 Verified with a controlled single-transaction write (landed exactly at row
 2) and then a full 304-transaction propose run (landed at rows 2-305,
 `col_a_nonempty_row_count: 304`, no gaps).
+
+## Canvass map (2026-10-22)
+
+Mobile map for a door-to-door canvasser (no Zoho access) showing completed
+installs grouped into walkable zones that never cross a town line. Served by
+the Render service at `/canvass`. Code: `canvass.py` (sync, clustering, auth,
+API), `canvass_static/` (login + Leaflet app), `data/ct_towns.geojson` (169
+CT towns, Census TIGERweb county subdivisions, simplified ~30 m). Registered
+from the bottom of `main.py` via `canvass.register(...)`.
+
+### Decisions (Harry, 2026-10-22)
+
+- Hosted inside this service, not standalone.
+- Pins show the **full address** and install month. No customer names, no
+  system details.
+- Geocode cache lives on the Install record: `Canvass_Lat`, `Canvass_Lng`,
+  `Canvass_Town`, `Canvass_Geocode_Match`, `Canvass_Address_Hash` (created
+  2026-10-22). Re-geocoded only when the address hash changes. **Every** record
+  with an address is geocoded, not just installed ones; only installed ones
+  reach the map.
+- Town solicitor/permit notes live in a Google Sheet (`CANVASS_SHEET_ID`,
+  tab `Town Notes`) and the **rep** edits them from the app. Same sheet gets a
+  `Review` tab (rewritten each run) and an append-only `Sync Log` tab.
+- All installs feed the zones; the app filters by 6/12/24 months / all.
+- One rep login + one admin login.
+
+### "Installed" and the install date
+
+Installed = stage in Inspection / Witness Test / PTO / Energized / Project
+Closeout, or `Substantial_Completion` set on a non-Canceled record. Install
+date, in order: `Substantial_Completion` -> `Actual_Installation_Date` ->
+earliest of `Inspection_Completed`/`Utility_PTO` (estimated) -> earliest of
+Deal `Closing_Date`, Deal `Created_Time`, Install `Created_Time` **plus the
+median sale-to-completion lag measured from the data each run** (estimated;
+92 days from 224 samples on 2026-10-22). Earliest, because the Feb-Mar 2025
+and Jun 2025 backfills created Installs months/years after the sale, and the
+Jun 2025 batch had Deal `Closing_Date` stamped with the backfill day.
+
+**Zoho gotcha:** `GET /Installs` (list or by id) silently omits
+`Created_Time` even when it's named in `fields=`. Only `/Installs/search`
+returns it, and `Created_Time` isn't a searchable field, so the sync searches
+by the four installed stages (`_fetch_created_times`). Search caps at 2000
+results. Deals read by `ids=` DO return `Created_Time`.
+
+### Town and geocoding
+
+Town = point-in-polygon against the town boundaries, never the mailing city
+(Cos Cob -> Greenwich, Amston -> Hebron, Winsted -> Winchester). Geocoder:
+US Census first; Google fallback only if `GOOGLE_GEOCODING_API_KEY` is set.
+A Census hit counts as good only when house number and zip both match;
+anything else goes to the review queue, not the map. First real read-only
+run: 500/518 addresses exact, 16 CT installs in review (Census lacks the
+street, e.g. 1 Highland Ct Milford, 2 Garnet Ln Ellington). A Google key
+would clear most of them.
+
+### Zones
+
+Per town: DBSCAN on haversine distance (`CANVASS_EPS_MI` 0.4, `CANVASS_MIN_SAMPLES`
+2), then each install buffered by `CANVASS_RADIUS_MI` 0.25, unioned per
+cluster and clipped to the town polygon. Singletons become "seed" zones.
+Score = count + 2 x sum of 12-month half-life recency + 0.05 x installs/sq mi
+(weights are `CANVASS_W_*` env vars). Zone ID = town code + hash of the
+zone's **oldest** install id (`MIL-FAD8`), so it survives new installs joining.
+At default settings the 380 mapped installs form 322 zones, 277 of them
+singletons. If that reads as too fragmented, raise `CANVASS_EPS_MI`.
+
+### Running it
+
+- Nightly 06:00 UTC via APScheduler, plus a run 20 s after every startup
+  (the result lives in memory, so a deploy empties it until that run finishes,
+  ~2 min with a warm geocode cache). Admin "Refresh from Zoho now" in the app menu.
+- Render env vars: `CANVASS_SESSION_SECRET`, `CANVASS_REP_PASSWORD`,
+  `CANVASS_ADMIN_PASSWORD`, `CANVASS_SHEET_ID` (share the sheet with the
+  service account as Editor), optional `GOOGLE_GEOCODING_API_KEY`.
+- Zoho writes are only the five `Canvass_*` fields, `"trigger": []`.
+- Login form is parsed by hand (`parse_qs`) because `request.form()` needs
+  `python-multipart`, which isn't a dependency.

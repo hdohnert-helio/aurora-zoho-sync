@@ -10987,3 +10987,10 @@ async def debug_read_tab(sheet_id: str, tab: str, range_: str = "A1:Z200"):
     except Exception as e:
         import traceback as _tb
         return {"error": str(e), "traceback": _tb.format_exc()}
+
+
+# ------------------------
+# Canvass map (canvass.py): rep-facing install map at /canvass
+# ------------------------
+import canvass  # noqa: E402  (needs the Zoho/Sheets helpers defined above)
+canvass.register(app, scheduler, get_zoho_access_token, _build_sheets_service)
