@@ -8884,7 +8884,23 @@ async def cashflow_reconcile_write_proposals(request: Request):
         ).execute().get("values", [])
 
         def txn_key(date_str, amount, account):
-            return (str(date_str).strip(), round(float(amount), 2), str(account).strip())
+            # A Date cell written with valueInputOption=USER_ENTERED gets
+            # auto-parsed by Sheets into a date serial number, so reading it
+            # back (even UNFORMATTED_VALUE) yields a float like 46995, not
+            # the "2026-09-17" string this function is also called with for
+            # incoming proposals. Normalize both shapes to the same ISO
+            # string, or every re-run treats existing rows as brand new and
+            # duplicates them (confirmed 2026-09-22: 0 "updated" on a run
+            # that should have overlapped heavily with the prior day's).
+            if isinstance(date_str, (int, float)):
+                date_norm = (datetime.date(1899, 12, 30) + datetime.timedelta(days=int(date_str))).isoformat()
+            else:
+                s = str(date_str).strip()
+                try:
+                    date_norm = (datetime.date(1899, 12, 30) + datetime.timedelta(days=int(float(s)))).isoformat() if s.replace(".", "", 1).isdigit() else s
+                except (ValueError, TypeError):
+                    date_norm = s
+            return (date_norm, round(float(amount), 2), str(account).strip())
 
         c = RECON_COL  # short alias, this function reads/writes a lot of columns by name
         existing_by_key = {}
