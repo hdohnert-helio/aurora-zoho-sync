@@ -1730,7 +1730,8 @@ Columbia (= Jonathan Trumbull Hwy) -- PowerClerk matching keys on
   `1775 East Hartford CT. 06108`, no street name. Off the map until fixed.
 - **Pascal Fassa Kamano** (`5264387000031713001`) -- no `Site_Location` at
   all. Off the map until fixed.
-- Six CT addresses Census doesn't know (Peninsular Ave Waterford, 1524
-  Bronson Rd Fairfield, Garnet Ln Ellington, Highland Ct Milford, Sunset
-  Hill Rd Bethel, 316 US-7 N Canaan) plus 519 CT-87 Columbia wait on
-  `GOOGLE_GEOCODING_API_KEY`.
+
+`GOOGLE_GEOCODING_API_KEY` added 2026-10-22 (GCP project `maps-to-zoho-form`,
+key restricted to Geocoding API only). It placed all seven CT addresses
+Census didn't know at ROOFTOP precision. After that run: 394 installs on the
+map in 265 zones; the 20 review items are 18 out-of-state + the two above.
