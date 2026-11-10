@@ -352,15 +352,16 @@ def _build_gmail_service():
     return build("gmail", "v1", credentials=delegated, cache_discovery=False)
 
 
-def _gmail_query_for_install(install):
+def _gmail_query_for_install(install, lookback_days=None):
+    days = lookback_days if lookback_days is not None else GMAIL_LOOKBACK_DAYS
     ic_num = (install.get("IC_Project_Number") or "").strip()
     if ic_num:
-        return f'"{ic_num}" newer_than:{GMAIL_LOOKBACK_DAYS}d'
+        return f'"{ic_num}" newer_than:{days}d'
     address = (install.get("Site_Location") or "").strip()
     street = address.split(",")[0].strip() if address else ""
     if not street:
         return None
-    return f'"{street}" newer_than:{GMAIL_LOOKBACK_DAYS}d'
+    return f'"{street}" newer_than:{days}d'
 
 
 def _decode_part(part):
@@ -409,8 +410,8 @@ def _extract_subject_body(msg):
     return subject, body, received_dt, sender
 
 
-def fetch_recent_emails_for_install(gmail, install):
-    q = _gmail_query_for_install(install)
+def fetch_recent_emails_for_install(gmail, install, lookback_days=None):
+    q = _gmail_query_for_install(install, lookback_days=lookback_days)
     name = install.get("Name", install.get("id"))
     if not q:
         logger.info(f"ic_monitor: no query built for {name} (missing address and IC number)")
@@ -583,6 +584,155 @@ def run_ic_monitor(get_zoho_token_fn):
         "flagged_for_review": flagged_for_review,
     }
     logger.info(f"ic_monitor: complete — {summary}")
+    return summary
+
+
+def run_ic_monitor_single(install_id, get_zoho_token_fn, lookback_days=None):
+    """
+    Run the IC monitor for one specific install. Useful for backfilling a project
+    that recently had its IC_Project_Number added, or for re-scanning with a longer
+    lookback than the default GMAIL_LOOKBACK_DAYS.
+    """
+    token = get_zoho_token_fn()
+    if not token:
+        logger.error("ic_monitor_single: failed to get Zoho token")
+        return {"status": "failed", "reason": "no zoho token"}
+
+    api_domain = os.getenv("ZOHO_API_DOMAIN", "https://www.zohoapis.com")
+
+    install_resp = requests.get(
+        f"{api_domain}/crm/v2/Installs/{install_id}",
+        headers=_zoho_headers(token),
+        params={"fields": "id,Name,Site_Location,IC_Project_Number,Utility_Status,Utility_Provider"},
+        timeout=30,
+    )
+    if install_resp.status_code == 204:
+        return {"status": "failed", "reason": "install not found"}
+    install_resp.raise_for_status()
+    install = install_resp.json()["data"][0]
+    name = install.get("Name", install_id)
+
+    logger.info(
+        f"ic_monitor_single: processing {name!r} install_id={install_id} "
+        f"lookback_days={lookback_days or GMAIL_LOOKBACK_DAYS}"
+    )
+
+    gmail = _build_gmail_service()
+    try:
+        emails = fetch_recent_emails_for_install(gmail, install, lookback_days=lookback_days)
+    except Exception:
+        logger.exception(f"ic_monitor_single: Gmail fetch failed for {name}")
+        return {"status": "failed", "reason": "gmail fetch error"}
+
+    if not emails:
+        logger.info(f"ic_monitor_single: no emails found for {name!r}")
+        return {"status": "ok", "emails_processed": 0, "records_updated": 0, "flagged_for_review": 0}
+
+    try:
+        seen_gmail_ids = fetch_existing_gmail_ids(install_id, token, api_domain)
+    except Exception:
+        logger.exception(f"ic_monitor_single: failed to fetch existing IC monitor records for {name}")
+        seen_gmail_ids = set()
+
+    emails_processed = 0
+    records_updated = 0
+    flagged_for_review = 0
+    status_locked = False
+
+    for email in emails:
+        if email["id"] in seen_gmail_ids:
+            logger.info(f"ic_monitor_single: skipping already-noted email for {name} — {email['subject']!r}")
+            continue
+
+        if not _is_utility_sender(email.get("sender", "")):
+            logger.info(
+                f"ic_monitor_single: logging non-utility email for {name} "
+                f"— sender={email.get('sender')!r} subject={email['subject']!r}"
+            )
+            try:
+                add_ic_monitor_record(
+                    install_id, email["id"], email["subject"], email["body"],
+                    "Non-utility email", "low", email["received_dt"], token, api_domain,
+                )
+            except Exception:
+                logger.exception(f"ic_monitor_single: record write failed for non-utility email {name}")
+            continue
+
+        result = classify_email(install, email["subject"], email["body"])
+
+        if result is _IGNORE:
+            logger.info(f"ic_monitor_single: ignored internal email for {name} — {email['subject']!r}")
+            continue
+
+        emails_processed += 1
+        confidence = result["confidence"]
+        new_status = result["new_status"]
+        ic_num = result["ic_project_number"]
+
+        if confidence == "low":
+            try:
+                add_ic_monitor_record(
+                    install_id, email["id"], email["subject"], email["body"],
+                    "Needs Review", confidence, email["received_dt"], token, api_domain,
+                )
+            except Exception:
+                logger.exception(f"ic_monitor_single: record write failed for {name}")
+            flagged_for_review += 1
+            continue
+
+        updates = {}
+        if new_status and not status_locked and new_status != install.get("Utility_Status"):
+            current_rank = STATUS_RANK.get(install.get("Utility_Status"), 0)
+            new_rank = STATUS_RANK.get(new_status, 0)
+            if new_rank >= current_rank:
+                updates["Utility_Status"] = new_status
+            else:
+                logger.info(
+                    f"ic_monitor_single: skipping downgrade for {name}: "
+                    f"{install.get('Utility_Status')!r} → {new_status!r} "
+                    f"(rank {current_rank} → {new_rank})"
+                )
+        if ic_num and not install.get("IC_Project_Number"):
+            updates["IC_Project_Number"] = ic_num
+
+        if updates:
+            try:
+                update_install_fields(install_id, updates, token, api_domain)
+                if "Utility_Status" in updates:
+                    old_status = install.get("Utility_Status")
+                    install["Utility_Status"] = updates["Utility_Status"]
+                    status_locked = True
+                    try:
+                        post_status_change_note(
+                            install_id, old_status, updates["Utility_Status"],
+                            email["subject"], token, api_domain,
+                        )
+                    except Exception:
+                        logger.exception(f"ic_monitor_single: mention note failed for {name}")
+                if "IC_Project_Number" in updates:
+                    install["IC_Project_Number"] = updates["IC_Project_Number"]
+                records_updated += 1
+                logger.info(f"ic_monitor_single: updated {name} — {updates}")
+            except Exception:
+                logger.exception(f"ic_monitor_single: field update failed for {name}")
+
+        try:
+            add_ic_monitor_record(
+                install_id, email["id"], email["subject"], email["body"],
+                new_status, confidence, email["received_dt"], token, api_domain,
+            )
+        except Exception:
+            logger.exception(f"ic_monitor_single: record write failed for {name}")
+
+    summary = {
+        "status": "ok",
+        "install_id": install_id,
+        "name": name,
+        "emails_processed": emails_processed,
+        "records_updated": records_updated,
+        "flagged_for_review": flagged_for_review,
+    }
+    logger.info(f"ic_monitor_single: complete — {summary}")
     return summary
 
 

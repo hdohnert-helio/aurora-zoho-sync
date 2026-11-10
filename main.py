@@ -3508,6 +3508,18 @@ async def run_ic_monitor_endpoint(background_tasks: BackgroundTasks):
     return {"status": "ic monitor started"}
 
 
+@app.post("/run-ic-monitor-single")
+async def run_ic_monitor_single_endpoint(request: Request, background_tasks: BackgroundTasks):
+    from ic_monitor import run_ic_monitor_single
+    body = await request.json()
+    install_id = body.get("install_id")
+    if not install_id:
+        return {"status": "failed", "reason": "missing install_id"}
+    lookback_days = body.get("lookback_days")
+    background_tasks.add_task(run_ic_monitor_single, install_id, get_zoho_access_token, lookback_days)
+    return {"status": "ic monitor single started", "install_id": install_id, "lookback_days": lookback_days}
+
+
 @app.post("/clean-ic-notes")
 async def clean_ic_notes_endpoint(background_tasks: BackgroundTasks):
     from ic_monitor import clean_ic_notes
